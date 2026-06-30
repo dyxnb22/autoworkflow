@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from cc_loop.config import LoopConfig
-from cc_loop.git import GitError, add_worktree
+from cc_loop.git import GitError, add_worktree, capture_worktree_diff_metadata
 from cc_loop.preflight import PreflightResult, run_preflight
 from cc_loop.providers.base import ProviderRunResult, get_provider
 from cc_loop.state import (
@@ -30,6 +31,10 @@ class RunError(Exception):
 
 class PlanningError(Exception):
     """Raised when planner execution or parsing fails."""
+
+
+class ImplementingError(Exception):
+    """Raised when implementer execution fails."""
 
 
 def prepare_run(state: TaskState, state_root: Path) -> tuple[TaskState, AttemptRecord, dict[str, Path]]:
@@ -86,12 +91,17 @@ def prepare_run(state: TaskState, state_root: Path) -> tuple[TaskState, AttemptR
 
 
 def execute_run(state: TaskState, state_root: Path) -> tuple[TaskState, AttemptRecord, dict[str, Path]]:
-    """Run preflight, worktree creation, and the planner phase for one iteration."""
+    """Run preflight, worktree creation, planner, and implementer for one iteration."""
     state, attempt, artifact_paths = prepare_run(state, state_root)
 
     try:
         state = run_planning_phase(state, state_root, artifact_paths)
     except PlanningError:
+        return state, _current_attempt(state), artifact_paths
+
+    try:
+        state = run_implementer_phase(state, state_root, artifact_paths)
+    except ImplementingError:
         return state, _current_attempt(state), artifact_paths
 
     state.status = TaskStatus.STOPPED
@@ -178,7 +188,76 @@ def run_planning_phase(
         encoding="utf-8",
     )
     attempt.plan_json = plan_json
+    attempt.phase = AttemptPhase.WORKTREE_CREATED
     save_state(state, state_root)
+    return state
+
+
+def run_implementer_phase(
+    state: TaskState,
+    state_root: Path,
+    artifact_paths: dict[str, Path],
+) -> TaskState:
+    """Run the configured implementer provider and capture worktree diff metadata."""
+    attempt = _current_attempt(state)
+    if attempt.plan_json is None:
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError("plan_json is missing; planner must succeed before implementer")
+
+    config: LoopConfig = state.config
+    provider_name = config["implementer_provider"]
+    worktree = Path(attempt.worktree_path)
+    prompt = build_implementer_prompt(state, attempt.plan_json)
+
+    _write_implementer_artifacts_before(
+        artifact_paths=artifact_paths,
+        prompt=prompt,
+        provider_name=provider_name,
+    )
+
+    attempt.phase = AttemptPhase.EXECUTING
+    save_state(state, state_root)
+
+    try:
+        provider = get_provider(provider_name)
+    except ValueError as exc:
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(str(exc)) from exc
+
+    timeout_seconds = _implementer_timeout_seconds(config, provider_name)
+    try:
+        run_result = provider.run(
+            worktree_path=worktree,
+            prompt=prompt,
+            output_path=artifact_paths["implementer_raw"],
+            config=config,
+            timeout_seconds=timeout_seconds,
+        )
+    except NotImplementedError as exc:
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(str(exc)) from exc
+
+    _write_implementer_artifacts_after(artifact_paths=artifact_paths, run_result=run_result)
+    attempt.implementer_exit_code = run_result.exit_code
+
+    diff_metadata = capture_worktree_diff_metadata(
+        worktree,
+        attempt.base_commit,
+        diff_stat_path=artifact_paths["diff_stat"],
+        diff_files_path=artifact_paths["diff_files"],
+    )
+    attempt.head_commit = str(diff_metadata["head_commit"])
+    attempt.diff_stat_path = str(artifact_paths["diff_stat"])
+    save_state(state, state_root)
+
+    if run_result.timed_out:
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(f"{provider_name} implementer timed out")
+
+    if run_result.exit_code != 0:
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(f"{provider_name} implementer exited with code {run_result.exit_code}")
+
     return state
 
 
@@ -200,6 +279,30 @@ def build_planner_prompt(state: TaskState) -> str:
         f"Base commit: {state.base_commit}\n"
         f"Iteration: {state.iteration}\n"
     )
+
+
+def build_implementer_prompt(state: TaskState, plan_json: dict[str, Any]) -> str:
+    """Construct the prompt for the configured implementer provider."""
+    sections = [
+        "You are the cc-loop implementer. Apply the planned changes in this worktree checkout.",
+        "",
+        f"Task ID: {state.task_id}",
+        f"Goal: {state.goal}",
+        f"Iteration: {state.iteration}",
+        "",
+        "Implementation prompt:",
+        str(plan_json.get("prompt", "")).strip(),
+    ]
+
+    expected_changes = str(plan_json.get("expected_changes", "")).strip()
+    if expected_changes:
+        sections.extend(["", "Expected changes:", expected_changes])
+
+    acceptance_criteria = str(plan_json.get("acceptance_criteria", "")).strip()
+    if acceptance_criteria:
+        sections.extend(["", "Acceptance criteria:", acceptance_criteria])
+
+    return "\n".join(sections).strip() + "\n"
 
 
 def _write_planning_artifacts_before(
@@ -228,7 +331,36 @@ def _write_planning_artifacts_after(
         artifact_paths["plan_last_message"].write_text("", encoding="utf-8")
 
 
+def _write_implementer_artifacts_before(
+    *,
+    artifact_paths: dict[str, Path],
+    prompt: str,
+    provider_name: str,
+) -> None:
+    artifact_root = artifact_paths["implementer_prompt"].parent
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    artifact_paths["implementer_prompt"].write_text(prompt, encoding="utf-8")
+    artifact_paths["implementer_provider"].write_text(provider_name + "\n", encoding="utf-8")
+    artifact_paths["implementer_raw"].write_text("", encoding="utf-8")
+
+
+def _write_implementer_artifacts_after(
+    *,
+    artifact_paths: dict[str, Path],
+    run_result: ProviderRunResult,
+) -> None:
+    artifact_paths["implementer_provider"].write_text(run_result.provider + "\n", encoding="utf-8")
+    if not artifact_paths["implementer_raw"].exists():
+        artifact_paths["implementer_raw"].write_text("", encoding="utf-8")
+
+
 def _planner_timeout_seconds(config: LoopConfig, provider_name: str) -> int:
+    if provider_name == "cursor":
+        return config["cursor_timeout_seconds"]
+    return config["codex_timeout_seconds"]
+
+
+def _implementer_timeout_seconds(config: LoopConfig, provider_name: str) -> int:
     if provider_name == "cursor":
         return config["cursor_timeout_seconds"]
     return config["codex_timeout_seconds"]
@@ -241,6 +373,13 @@ def _current_attempt(state: TaskState) -> AttemptRecord:
 
 
 def _mark_planning_failed(state: TaskState, state_root: Path) -> None:
+    attempt = _current_attempt(state)
+    attempt.phase = AttemptPhase.FAILED
+    state.status = TaskStatus.FAILED
+    save_state(state, state_root)
+
+
+def _mark_implementer_failed(state: TaskState, state_root: Path) -> None:
     attempt = _current_attempt(state)
     attempt.phase = AttemptPhase.FAILED
     state.status = TaskStatus.FAILED
@@ -271,8 +410,8 @@ def _begin_attempt(
         review_provider=config["reviewer_provider"],
         test_command=list(config.get("test_command") or []),
         plan_raw_path=str(artifact_paths["plan_raw"]),
-        cursor_prompt_path=str(artifact_paths["cursor_prompt"]),
-        cursor_raw_path=str(artifact_paths["cursor_raw"]),
+        implementer_prompt_path=str(artifact_paths["implementer_prompt"]),
+        implementer_raw_path=str(artifact_paths["implementer_raw"]),
         test_raw_path=str(artifact_paths["test_output"]),
         diff_stat_path=str(artifact_paths["diff_stat"]),
         review_raw_path=str(artifact_paths["review_raw"]),

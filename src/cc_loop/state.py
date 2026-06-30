@@ -81,9 +81,9 @@ def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
         "plan_last_message": artifact_root / "plan.last-message.txt",
         "plan_parsed": artifact_root / "plan.parsed.json",
         "plan_provider": artifact_root / "plan.provider.txt",
-        "cursor_prompt": artifact_root / "cursor.prompt.txt",
-        "cursor_raw": artifact_root / "cursor.raw.json",
-        "cursor_provider": artifact_root / "cursor.provider.txt",
+        "implementer_prompt": artifact_root / "implementer.prompt.txt",
+        "implementer_raw": artifact_root / "implementer.raw.json",
+        "implementer_provider": artifact_root / "implementer.provider.txt",
         "test_output": artifact_root / "test.output.txt",
         "diff_stat": artifact_root / "diff.stat.txt",
         "diff_files": artifact_root / "diff.files.txt",
@@ -109,9 +109,9 @@ class AttemptRecord:
     plan_raw_path: str = ""
     plan_json: dict[str, Any] | None = None
     plan_provider: str = ""
-    cursor_prompt_path: str = ""
-    cursor_raw_path: str = ""
-    cursor_exit_code: int | None = None
+    implementer_prompt_path: str = ""
+    implementer_raw_path: str = ""
+    implementer_exit_code: int | None = None
     implementer_provider: str = ""
     test_command: list[str] = field(default_factory=list)
     test_exit_code: int | None = None
@@ -150,7 +150,17 @@ class TaskState:
         history = []
         for item in data.get("history", []):
             phase = AttemptPhase(item.get("phase", AttemptPhase.PREFLIGHT.value))
-            history.append(AttemptRecord(**{**item, "phase": phase}))
+            legacy_compat = dict(item)
+            if "implementer_prompt_path" not in legacy_compat and "cursor_prompt_path" in legacy_compat:
+                legacy_compat["implementer_prompt_path"] = legacy_compat["cursor_prompt_path"]
+            if "implementer_raw_path" not in legacy_compat and "cursor_raw_path" in legacy_compat:
+                legacy_compat["implementer_raw_path"] = legacy_compat["cursor_raw_path"]
+            if "implementer_exit_code" not in legacy_compat and "cursor_exit_code" in legacy_compat:
+                legacy_compat["implementer_exit_code"] = legacy_compat["cursor_exit_code"]
+            legacy_compat.pop("cursor_prompt_path", None)
+            legacy_compat.pop("cursor_raw_path", None)
+            legacy_compat.pop("cursor_exit_code", None)
+            history.append(AttemptRecord(**{**legacy_compat, "phase": phase}))
         return cls(
             task_id=data["task_id"],
             goal=data["goal"],

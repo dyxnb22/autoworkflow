@@ -76,9 +76,9 @@ Default state directory:
       plan.last-message.txt
       plan.parsed.json
       plan.provider.txt
-      cursor.prompt.txt
-      cursor.raw.json
-      cursor.provider.txt
+      implementer.prompt.txt
+      implementer.raw.json
+      implementer.provider.txt
       test.output.txt
       diff.stat.txt
       diff.files.txt

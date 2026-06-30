@@ -116,3 +116,60 @@ def remove_worktree(repo: Path, path: Path, *, force: bool = False) -> None:
 def prune_worktrees(repo: Path) -> None:
     """Prune stale worktree administrative data."""
     _run_git(repo, "worktree", "prune")
+
+
+def rev_parse(repo: Path, ref: str = "HEAD") -> str:
+    completed = _run_git(repo, "rev-parse", ref)
+    return completed.stdout.strip()
+
+
+def _git_output(repo: Path, *args: str) -> str:
+    completed = _run_git(repo, *args, check=False)
+    return completed.stdout
+
+
+def capture_worktree_diff_metadata(
+    repo: Path,
+    base_commit: str,
+    *,
+    diff_stat_path: Path,
+    diff_files_path: Path,
+) -> dict[str, object]:
+    """Capture porcelain status and diff summaries for later review phases."""
+    porcelain = dirty_files(repo)
+    head_commit = rev_parse(repo, "HEAD")
+
+    status_section = "\n".join(porcelain) if porcelain else "(clean)"
+    stat_sections: list[str] = []
+    file_sections: list[str] = []
+
+    for label, stat_args, name_args in (
+        ("base_commit...HEAD", ("diff", "--stat", f"{base_commit}...HEAD"), ("diff", "--name-only", f"{base_commit}...HEAD")),
+        ("working tree vs HEAD", ("diff", "--stat", "HEAD"), ("diff", "--name-only", "HEAD")),
+        ("staged vs HEAD", ("diff", "--cached", "--stat"), ("diff", "--cached", "--name-only")),
+    ):
+        stat_text = _git_output(repo, *stat_args).strip()
+        if stat_text:
+            stat_sections.append(f"## {label}\n{stat_text}")
+        name_text = _git_output(repo, *name_args).strip()
+        if name_text:
+            file_sections.append(f"## {label}\n{name_text}")
+
+    diff_stat_path.parent.mkdir(parents=True, exist_ok=True)
+    diff_stat_path.write_text(
+        f"## status --porcelain\n{status_section}\n\n" + "\n\n".join(stat_sections) + ("\n" if stat_sections else ""),
+        encoding="utf-8",
+    )
+    diff_files_path.write_text(
+        f"## status --porcelain\n{status_section}\n\n" + "\n\n".join(file_sections) + ("\n" if file_sections else ""),
+        encoding="utf-8",
+    )
+
+    has_committed_changes = bool(_git_output(repo, "rev-list", "--count", f"{base_commit}..HEAD").strip() not in {"", "0"})
+    has_changes = bool(porcelain) or has_committed_changes or bool(stat_sections)
+
+    return {
+        "has_changes": has_changes,
+        "head_commit": head_commit,
+        "porcelain": porcelain,
+    }

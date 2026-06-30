@@ -81,9 +81,9 @@ Minimum per-attempt fields:
 - `plan_raw_path`
 - `plan_json`
 - `plan_provider`
-- `cursor_prompt_path`
-- `cursor_raw_path`
-- `cursor_exit_code`
+- `implementer_prompt_path`
+- `implementer_raw_path`
+- `implementer_exit_code`
 - `implementer_provider`
 - `test_command`
 - `test_exit_code`

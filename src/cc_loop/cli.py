@@ -111,16 +111,35 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"artifacts: {artifact_paths['plan_prompt'].parent}")
 
     if state.status == TaskStatus.FAILED:
-        print("error: planner phase failed; artifacts preserved in state history", file=sys.stderr)
+        if attempt.implementer_exit_code is not None:
+            print(
+                "error: implementer phase failed; artifacts preserved in state history",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "error: planner phase failed; artifacts preserved in state history",
+                file=sys.stderr,
+            )
         return 2
 
     if attempt.plan_json is None:
         print("error: planner phase did not produce plan_json", file=sys.stderr)
         return 2
 
+    if attempt.implementer_exit_code is None:
+        print("error: implementer phase did not record implementer_exit_code", file=sys.stderr)
+        return 2
+
+    print(f"implementer_exit_code: {attempt.implementer_exit_code}")
+    print(f"implementer_provider: {attempt.implementer_provider}")
+    print(f"head_commit: {attempt.head_commit}")
+    print(f"diff_stat: {artifact_paths['diff_stat']}")
+    print(f"diff_files: {artifact_paths['diff_files']}")
+
     print(
-        "stopped after planner phase "
-        "(implementer, tests, reviewer, and merge are not implemented yet)",
+        "stopped after implementer phase "
+        "(tests, reviewer, and merge are not implemented yet)",
         file=sys.stderr,
     )
     return 0
