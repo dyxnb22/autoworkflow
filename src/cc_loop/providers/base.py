@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,24 @@ class ProviderAdapter(ABC):
     @abstractmethod
     def parse_reviewer_output(self, last_message_path: Path) -> dict[str, Any]:
         """Parse reviewer output into normalized reviewer JSON."""
+
+    @abstractmethod
+    def preflight_check_argv(self) -> list[str]:
+        """Return argv for a lightweight install/availability check."""
+
+    def preflight_check(self) -> None:
+        completed = subprocess.run(
+            self.preflight_check_argv(),
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+        )
+        if completed.returncode != 0:
+            cmd = " ".join(self.preflight_check_argv())
+            stderr = completed.stderr.strip() or completed.stdout.strip()
+            detail = f": {stderr}" if stderr else ""
+            raise RuntimeError(f"provider preflight check failed for {self.name} ({cmd}){detail}")
 
 
 PROVIDER_REGISTRY: dict[str, type[ProviderAdapter]] = {}

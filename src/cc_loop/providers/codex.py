@@ -87,6 +87,9 @@ class CodexAdapter(ProviderAdapter):
             "is_final_step": bool(data.get("is_final_step", False)),
         }
 
+    def preflight_check_argv(self) -> list[str]:
+        return ["codex", "exec", "--help"]
+
     def parse_reviewer_output(self, last_message_path: Path) -> dict[str, Any]:
         text = last_message_path.read_text(encoding="utf-8")
         data = json.loads(text)

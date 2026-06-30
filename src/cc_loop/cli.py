@@ -9,7 +9,10 @@ from pathlib import Path
 
 from cc_loop import __version__
 from cc_loop.config import merge_config
+from cc_loop.git import resolve_base_commit_if_possible
+from cc_loop.preflight import PreflightError
 from cc_loop.providers import codex, cursor  # noqa: F401 — register built-in providers
+from cc_loop.run import RunError, mark_run_stubbed, prepare_run
 from cc_loop.state import (
     DEFAULT_STATE_ROOT,
     create_initial_state,
@@ -51,12 +54,13 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     task_id = args.task_id or uuid.uuid4().hex[:12]
     config = merge_config({"base_branch": args.base_branch})
+    base_commit = resolve_base_commit_if_possible(repo, args.base_branch)
     state = create_initial_state(
         task_id=task_id,
         goal=args.goal,
         target_repo=str(repo),
         base_branch=args.base_branch,
-        base_commit="",
+        base_commit=base_commit,
         config=config,
     )
     path = save_state(state, args.state_root)
@@ -80,8 +84,37 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run(_args: argparse.Namespace) -> int:
-    print("error: `cc-loop run` is not implemented yet", file=sys.stderr)
+def cmd_run(args: argparse.Namespace) -> int:
+    task_id = _resolve_task_id(args.state_root)
+    if task_id is None:
+        print("error: no task found; run `cc-loop init` first", file=sys.stderr)
+        return 1
+
+    state = load_state(task_id, args.state_root)
+    try:
+        state, attempt, artifact_paths = prepare_run(state, args.state_root)
+    except RunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except PreflightError as exc:
+        print(f"error: preflight failed: {exc}", file=sys.stderr)
+        return 1
+
+    state = mark_run_stubbed(state, args.state_root)
+
+    print(f"task_id: {state.task_id}")
+    print(f"status: {state.status.value}")
+    print(f"iteration: {state.iteration}")
+    print(f"phase: {attempt.phase.value}")
+    print(f"base_commit: {state.base_commit}")
+    print(f"worktree_path: {attempt.worktree_path}")
+    print(f"branch: {attempt.branch}")
+    print(f"artifacts: {artifact_paths['plan_prompt'].parent}")
+    print(
+        "error: provider execution is not implemented yet "
+        f"(stopped after preflight at phase={attempt.phase.value})",
+        file=sys.stderr,
+    )
     return 2
 
 

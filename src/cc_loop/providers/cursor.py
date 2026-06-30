@@ -83,6 +83,9 @@ class CursorAdapter(ProviderAdapter):
             timed_out=timed_out,
         )
 
+    def preflight_check_argv(self) -> list[str]:
+        return ["cursor", "agent", "--help"]
+
     def parse_planner_output(self, last_message_path: Path) -> dict[str, Any]:
         raise NotImplementedError("cursor adapter does not support planner role")
 

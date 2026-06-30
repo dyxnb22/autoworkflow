@@ -44,10 +44,56 @@ def task_dir(task_id: str, state_root: Path | None = None) -> Path:
     return root / "tasks" / task_id
 
 
+def iteration_suffix(iteration: int, retry: int = 0) -> str:
+    if retry == 0:
+        return f"iter-{iteration:03d}"
+    return f"iter-{iteration:03d}-retry-{retry:02d}"
+
+
 def artifacts_dir(task_id: str, iteration: int, retry: int = 0, state_root: Path | None = None) -> Path:
     task_path = task_dir(task_id, state_root)
-    suffix = f"iter-{iteration:03d}" if retry == 0 else f"iter-{iteration:03d}-retry-{retry:02d}"
-    return task_path / "artifacts" / suffix
+    return task_path / "artifacts" / iteration_suffix(iteration, retry)
+
+
+def worktree_path(
+    task_id: str,
+    target_repo: Path,
+    iteration: int,
+    retry: int = 0,
+    worktree_root: Path | None = None,
+) -> Path:
+    from cc_loop.git import repo_label
+
+    root = worktree_root or DEFAULT_WORKTREE_ROOT
+    repo_name = repo_label(target_repo)
+    return root / repo_name / task_id / iteration_suffix(iteration, retry)
+
+
+def branch_name(task_id: str, iteration: int, retry: int = 0) -> str:
+    return f"cc-loop/{task_id}/{iteration_suffix(iteration, retry)}"
+
+
+def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
+    """Return deterministic artifact paths for one attempt."""
+    return {
+        "plan_prompt": artifact_root / "plan.prompt.txt",
+        "plan_raw": artifact_root / "plan.raw.jsonl",
+        "plan_last_message": artifact_root / "plan.last-message.txt",
+        "plan_parsed": artifact_root / "plan.parsed.json",
+        "plan_provider": artifact_root / "plan.provider.txt",
+        "cursor_prompt": artifact_root / "cursor.prompt.txt",
+        "cursor_raw": artifact_root / "cursor.raw.json",
+        "cursor_provider": artifact_root / "cursor.provider.txt",
+        "test_output": artifact_root / "test.output.txt",
+        "diff_stat": artifact_root / "diff.stat.txt",
+        "diff_files": artifact_root / "diff.files.txt",
+        "patches_dir": artifact_root / "patches",
+        "review_prompt": artifact_root / "review.prompt.txt",
+        "review_raw": artifact_root / "review.raw.jsonl",
+        "review_last_message": artifact_root / "review.last-message.txt",
+        "review_parsed": artifact_root / "review.parsed.json",
+        "review_provider": artifact_root / "review.provider.txt",
+    }
 
 
 @dataclass
