@@ -55,6 +55,42 @@ def verify_providers(providers: dict[str, str]) -> None:
             raise PreflightError(str(exc)) from exc
 
 
+def run_doctor_preflight(
+    *,
+    target_repo: str | Path,
+    base_branch: str = "main",
+    planner: str | None = None,
+    reviewer: str | None = None,
+    implementer: str | None = None,
+    test_command: list[str] | None = None,
+) -> PreflightResult:
+    """Run preflight checks without creating a task."""
+    from cc_loop.config import merge_config
+
+    overrides: dict = {"base_branch": base_branch}
+    if planner is not None:
+        overrides["planner_provider"] = planner
+    if reviewer is not None:
+        overrides["reviewer_provider"] = reviewer
+    if implementer is not None:
+        overrides["implementer_provider"] = implementer
+    if test_command is not None:
+        overrides["test_command"] = test_command
+
+    config = merge_config(overrides)
+    providers = {
+        "planner": config["planner_provider"],
+        "reviewer": config["reviewer_provider"],
+        "implementer": config["implementer_provider"],
+    }
+    return run_preflight(
+        target_repo=target_repo,
+        base_branch=base_branch,
+        providers=providers,
+        config=config,
+    )
+
+
 def run_preflight(
     *,
     target_repo: str | Path,

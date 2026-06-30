@@ -1,5 +1,7 @@
 # cc-loop v1 Technical Design
 
+> **v0.2.0 note:** External integration (Luma / subprocess consumers) is documented separately in [INTEGRATION.md](INTEGRATION.md). This file describes the v1 internal design; it remains accurate for orchestration semantics.
+
 ## Summary
 
 `cc-loop` runs a bounded local automation loop:
@@ -20,12 +22,13 @@ The workflow has three fixed roles:
 
 Each role is backed by a configured provider adapter.
 
-Initial built-in provider support for v1:
+Built-in providers:
 
 - `codex`: planner and reviewer
 - `cursor`: implementer
+- `claude-code`: planner, reviewer, and implementer
 
-The default v1 mapping is:
+The default mapping is:
 
 ```json
 {
@@ -35,7 +38,7 @@ The default v1 mapping is:
 }
 ```
 
-Future built-in adapters such as `claude-code` are in scope only if they can implement the same role contracts and safety rules. v1 should not support arbitrary shell-defined providers.
+All providers must implement the same role contracts and safety rules. Arbitrary shell-defined providers are not supported.
 
 ## State machine
 
@@ -108,11 +111,13 @@ Before the first iteration:
 2. Verify `target_repo/.git` or `git -C target_repo rev-parse --show-toplevel` succeeds.
 3. Verify `git status --porcelain` is empty.
 4. Resolve `base_branch` and `base_commit`.
-5. Verify `codex exec --help` succeeds.
-6. Verify `cursor agent --help` succeeds.
-7. Verify configured `test_command`, if present, is an argv list or a trusted command string parsed without shell.
+5. Run `preflight_check()` for each configured provider:
+   - `codex`: `codex exec --help`
+   - `cursor`: `cursor agent --help`
+   - `claude-code`: `claude --version`
+6. Verify configured `test_command`, if present, is a non-empty argv list with only non-empty strings.
 
-Provider-specific preflight checks should run only for configured providers. For example, `codex exec --help` is required only when `codex` is configured for at least one role.
+Provider preflight checks run only for providers assigned to at least one role.
 
 If the repo is dirty, stop with a clear message. Do not stash automatically in v1.
 
@@ -221,6 +226,41 @@ Optional permissions should be conservative:
 
 Do not use `--no-interactive`; it is not a current Cursor Agent option.
 
+## Default claude-code call
+
+For planner and reviewer roles (print-only, no file edits):
+
+```python
+args = [
+    "claude",
+    "--dangerously-skip-permissions",
+    "--print",
+    "-p", prompt_text,
+]
+# run with cwd=worktree_path; capture stdout as last-message artifact
+```
+
+For implementer role (makes direct edits in the worktree):
+
+```python
+args = [
+    "claude",
+    "--dangerously-skip-permissions",
+    "-p", prompt_text,
+]
+# run with cwd=worktree_path
+```
+
+Optional model:
+
+```python
+args.extend(["--model", config["claude_code_model"]])
+```
+
+Parsing rule for planner/reviewer: extract the first JSON object from stdout, stripping fenced code blocks if present.
+
+Preflight check: `claude --version`.
+
 Other providers should follow their own adapters, but they must still produce bounded artifacts and normalized attempt metadata.
 
 ## Process timeout handling
@@ -248,7 +288,7 @@ Default flow:
 git -C target_repo worktree add -b cc-loop/<task-id>/iter-001 <worktree_path> <base_commit>
 ```
 
-After Cursor edits:
+After implementer edits:
 
 ```bash
 git -C worktree_path status --porcelain
@@ -320,43 +360,44 @@ Any unknown decision is treated as `reject`.
 
 ```json
 {
-  "max_iterations": 10,
-  "max_retries_per_step": 2,
-  "codex_timeout_seconds": 300,
-  "cursor_timeout_seconds": 900,
-  "test_timeout_seconds": 600,
   "planner_provider": "codex",
   "reviewer_provider": "codex",
   "implementer_provider": "cursor",
-  "codex_model": "",
-  "cursor_model": "",
-  "base_branch": "main",
+  "codex_timeout_seconds": 300,
+  "cursor_timeout_seconds": 900,
+  "claude_code_timeout_seconds": 600,
+  "test_timeout_seconds": 600,
+  "max_iterations": 10,
+  "max_retries_per_step": 2,
   "auto_merge": true,
   "allow_merge_without_tests": false,
   "max_review_patch_bytes": 60000,
+  "codex_model": "",
+  "cursor_model": "",
+  "claude_code_model": "",
+  "base_branch": "main",
   "cursor_force": false,
   "cursor_sandbox": ""
 }
 ```
 
-## v1 implementation milestones
+## v1 implementation status — complete
 
-1. State file and artifact writer.
-2. Preflight checks.
-3. Provider adapter interface and built-in provider registry.
-4. Worktree creation and cleanup commands.
-5. Default Codex planner call with JSON parsing.
-6. Default Cursor implementation call with timeout-safe process handling.
-7. Test runner.
-8. Bounded diff collector.
-9. Default Codex reviewer call.
-10. Merge/retry/stop state transitions.
-11. `status` and `resume` commands.
+1. ✅ State file and artifact writer.
+2. ✅ Preflight checks.
+3. ✅ Provider adapter interface and built-in provider registry.
+4. ✅ Worktree creation and cleanup commands.
+5. ✅ Default Codex planner call with JSON parsing.
+6. ✅ Default Cursor implementer call with timeout-safe process handling.
+7. ✅ Test runner.
+8. ✅ Bounded diff collector.
+9. ✅ Default Codex reviewer call.
+10. ✅ Merge/retry/stop state transitions.
+11. ✅ `status` and `resume` commands.
+12. ✅ `auto` command with macOS notifications and retry-exhaustion detection.
+13. ✅ `claude-code` adapter for planner, reviewer, and implementer roles.
+14. ✅ `cc-loop init` config flags (test-command, provider selection, merge policy, iteration limits).
 
-## Open decisions
+## v1.1 integration contract (v0.2.0)
 
-- Whether a future version should support repo-local state/worktree overrides in addition to the v1 central `~/.cc-loop` default.
-- Whether `cc-loop init` should create a git repo for this workflow project itself.
-- Whether review should use `codex exec` with a custom JSON schema file once the schema stabilizes.
-- Whether retry attempts should branch from the failed attempt or restart from the original base commit. v1 should restart from the base commit for cleaner review.
-- Which additional built-in providers beyond `codex` and `cursor` are stable enough to support in the first public iteration.
+See [INTEGRATION.md](INTEGRATION.md) for the stable CLI subset (`doctor`, `list`, `status --json`, `auto --detach`, `--task-id`, `CC_LOOP_STATE_ROOT`) and JSON schemas.

@@ -23,13 +23,13 @@ The workflow roles are fixed, but the provider behind each role is configurable.
 - `reviewer_provider`
 - `implementer_provider`
 
-The initial built-in providers should be conservative and explicit:
+Built-in providers:
 
-- `codex`: suitable for planner and reviewer roles in v1
-- `cursor`: suitable for implementer role in v1
-- future adapters such as `claude-code` can be added behind the same role interface
+- `codex`: planner and reviewer roles
+- `cursor`: implementer role
+- `claude-code`: planner, reviewer, and implementer roles
 
-The default v1 mapping should remain:
+The default v1 mapping:
 
 - `planner_provider = codex`
 - `reviewer_provider = codex`
@@ -41,7 +41,8 @@ The default v1 mapping should remain:
 
 The first useful version should be a conservative local loop:
 
-- initialize a task state file from a goal and target repo
+- initialize a task state file from a goal and target repo (`cc-loop init`)
+- accept provider, test command, and merge policy overrides at init time via CLI flags
 - verify the target repo is a git repo and clean before starting
 - create one isolated git worktree per iteration or retry
 - call the configured planner provider in non-interactive mode for planning
@@ -51,6 +52,8 @@ The first useful version should be a conservative local loop:
 - automatically merge only when review approves and tests pass
 - persist enough state to resume or debug a failed run
 - leave rejected or failed worktrees inspectable unless explicitly cleaned
+- `cc-loop resume` to continue after interruption without corrupting history
+- `cc-loop auto` to run unattended until the task is done, with macOS notifications
 
 ## Required state
 
@@ -120,7 +123,19 @@ cursor agent -p --output-format json --trust --workspace /path/to/worktree "prom
 
 `--output-format json` is valid only with `-p/--print`. `--no-interactive` is not part of the current Cursor CLI.
 
-Future built-in providers such as `claude-code` should be added only when `cc-loop` can normalize their prompts, outputs, timeout handling, and result parsing behind the same role contracts.
+Default claude-code adapter:
+
+```bash
+# planner / reviewer (print-only):
+claude --dangerously-skip-permissions --print [-m model] -p "prompt text"
+
+# implementer (makes direct edits in worktree):
+claude --dangerously-skip-permissions [-m model] -p "prompt text"
+```
+
+Planner/reviewer: JSON is extracted from stdout (fenced code block or bare object). Preflight: `claude --version`.
+
+All built-in providers must normalize their prompts, outputs, timeout handling, and result parsing behind the same role contracts.
 
 ## Safety rules
 

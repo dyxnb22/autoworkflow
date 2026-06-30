@@ -8,6 +8,13 @@ from typing import Any
 
 from cc_loop.config import LoopConfig
 from cc_loop.diff import collect_bounded_review_patches, read_diff_stat_summary
+from cc_loop.failure import (
+    FailureReport,
+    apply_report_to_attempt,
+    classify_merge_failure,
+    classify_provider_failure,
+    write_failure_report,
+)
 from cc_loop.git import (
     GitError,
     GitCommandError,
@@ -18,6 +25,7 @@ from cc_loop.git import (
 )
 from cc_loop.preflight import PreflightResult, run_preflight
 from cc_loop.providers.base import ProviderRunResult, get_provider
+from cc_loop.repair_prompts import build_repair_prompt
 from cc_loop.state import (
     DEFAULT_WORKTREE_ROOT,
     AttemptPhase,
@@ -115,6 +123,50 @@ def execute_resume(state: TaskState, state_root: Path) -> tuple[TaskState, Attem
     state.status = TaskStatus.RUNNING
     save_state(state, state_root)
     return _run_from_phase(state, state_root, attempt, artifact_paths, start_phase=attempt.phase)
+
+
+def execute_repair_recovery(
+    state: TaskState,
+    state_root: Path,
+    report: FailureReport,
+) -> tuple[TaskState, AttemptRecord, dict[str, Path]]:
+    """Run implementer repair and continue test → review → finalize on the same attempt."""
+    attempt = _current_attempt(state)
+    artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
+    repair_label = f"implementer_repair:{report.failure_type.value}"
+    if repair_label not in report.attempted_repairs:
+        report.attempted_repairs.append(repair_label)
+    attempt.attempted_repairs = list(report.attempted_repairs)
+    apply_report_to_attempt(attempt, report)
+    write_failure_report(artifact_paths["plan_prompt"].parent, report)
+    _reset_attempt_downstream_for_repair(attempt)
+    state.status = TaskStatus.RUNNING
+    save_state(state, state_root)
+
+    prompt = build_repair_prompt(state=state, attempt=attempt, report=report)
+    state = _run_implementer_with_prompt(state, state_root, artifact_paths, prompt)
+    attempt = _current_attempt(state)
+    return _run_from_phase(
+        state,
+        state_root,
+        attempt,
+        artifact_paths,
+        start_phase=AttemptPhase.TESTING,
+    )
+
+
+def soft_reset_provider_failure(
+    state: TaskState,
+    state_root: Path,
+    *,
+    phase: AttemptPhase,
+) -> TaskState:
+    """Move a failed provider attempt back to STOPPED for auto recovery."""
+    attempt = _current_attempt(state)
+    state.status = TaskStatus.STOPPED
+    attempt.phase = phase
+    save_state(state, state_root)
+    return state
 
 
 def prepare_run(state: TaskState, state_root: Path) -> tuple[TaskState, AttemptRecord, dict[str, Path]]:
@@ -257,6 +309,7 @@ def run_planning_phase(
         raise PlanningError(str(exc)) from exc
 
     timeout_seconds = _planner_timeout_seconds(config, provider_name)
+    print_only = provider_name == "claude-code"
     try:
         run_result = provider.run(
             worktree_path=worktree,
@@ -265,6 +318,7 @@ def run_planning_phase(
             config=config,
             timeout_seconds=timeout_seconds,
             raw_output_path=artifact_paths["plan_raw"],
+            print_only=print_only,
         )
     except NotImplementedError as exc:
         _mark_planning_failed(state, state_root)
@@ -482,6 +536,7 @@ def run_review_phase(
         raise ReviewError(str(exc)) from exc
 
     timeout_seconds = _reviewer_timeout_seconds(config, provider_name)
+    print_only = provider_name == "claude-code"
     try:
         run_result = provider.run(
             worktree_path=worktree,
@@ -490,6 +545,7 @@ def run_review_phase(
             config=config,
             timeout_seconds=timeout_seconds,
             raw_output_path=artifact_paths["review_raw"],
+            print_only=print_only,
         )
     except NotImplementedError as exc:
         _mark_review_failed(state, state_root)
@@ -590,13 +646,19 @@ def _run_finalize_phase(
             encoding="utf-8",
         )
     except GitCommandError as exc:
-        attempt.merge_error = str(exc)
+        report = classify_merge_failure(exc)
+        apply_report_to_attempt(attempt, report)
+        write_failure_report(artifact_paths["plan_prompt"].parent, report)
+        attempt.merge_error = report.message
         artifact_paths["merge_output"].write_text(str(exc) + "\n", encoding="utf-8")
         state.status = TaskStatus.STOPPED
         save_state(state, state_root)
         return state, attempt, artifact_paths
     except GitError as exc:
-        attempt.merge_error = str(exc)
+        report = classify_merge_failure(exc)
+        apply_report_to_attempt(attempt, report)
+        write_failure_report(artifact_paths["plan_prompt"].parent, report)
+        attempt.merge_error = report.message
         artifact_paths["merge_output"].write_text(str(exc) + "\n", encoding="utf-8")
         state.status = TaskStatus.STOPPED
         save_state(state, state_root)
@@ -809,6 +871,86 @@ def _attempt_needs_continuation(attempt: AttemptRecord) -> bool:
     }
 
 
+def _reset_attempt_downstream_for_repair(attempt: AttemptRecord) -> None:
+    attempt.implementer_exit_code = None
+    attempt.test_status = ""
+    attempt.test_exit_code = None
+    attempt.decision = ""
+    attempt.review_json = None
+    attempt.merge_error = ""
+
+
+def _run_implementer_with_prompt(
+    state: TaskState,
+    state_root: Path,
+    artifact_paths: dict[str, Path],
+    prompt: str,
+) -> TaskState:
+    attempt = _current_attempt(state)
+    config: LoopConfig = state.config
+    provider_name = config["implementer_provider"]
+    worktree = Path(attempt.worktree_path)
+
+    _write_implementer_artifacts_before(
+        artifact_paths=artifact_paths,
+        prompt=prompt,
+        provider_name=provider_name,
+    )
+    attempt.phase = AttemptPhase.EXECUTING
+    save_state(state, state_root)
+
+    provider = get_provider(provider_name)
+    timeout_seconds = _implementer_timeout_seconds(config, provider_name)
+    run_result = provider.run(
+        worktree_path=worktree,
+        prompt=prompt,
+        output_path=artifact_paths["implementer_raw"],
+        config=config,
+        timeout_seconds=timeout_seconds,
+    )
+    _write_implementer_artifacts_after(artifact_paths=artifact_paths, run_result=run_result)
+    attempt.implementer_exit_code = run_result.exit_code
+    attempt.implementer_provider = provider_name
+
+    diff_metadata = capture_worktree_diff_metadata(
+        worktree,
+        attempt.base_commit,
+        diff_stat_path=artifact_paths["diff_stat"],
+        diff_files_path=artifact_paths["diff_files"],
+    )
+    attempt.head_commit = str(diff_metadata["head_commit"])
+    attempt.diff_stat_path = str(artifact_paths["diff_stat"])
+    save_state(state, state_root)
+
+    if run_result.timed_out:
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(f"{provider_name} implementer timed out during repair")
+
+    if run_result.exit_code != 0:
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(
+            f"{provider_name} implementer exited with code {run_result.exit_code} during repair"
+        )
+    return state
+
+
+def classify_provider_exception(
+    exc: BaseException,
+    *,
+    phase: str,
+    provider: str,
+) -> FailureReport:
+    message = str(exc)
+    timed_out = "timed out" in message.lower()
+    return classify_provider_failure(
+        phase=phase,
+        provider=provider,
+        exit_code=None,
+        timed_out=timed_out,
+        parse_error=message if "parse failed" in message.lower() else "",
+    )
+
+
 def _write_planning_artifacts_before(
     *,
     artifact_paths: dict[str, Path],
@@ -858,22 +1000,24 @@ def _write_implementer_artifacts_after(
         artifact_paths["implementer_raw"].write_text("", encoding="utf-8")
 
 
-def _planner_timeout_seconds(config: LoopConfig, provider_name: str) -> int:
+def _provider_timeout_seconds(config: LoopConfig, provider_name: str) -> int:
     if provider_name == "cursor":
         return config["cursor_timeout_seconds"]
+    if provider_name == "claude-code":
+        return config["claude_code_timeout_seconds"]
     return config["codex_timeout_seconds"]
+
+
+def _planner_timeout_seconds(config: LoopConfig, provider_name: str) -> int:
+    return _provider_timeout_seconds(config, provider_name)
 
 
 def _implementer_timeout_seconds(config: LoopConfig, provider_name: str) -> int:
-    if provider_name == "cursor":
-        return config["cursor_timeout_seconds"]
-    return config["codex_timeout_seconds"]
+    return _provider_timeout_seconds(config, provider_name)
 
 
 def _reviewer_timeout_seconds(config: LoopConfig, provider_name: str) -> int:
-    if provider_name == "cursor":
-        return config["cursor_timeout_seconds"]
-    return config["codex_timeout_seconds"]
+    return _provider_timeout_seconds(config, provider_name)
 
 
 def _current_attempt(state: TaskState) -> AttemptRecord:

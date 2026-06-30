@@ -26,6 +26,7 @@ class FakePlanner(ProviderAdapter):
         config: LoopConfig,
         timeout_seconds: int,
         raw_output_path: Path | None = None,
+        print_only: bool = False,
     ) -> ProviderRunResult:
         payload = {
             "prompt": "Create hello.txt with contents hello",
@@ -64,6 +65,7 @@ class FakeImplementer(ProviderAdapter):
         config: LoopConfig,
         timeout_seconds: int,
         raw_output_path: Path | None = None,
+        print_only: bool = False,
     ) -> ProviderRunResult:
         (worktree_path / "hello.txt").write_text("hello\n", encoding="utf-8")
         output_path.write_text('{"result":"ok"}\n', encoding="utf-8")
@@ -97,6 +99,7 @@ class FakeReviewer(ProviderAdapter):
         config: LoopConfig,
         timeout_seconds: int,
         raw_output_path: Path | None = None,
+        print_only: bool = False,
     ) -> ProviderRunResult:
         payload = {
             "decision": self.decision,

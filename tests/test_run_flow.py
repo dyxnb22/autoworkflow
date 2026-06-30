@@ -179,9 +179,10 @@ class RunFlowTests(unittest.TestCase):
 
         self.assertEqual(state.status, TaskStatus.STOPPED)
         self.assertEqual(attempt.phase, AttemptPhase.APPROVED)
-        self.assertIn("merge into base branch failed", attempt.merge_error)
+        self.assertEqual(attempt.failure_type, "merge_conflict")
+        self.assertEqual(attempt.recovery_disposition, "recoverable")
         self.assertTrue(paths["merge_output"].is_file())
-        self.assertIn("merge into base branch failed", paths["merge_output"].read_text(encoding="utf-8"))
+        self.assertTrue((paths["plan_prompt"].parent / "failure.report.json").is_file())
 
 
 if __name__ == "__main__":

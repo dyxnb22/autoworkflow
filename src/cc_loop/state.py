@@ -126,6 +126,13 @@ class AttemptRecord:
     decision: str = ""
     merge_error: str = ""
     merge_output_path: str = ""
+    failure_type: str = ""
+    recovery_disposition: str = ""
+    stop_reason: str = ""
+    attempted_repairs: list[str] = field(default_factory=list)
+    recovery_retry_count: int = 0
+    failure_details: dict[str, Any] = field(default_factory=dict)
+    merge_retry_count: int = 0
 
 
 @dataclass
@@ -140,6 +147,7 @@ class TaskState:
     config: LoopConfig
     history: list[AttemptRecord] = field(default_factory=list)
     providers: dict[str, str] = field(default_factory=dict)
+    schema_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -176,6 +184,7 @@ class TaskState:
             config=merge_config(data.get("config")),
             history=history,
             providers=data.get("providers", {}),
+            schema_version=data.get("schema_version", 1),
         )
 
 
@@ -224,4 +233,5 @@ def create_initial_state(
             "reviewer": merged["reviewer_provider"],
             "implementer": merged["implementer_provider"],
         },
+        schema_version=1,
     )

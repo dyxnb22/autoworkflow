@@ -53,6 +53,7 @@ class CursorAdapter(ProviderAdapter):
         config: LoopConfig,
         timeout_seconds: int,
         raw_output_path: Path | None = None,
+        print_only: bool = False,
     ) -> ProviderRunResult:
         args = self.build_args(
             worktree_path=worktree_path,

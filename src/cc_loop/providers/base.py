@@ -47,6 +47,7 @@ class ProviderAdapter(ABC):
         config: LoopConfig,
         timeout_seconds: int,
         raw_output_path: Path | None = None,
+        print_only: bool = False,
     ) -> ProviderRunResult:
         """Execute the provider and capture raw output artifacts."""
 

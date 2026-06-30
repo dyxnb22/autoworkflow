@@ -2,7 +2,7 @@
 
 Personal automation workflows for local AI coding agents.
 
-The first planned tool is `cc-loop`: a command-line orchestrator that assigns planning, review, and implementation roles to configurable local agents while the local script manages state, git isolation, tests, retries, and recovery.
+The primary tool is `cc-loop`: a command-line orchestrator that assigns planning, review, and implementation roles to configurable local agents while the local script manages state, git isolation, tests, retries, and recovery.
 
 This repository is for the workflow tooling itself. It is not part of DeckBridge and should not document DeckBridge features as implemented here.
 
@@ -11,7 +11,7 @@ This repository is for the workflow tooling itself. It is not part of DeckBridge
 `cc-loop` is a small local coordinator, not a third coding agent.
 
 - `planner`, `reviewer`, and `implementer` are fixed workflow roles.
-- Each role is backed by a configurable provider such as `codex`, `cursor`, or a future `claude-code` adapter.
+- Each role is backed by a configurable provider: `codex`, `cursor`, or `claude-code`.
 - `cc-loop` owns orchestration, state, prompts, subprocess calls, worktrees, test gates, and audit artifacts.
 
 The initial default setup is:
@@ -31,13 +31,13 @@ The design goal is a reliable personal loop:
 
 ## Current status
 
-Status: v1 implementation in progress.
+Status: **v0.3 recoverable failure handling** (package 0.3.0).
 
-Implemented:
+v1 core loop + v0.2.0 integration contract + v0.3 auto recovery (see [RECOVERY.md](docs/RECOVERY.md)).
 
 - task initialization, state persistence, and artifact layout under `~/.cc-loop`
 - preflight checks including dirty-repo blocking
-- configurable provider adapters (`codex`, `cursor`) for planner, implementer, and reviewer roles
+- configurable provider adapters (`codex`, `cursor`, `claude-code`) for planner, implementer, and reviewer roles
 - isolated git worktree per iteration/retry
 - planner and implementer execution with timeout-safe process groups
 - configured `test_command` execution with pass/fail/skipped gating
@@ -46,21 +46,52 @@ Implemented:
 - auto-merge when tests pass (or are explicitly allowed to be skipped), review approves, and git merge succeeds
 - retry from base commit after reviewer reject
 - `cc-loop resume` for stopped, interrupted, or in-progress attempts
+- `cc-loop auto` for fully unattended execution with macOS notifications
 - `cc-loop status` with phase, decision, artifacts, and next-action hints
+- **v0.2.0:** `--task-id` on operational commands, `list`, `status --json`, `doctor`, `auto --detach`, `CC_LOOP_STATE_ROOT`, init model/cursor flags
 
-Design references:
+References:
 
+- [Integration contract](docs/INTEGRATION.md)
+- [Exit codes](docs/EXIT_CODES.md)
 - [Project plan](docs/PROJECT_PLAN.md)
 - [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
+- [Debugging guide](docs/DEBUGGING.md)
+- [Changelog](CHANGELOG.md)
 
 ## Command shape
 
 ```bash
-cc-loop init --goal "Implement the requested workflow" --repo /path/to/repo
-cc-loop run
-cc-loop resume
-cc-loop status
+# Initialize — config flags are optional
+cc-loop init \
+  --goal "Implement the requested workflow" \
+  --repo /path/to/repo \
+  --task-id my-task \
+  --test-command pytest tests/ \
+  --planner claude-code \
+  --reviewer claude-code \
+  --implementer claude-code \
+  --claude-code-model sonnet
+
+cc-loop doctor --repo /path/to/repo
+cc-loop list --json
+cc-loop run --task-id my-task
+cc-loop resume --task-id my-task
+cc-loop auto --detach --task-id my-task
+cc-loop status --task-id my-task --json
 ```
+
+Set `CC_LOOP_STATE_ROOT` to override the default `~/.cc-loop` state directory without passing `--state-root` on every command.
+
+Global flags such as `--state-root` must appear **before** the subcommand, e.g. `cc-loop --state-root PATH list --json`.
+
+### Provider reference
+
+| Provider | Roles | Notes |
+|---|---|---|
+| `codex` | planner, reviewer | `codex exec` CLI; JSON output |
+| `cursor` | implementer | `cursor agent` CLI; edits in worktree |
+| `claude-code` | planner, reviewer, implementer | `claude` CLI; `--print` for planning/review, direct edits for implementation |
 
 ## v1 non-goals
 

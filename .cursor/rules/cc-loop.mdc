@@ -1,0 +1,45 @@
+---
+description: cc-loop v0.2.0 — local agent orchestrator (Python 3.11+)
+globs:
+  - "src/cc_loop/**/*.py"
+  - "tests/**/*.py"
+alwaysApply: true
+---
+
+# cc-loop
+
+Orchestrator only — not a coding agent. Loop: `state → planner → worktree → implementer → tests → reviewer → merge/retry/stop`.
+
+**Version:** 0.3.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md)
+
+## Tests
+
+```bash
+python -m pytest tests/ -q
+```
+
+Real git in `TempEnv`; do not mock git. Contract tests: `tests/test_cli_contract.py`.
+
+## Layout (new/changed in v0.2.0)
+
+`inspect.py` · `list_tasks.py` · `detach.py` · `failure.py` · `recovery.py` · `repair_prompts.py`
+
+## CLI surface (do not break without INTEGRATION.md update)
+
+`init` `doctor` `list` `status --json` `auto --detach` · `--task-id` on run/resume/status/auto · `CC_LOOP_STATE_ROOT`
+
+Global `--state-root` must precede subcommand.
+
+## Invariants
+
+- `shell=False`; never `pkill -f`
+- `os.killpg` for timeout cleanup
+- No merge on failed/skipped tests (unless `allow_merge_without_tests`)
+- Never switch user's main checkout
+- Dirty repo blocks run; bounded `max_review_patch_bytes` for reviewer
+- `claude-code` planner/reviewer: `print_only=True` in `run.py`
+- Persist raw provider output even on parse failure
+
+## Provider change checklist
+
+`providers/<name>.py` → `config.py` timeout/model → `run.py:_provider_timeout_seconds` → import in `cli.py` → tests
