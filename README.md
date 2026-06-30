@@ -1,0 +1,70 @@
+# autoworkflow
+
+Personal automation workflows for local AI coding agents.
+
+The first planned tool is `cc-loop`: a command-line orchestrator that assigns planning, review, and implementation roles to configurable local agents while the local script manages state, git isolation, tests, retries, and recovery.
+
+This repository is for the workflow tooling itself. It is not part of DeckBridge and should not document DeckBridge features as implemented here.
+
+## cc-loop positioning
+
+`cc-loop` is a small local coordinator, not a third coding agent.
+
+- `planner`, `reviewer`, and `implementer` are fixed workflow roles.
+- Each role is backed by a configurable provider such as `codex`, `cursor`, or a future `claude-code` adapter.
+- `cc-loop` owns orchestration, state, prompts, subprocess calls, worktrees, test gates, and audit artifacts.
+
+The initial default setup is:
+
+- `planner = codex`
+- `reviewer = codex`
+- `implementer = cursor`
+
+The design goal is a reliable personal loop:
+
+1. The configured planner analyzes the target repo and produces a bounded implementation prompt.
+2. `cc-loop` creates an isolated git worktree for the attempt.
+3. The configured implementer runs headlessly in that worktree and makes code changes.
+4. `cc-loop` runs configured tests and gathers bounded diff context.
+5. The configured reviewer reviews the result.
+6. `cc-loop` either merges, retries, stops, or leaves the worktree for manual inspection.
+
+## Current status
+
+Status: planning/design.
+
+No runnable `cc-loop` implementation is committed yet. The v1 design intentionally corrects several blockers from the initial sketch:
+
+- The default Codex adapter uses `codex exec`, not `codex -p`.
+- The default Cursor adapter uses `cursor agent -p --output-format json --trust`.
+- Subprocess calls must use argv lists with `shell=False`.
+- Git worktrees are the default isolation mechanism.
+- A dirty target repo blocks startup by default.
+- Failed tests block automatic merge by default.
+- Timeout cleanup must terminate only the process started by the current run.
+
+## Planned command shape
+
+```bash
+cc-loop init --goal "Implement the requested workflow" --repo /path/to/repo
+cc-loop run
+cc-loop resume
+cc-loop status
+```
+
+The first implementation can be a single Python script before being packaged as an installable CLI.
+
+## Design docs
+
+- [Project plan](docs/PROJECT_PLAN.md)
+- [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
+
+## v1 non-goals
+
+- No cloud coordinator.
+- No multi-user service.
+- No user-defined arbitrary shell provider runner in v1.
+- No direct edits in the user's main working tree.
+- No automatic merge when tests fail.
+- No global process killing such as `pkill -f`.
+- No attempt to make planner/reviewer and implementer providers talk to each other directly.
