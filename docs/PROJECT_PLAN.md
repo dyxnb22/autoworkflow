@@ -87,6 +87,7 @@ Minimum per-attempt fields:
 - `implementer_provider`
 - `test_command`
 - `test_exit_code`
+- `test_status`
 - `test_raw_path`
 - `diff_stat_path`
 - `diff_patch_paths`
@@ -94,6 +95,8 @@ Minimum per-attempt fields:
 - `review_json`
 - `review_provider`
 - `decision`
+- `merge_error`
+- `merge_output_path`
 
 Raw model output should be stored as artifacts, even when JSON parsing fails.
 
@@ -149,9 +152,10 @@ Default auto-merge requirements:
 - The implementer command exits successfully.
 - Test command exits `0`, unless tests are explicitly disabled.
 - The reviewer returns `approve`.
-- The worktree branch is still based on the expected base commit or can be fast-forward/cleanly merged.
+- The worktree branch can be merged into the resolved `base_branch` without switching the user's main checkout to some other branch.
 
 If any requirement fails, `cc-loop` should stop, retry, or leave the branch for manual inspection according to config.
+Merge failures should persist concrete diagnostics in deterministic artifacts so `status` and `resume` have something actionable to point at.
 
 ## Out of scope for v1
 

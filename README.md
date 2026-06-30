@@ -31,19 +31,29 @@ The design goal is a reliable personal loop:
 
 ## Current status
 
-Status: planning/design.
+Status: v1 implementation in progress.
 
-No runnable `cc-loop` implementation is committed yet. The v1 design intentionally corrects several blockers from the initial sketch:
+Implemented:
 
-- The default Codex adapter uses `codex exec`, not `codex -p`.
-- The default Cursor adapter uses `cursor agent -p --output-format json --trust`.
-- Subprocess calls must use argv lists with `shell=False`.
-- Git worktrees are the default isolation mechanism.
-- A dirty target repo blocks startup by default.
-- Failed tests block automatic merge by default.
-- Timeout cleanup must terminate only the process started by the current run.
+- task initialization, state persistence, and artifact layout under `~/.cc-loop`
+- preflight checks including dirty-repo blocking
+- configurable provider adapters (`codex`, `cursor`) for planner, implementer, and reviewer roles
+- isolated git worktree per iteration/retry
+- planner and implementer execution with timeout-safe process groups
+- configured `test_command` execution with pass/fail/skipped gating
+- bounded diff collection for reviewer context
+- reviewer phase with normalized `approve` / `reject` / `stop` decisions
+- auto-merge when tests pass (or are explicitly allowed to be skipped), review approves, and git merge succeeds
+- retry from base commit after reviewer reject
+- `cc-loop resume` for stopped, interrupted, or in-progress attempts
+- `cc-loop status` with phase, decision, artifacts, and next-action hints
 
-## Planned command shape
+Design references:
+
+- [Project plan](docs/PROJECT_PLAN.md)
+- [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
+
+## Command shape
 
 ```bash
 cc-loop init --goal "Implement the requested workflow" --repo /path/to/repo
@@ -51,13 +61,6 @@ cc-loop run
 cc-loop resume
 cc-loop status
 ```
-
-The first implementation can be a single Python script before being packaged as an installable CLI.
-
-## Design docs
-
-- [Project plan](docs/PROJECT_PLAN.md)
-- [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
 
 ## v1 non-goals
 

@@ -93,6 +93,7 @@ def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
         "review_last_message": artifact_root / "review.last-message.txt",
         "review_parsed": artifact_root / "review.parsed.json",
         "review_provider": artifact_root / "review.provider.txt",
+        "merge_output": artifact_root / "merge.output.txt",
     }
 
 
@@ -115,6 +116,7 @@ class AttemptRecord:
     implementer_provider: str = ""
     test_command: list[str] = field(default_factory=list)
     test_exit_code: int | None = None
+    test_status: str = ""
     test_raw_path: str = ""
     diff_stat_path: str = ""
     diff_patch_paths: list[str] = field(default_factory=list)
@@ -122,6 +124,8 @@ class AttemptRecord:
     review_json: dict[str, Any] | None = None
     review_provider: str = ""
     decision: str = ""
+    merge_error: str = ""
+    merge_output_path: str = ""
 
 
 @dataclass

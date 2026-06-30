@@ -88,6 +88,7 @@ Default state directory:
       review.last-message.txt
       review.parsed.json
       review.provider.txt
+      merge.output.txt
 ```
 
 Default worktree directory:
@@ -258,10 +259,11 @@ git -C worktree_path commit -m "cc-loop: iter 001"
 After approval and passing tests:
 
 ```bash
-git -C target_repo merge --no-ff cc-loop/<task-id>/iter-001
+git -C <base-branch-checkout> merge --no-ff cc-loop/<task-id>/iter-001
 ```
 
-The main checkout remains on its original branch throughout implementation.
+The merge target is the resolved `base_branch`. If the user's main checkout is already on that branch, merge there. Otherwise, create an ephemeral worktree for the base branch and merge there so the main checkout stays on its original branch.
+If the merge fails, persist diagnostics in `merge.output.txt` and leave the attempt resumable.
 
 ## Test gate
 

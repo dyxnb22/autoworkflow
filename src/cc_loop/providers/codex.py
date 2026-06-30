@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from cc_loop.config import LoopConfig
+from cc_loop.subprocess_util import run_with_timeout
 from cc_loop.providers.base import ProviderAdapter, ProviderRunResult, register_provider
 
 
@@ -57,29 +57,21 @@ class CodexAdapter(ProviderAdapter):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if raw_output_path is not None:
             raw_output_path.parent.mkdir(parents=True, exist_ok=True)
-        timed_out = False
-        try:
-            completed = subprocess.run(
-                args,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=timeout_seconds,
-                shell=False,
-                check=False,
-            )
-            exit_code = completed.returncode
-            if raw_output_path is not None:
-                raw_output_path.write_text(completed.stdout, encoding="utf-8")
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            exit_code = -1
+
+        result = run_with_timeout(
+            args,
+            input=prompt,
+            timeout_seconds=timeout_seconds,
+            capture_output=True,
+        )
+        if raw_output_path is not None:
+            raw_output_path.write_text(result.stdout, encoding="utf-8")
 
         return ProviderRunResult(
             provider=self.name,
-            exit_code=exit_code,
+            exit_code=result.returncode,
             raw_artifact_path=raw_output_path or output_path,
-            timed_out=timed_out,
+            timed_out=result.timed_out,
         )
 
     def parse_planner_output(self, last_message_path: Path) -> dict[str, Any]:

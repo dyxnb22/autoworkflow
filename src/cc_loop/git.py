@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 
 class GitError(Exception):
     """Raised when a git operation fails or preconditions are not met."""
+
+
+@dataclass(frozen=True)
+class GitCommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    args: tuple[str, ...]
+
+
+class GitCommandError(GitError):
+    """Raised when a git command fails with captured stdout/stderr."""
+
+    def __init__(self, message: str, *, result: GitCommandResult) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 def _run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -22,6 +39,16 @@ def _run_git(repo: Path, *args: str, check: bool = True) -> subprocess.Completed
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise GitError(stderr or f"git {' '.join(args)} failed")
     return completed
+
+
+def _run_git_detailed(repo: Path, *args: str) -> GitCommandResult:
+    completed = _run_git(repo, *args, check=False)
+    return GitCommandResult(
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        args=args,
+    )
 
 
 def resolve_repo_path(path: Path) -> Path:
@@ -173,3 +200,135 @@ def capture_worktree_diff_metadata(
         "head_commit": head_commit,
         "porcelain": porcelain,
     }
+
+
+def commit_worktree_changes(worktree: Path, message: str) -> str | None:
+    """Stage and commit all worktree changes when dirty; return new HEAD or None."""
+    if is_clean(worktree):
+        return rev_parse(worktree, "HEAD")
+    _run_git(worktree, "add", "-A")
+    _run_git(worktree, "commit", "-m", message)
+    return rev_parse(worktree, "HEAD")
+
+
+def current_branch(repo: Path) -> str:
+    """Return the short branch name for ``HEAD``, or ``HEAD`` when detached."""
+    completed = _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    return completed.stdout.strip()
+
+
+def branch_ref_exists(repo: Path, ref: str) -> bool:
+    completed = _run_git(repo, "rev-parse", "--verify", ref, check=False)
+    return completed.returncode == 0
+
+
+def resolve_merge_target_branch(
+    repo: Path,
+    *,
+    resolved_base_branch: str,
+    configured_base_branch: str,
+) -> str:
+    """Return the local branch ref that should receive an auto-merge."""
+    if not resolved_base_branch.startswith("origin/"):
+        return resolved_base_branch
+
+    local_name = configured_base_branch
+    if branch_ref_exists(repo, local_name):
+        return local_name
+
+    raise GitError(
+        f"cannot merge into remote-tracking branch {resolved_base_branch!r} without a local branch; "
+        f"create local branch {local_name!r} tracking {resolved_base_branch!r}, then run `cc-loop resume`"
+    )
+
+
+def _format_git_command_error(action: str, result: GitCommandResult) -> str:
+    detail = result.stderr.strip() or result.stdout.strip()
+    command = " ".join(("git", *result.args))
+    if detail:
+        return f"{action}: {command}\n{detail}"
+    return f"{action}: {command} failed with exit code {result.returncode}"
+
+
+def _merge_in_repo(
+    repo: Path,
+    source_branch: str,
+    *,
+    message: str,
+) -> GitCommandResult:
+    return _run_git_detailed(repo, "merge", "--no-ff", "-m", message, source_branch)
+
+
+def merge_branch_into_base(
+    target_repo: Path,
+    source_branch: str,
+    *,
+    resolved_base_branch: str,
+    configured_base_branch: str,
+    message: str,
+    merge_worktree_path: Path,
+) -> str:
+    """Merge ``source_branch`` into the task's base branch without switching main checkout.
+
+    When the main repository checkout is already on the merge target branch, merge there.
+    Otherwise merge through an ephemeral worktree checked out to the base branch so the
+    user's current branch in the main checkout is left unchanged.
+    """
+    merge_target = resolve_merge_target_branch(
+        target_repo,
+        resolved_base_branch=resolved_base_branch,
+        configured_base_branch=configured_base_branch,
+    )
+    checkout_branch = current_branch(target_repo)
+
+    if checkout_branch == merge_target:
+        result = _merge_in_repo(target_repo, source_branch, message=message)
+        if result.returncode != 0:
+            raise GitCommandError(
+                _format_git_command_error("merge into base branch failed", result),
+                result=result,
+            )
+        return rev_parse(target_repo, merge_target)
+
+    if merge_worktree_path.exists():
+        raise GitError(f"merge worktree path already exists: {merge_worktree_path}")
+
+    merge_worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    add_result = _run_git_detailed(
+        target_repo,
+        "worktree",
+        "add",
+        str(merge_worktree_path),
+        merge_target,
+    )
+    if add_result.returncode != 0:
+        detail = add_result.stderr.strip() or add_result.stdout.strip()
+        if "already checked out" in detail.lower():
+            raise GitError(
+                f"base branch {merge_target!r} is already checked out in another worktree; "
+                f"switch the main checkout to {merge_target!r} or remove the conflicting worktree, "
+                f"then run `cc-loop resume`"
+            )
+        raise GitCommandError(
+            _format_git_command_error("failed to create merge worktree", add_result),
+            result=add_result,
+        )
+
+    try:
+        result = _merge_in_repo(merge_worktree_path, source_branch, message=message)
+        if result.returncode != 0:
+            raise GitCommandError(
+                _format_git_command_error("merge into base branch failed", result),
+                result=result,
+            )
+        return rev_parse(target_repo, merge_target)
+    finally:
+        remove_result = _run_git_detailed(
+            target_repo,
+            "worktree",
+            "remove",
+            "--force",
+            str(merge_worktree_path),
+        )
+        if remove_result.returncode != 0:
+            prune_worktrees(target_repo)
