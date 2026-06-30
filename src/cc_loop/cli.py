@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -54,6 +55,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("run", help="Start the task loop from an initialized task")
     subparsers.add_parser("resume", help="Resume an interrupted or stopped task")
+    auto_parser = subparsers.add_parser("auto", help="Run the full task loop until completion or failure")
+    auto_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Override max_iterations from config",
+    )
     subparsers.add_parser("status", help="Show current task status")
 
     return parser
@@ -186,6 +194,98 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto(args: argparse.Namespace) -> int:
+    task_id = _resolve_task_id(args.state_root)
+    if task_id is None:
+        print("error: no task found; run `cc-loop init` first", file=sys.stderr)
+        return 1
+
+    state = load_state(task_id, args.state_root)
+    if args.max_iterations is not None:
+        state.config["max_iterations"] = args.max_iterations
+        save_state(state, args.state_root)
+
+    while True:
+        state = load_state(task_id, args.state_root)
+
+        if state.status == TaskStatus.DONE:
+            last_attempt = state.history[-1]
+            if not last_attempt.plan_json or last_attempt.plan_json.get("is_final_step", True):
+                print(f"task {state.task_id} completed successfully")
+                _notify(f"task {task_id} done", state.goal)
+                return 0
+            if state.iteration >= state.config["max_iterations"]:
+                msg = f"reached max_iterations ({state.config['max_iterations']})"
+                print(f"task {state.task_id} {msg}", file=sys.stderr)
+                _notify(f"task {task_id} stopped", msg)
+                return 1
+            state.status = TaskStatus.STOPPED
+            save_state(state, args.state_root)
+            continue
+
+        if state.status == TaskStatus.FAILED:
+            print(f"task {state.task_id} failed", file=sys.stderr)
+            _notify(f"task {task_id} failed", "check artifacts for details")
+            return 2
+
+        attempt = state.history[-1] if state.history else None
+
+        if (
+            state.status == TaskStatus.STOPPED
+            and attempt is not None
+            and attempt.phase == AttemptPhase.REJECTED
+            and attempt.retry >= state.config["max_retries_per_step"]
+        ):
+            msg = (
+                f"reviewer rejected all attempts "
+                f"(max_retries_per_step={state.config['max_retries_per_step']}); "
+                "task cannot continue"
+            )
+            print(f"error: {msg}", file=sys.stderr)
+            _notify(f"task {task_id} failed", msg)
+            return 1
+
+        needs_resume = (
+            state.status in {TaskStatus.RUNNING, TaskStatus.INTERRUPTED}
+            or (
+                state.status == TaskStatus.STOPPED
+                and attempt is not None
+                and attempt.phase == AttemptPhase.REJECTED
+                and attempt.retry < state.config["max_retries_per_step"]
+            )
+        )
+
+        try:
+            if needs_resume:
+                state, attempt, artifact_paths = execute_resume(state, args.state_root)
+            else:
+                state, attempt, artifact_paths = execute_run(state, args.state_root)
+        except ResumeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except RunError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except PreflightError as exc:
+            print(f"error: preflight: {exc}", file=sys.stderr)
+            return 1
+        except (PlanningError, ImplementingError, ReviewError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+        _print_run_summary(state, attempt, artifact_paths)
+
+        if attempt.decision == "stop":
+            print("reviewer requested stop")
+            _notify(f"task {task_id} stopped", "reviewer requested stop")
+            return 1
+
+        if attempt.merge_error:
+            print(f"merge failed: {attempt.merge_error}", file=sys.stderr)
+            _notify(f"task {task_id} failed", f"merge error: {attempt.merge_error}")
+            return 1
+
+
 def cmd_resume(args: argparse.Namespace) -> int:
     task_id = _resolve_task_id(args.state_root)
     if task_id is None:
@@ -221,6 +321,17 @@ def _artifact_paths_for_attempt(state, attempt, state_root: Path) -> dict[str, P
     return plan_artifact_paths(artifact_root)
 
 
+def _notify(title: str, message: str) -> None:
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'display notification "{message}" with title "{title}"'],
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        pass
+
+
 def _resolve_task_id(state_root: Path) -> str | None:
     tasks_dir = state_root / "tasks"
     if not tasks_dir.is_dir():
@@ -240,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         "init": cmd_init,
         "run": cmd_run,
         "resume": cmd_resume,
+        "auto": cmd_auto,
         "status": cmd_status,
     }
     return handlers[args.command](args)

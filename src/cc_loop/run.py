@@ -610,6 +610,25 @@ def _run_finalize_phase(
 
 def build_planner_prompt(state: TaskState) -> str:
     """Construct the stdin prompt for the configured planner provider."""
+    completed_steps = []
+    for prev in state.history:
+        if prev.phase == AttemptPhase.MERGED and prev.plan_json:
+            completed_steps.append(
+                f"  - iter {prev.iteration}: {prev.plan_json.get('expected_changes', '').strip()}"
+            )
+
+    completed_section = ""
+    if completed_steps:
+        completed_section = "\n\nCompleted steps so far:\n" + "\n".join(completed_steps)
+
+    retry_feedback = ""
+    for prev in reversed(state.history):
+        if prev.phase == AttemptPhase.REJECTED and prev.review_json:
+            rp = str(prev.review_json.get("retry_prompt", "")).strip()
+            if rp:
+                retry_feedback = f"\n\nPrior attempt was rejected. Reviewer's required changes:\n{rp}"
+            break
+
     return (
         "You are the cc-loop planner. Analyze the task goal and repository checkout.\n"
         "Respond with JSON only using this exact shape:\n"
@@ -624,7 +643,9 @@ def build_planner_prompt(state: TaskState) -> str:
         f"Target repo: {state.target_repo}\n"
         f"Base branch: {state.base_branch}\n"
         f"Base commit: {state.base_commit}\n"
+        f"{retry_feedback}"
         f"Iteration: {state.iteration}\n"
+        f"{completed_section}"
     )
 
 
