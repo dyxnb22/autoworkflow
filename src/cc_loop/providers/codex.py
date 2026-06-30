@@ -46,6 +46,7 @@ class CodexAdapter(ProviderAdapter):
         output_path: Path,
         config: LoopConfig,
         timeout_seconds: int,
+        raw_output_path: Path | None = None,
     ) -> ProviderRunResult:
         args = self.build_args(
             worktree_path=worktree_path,
@@ -54,6 +55,8 @@ class CodexAdapter(ProviderAdapter):
             config=config,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        if raw_output_path is not None:
+            raw_output_path.parent.mkdir(parents=True, exist_ok=True)
         timed_out = False
         try:
             completed = subprocess.run(
@@ -66,6 +69,8 @@ class CodexAdapter(ProviderAdapter):
                 check=False,
             )
             exit_code = completed.returncode
+            if raw_output_path is not None:
+                raw_output_path.write_text(completed.stdout, encoding="utf-8")
         except subprocess.TimeoutExpired:
             timed_out = True
             exit_code = -1
@@ -73,7 +78,7 @@ class CodexAdapter(ProviderAdapter):
         return ProviderRunResult(
             provider=self.name,
             exit_code=exit_code,
-            raw_artifact_path=output_path,
+            raw_artifact_path=raw_output_path or output_path,
             timed_out=timed_out,
         )
 

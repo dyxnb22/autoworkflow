@@ -12,9 +12,10 @@ from cc_loop.config import merge_config
 from cc_loop.git import resolve_base_commit_if_possible
 from cc_loop.preflight import PreflightError
 from cc_loop.providers import codex, cursor  # noqa: F401 — register built-in providers
-from cc_loop.run import RunError, mark_run_stubbed, prepare_run
+from cc_loop.run import RunError, execute_run
 from cc_loop.state import (
     DEFAULT_STATE_ROOT,
+    TaskStatus,
     create_initial_state,
     load_state,
     save_state,
@@ -92,15 +93,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     state = load_state(task_id, args.state_root)
     try:
-        state, attempt, artifact_paths = prepare_run(state, args.state_root)
+        state, attempt, artifact_paths = execute_run(state, args.state_root)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except PreflightError as exc:
         print(f"error: preflight failed: {exc}", file=sys.stderr)
         return 1
-
-    state = mark_run_stubbed(state, args.state_root)
 
     print(f"task_id: {state.task_id}")
     print(f"status: {state.status.value}")
@@ -110,12 +109,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"worktree_path: {attempt.worktree_path}")
     print(f"branch: {attempt.branch}")
     print(f"artifacts: {artifact_paths['plan_prompt'].parent}")
+
+    if state.status == TaskStatus.FAILED:
+        print("error: planner phase failed; artifacts preserved in state history", file=sys.stderr)
+        return 2
+
+    if attempt.plan_json is None:
+        print("error: planner phase did not produce plan_json", file=sys.stderr)
+        return 2
+
     print(
-        "error: provider execution is not implemented yet "
-        f"(stopped after preflight at phase={attempt.phase.value})",
+        "stopped after planner phase "
+        "(implementer, tests, reviewer, and merge are not implemented yet)",
         file=sys.stderr,
     )
-    return 2
+    return 0
 
 
 def cmd_resume(_args: argparse.Namespace) -> int:

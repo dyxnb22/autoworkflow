@@ -82,3 +82,37 @@ def repo_label(repo: Path) -> str:
     if is_git_repo(repo):
         return git_toplevel(repo).name
     return repo.name
+
+
+def add_worktree(
+    repo: Path,
+    *,
+    path: Path,
+    branch: str,
+    base_commit: str,
+) -> Path:
+    """Create an isolated worktree branch at ``base_commit``.
+
+    Equivalent to::
+
+        git -C <repo> worktree add -b <branch> <path> <base_commit>
+    """
+    if path.exists():
+        raise GitError(f"worktree path already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(repo, "worktree", "add", "-b", branch, str(path), base_commit)
+    return path
+
+
+def remove_worktree(repo: Path, path: Path, *, force: bool = False) -> None:
+    """Remove a worktree registered against ``repo``."""
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(path))
+    _run_git(repo, *args)
+
+
+def prune_worktrees(repo: Path) -> None:
+    """Prune stale worktree administrative data."""
+    _run_git(repo, "worktree", "prune")
