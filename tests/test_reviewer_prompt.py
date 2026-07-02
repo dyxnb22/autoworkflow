@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from cc_loop.config import merge_config
-from cc_loop.run import build_reviewer_prompt
-from cc_loop.state import AttemptRecord, TaskState, TaskStatus
+from cc_loop.run import build_reviewer_prompt, build_reviewer_prompt_metrics
+from cc_loop.state import AttemptRecord, TaskState, TaskStatus, plan_artifact_paths
 
 
 def _state(goal: str = "Build the thing") -> TaskState:
@@ -85,3 +85,37 @@ def test_reviewer_prompt_prefix_is_identical_before_dynamic_payload() -> None:
     assert "First goal" not in first_prefix
     assert "Second goal" not in second_prefix
     assert len(first_prefix) > 1500
+
+
+def test_reviewer_prompt_metrics_describe_cache_layout() -> None:
+    diff_stat = " README.md | 1 +"
+    patch_body = "diff --git a/README.md b/README.md\n"
+    prompt = build_reviewer_prompt(
+        state=_state(),
+        attempt=_attempt(),
+        diff_stat=diff_stat,
+        patch_body=patch_body,
+        test_status="passed",
+    )
+
+    metrics = build_reviewer_prompt_metrics(
+        prompt=prompt,
+        diff_stat=diff_stat,
+        patch_body=patch_body,
+    )
+
+    assert metrics["schema_version"] == 1
+    assert metrics["layout"] == "stable-prefix-v1"
+    assert metrics["prompt_chars"] == len(prompt)
+    assert metrics["stable_prefix_chars"] == prompt.index("## Dynamic Review Payload")
+    assert metrics["dynamic_payload_chars"] == len(prompt) - metrics["stable_prefix_chars"]
+    assert metrics["stable_prefix_ratio"] > 0.75
+    assert metrics["patch_body_chars"] == len(patch_body)
+    assert metrics["diff_stat_chars"] == len(diff_stat)
+    assert metrics["estimated_prompt_tokens"] == (len(prompt) + 3) // 4
+
+
+def test_review_prompt_metrics_artifact_path_is_part_of_attempt_contract(tmp_path) -> None:
+    paths = plan_artifact_paths(tmp_path)
+
+    assert paths["review_prompt_metrics"] == tmp_path / "review.prompt.metrics.json"

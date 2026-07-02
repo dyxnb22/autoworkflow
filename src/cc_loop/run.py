@@ -869,6 +869,15 @@ def run_review_phase(
         test_status=attempt.test_status,
     )
     artifact_paths["review_prompt"].write_text(prompt, encoding="utf-8")
+    review_prompt_metrics = build_reviewer_prompt_metrics(
+        prompt=prompt,
+        diff_stat=diff_stat,
+        patch_body=patch_body,
+    )
+    artifact_paths["review_prompt_metrics"].write_text(
+        json.dumps(review_prompt_metrics, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     all_reviews: list[dict[str, Any]] = []
     review_raw_paths: list[str] = []
@@ -948,6 +957,13 @@ def run_review_phase(
         attempt,
         EventType.REVIEWER_COMPLETED,
         message=attempt.decision,
+        details={
+            "prompt_chars": review_prompt_metrics["prompt_chars"],
+            "stable_prefix_chars": review_prompt_metrics["stable_prefix_chars"],
+            "dynamic_payload_chars": review_prompt_metrics["dynamic_payload_chars"],
+            "estimated_prompt_tokens": review_prompt_metrics["estimated_prompt_tokens"],
+            "estimated_dynamic_payload_tokens": review_prompt_metrics["estimated_dynamic_payload_tokens"],
+        },
     )
     save_state(state, state_root)
     return state
@@ -1304,6 +1320,44 @@ def build_reviewer_prompt(
         "### Selected patches\n"
         f"{patch_body or '(no patch content selected)'}\n"
     )
+
+
+def _estimated_tokens_from_chars(char_count: int) -> int:
+    if char_count <= 0:
+        return 0
+    return (char_count + 3) // 4
+
+
+def build_reviewer_prompt_metrics(
+    *,
+    prompt: str,
+    diff_stat: str,
+    patch_body: str,
+) -> dict[str, Any]:
+    """Return cache/cost layout metrics for a reviewer prompt artifact."""
+    marker = "## Dynamic Review Payload"
+    marker_index = prompt.find(marker)
+    stable_prefix_chars = marker_index if marker_index >= 0 else len(prompt)
+    dynamic_payload_chars = len(prompt) - stable_prefix_chars
+    patch_chars = len(patch_body)
+    diff_stat_chars = len(diff_stat)
+    return {
+        "schema_version": 1,
+        "layout": "stable-prefix-v1",
+        "dynamic_payload_marker": marker,
+        "prompt_chars": len(prompt),
+        "stable_prefix_chars": stable_prefix_chars,
+        "dynamic_payload_chars": dynamic_payload_chars,
+        "stable_prefix_ratio": round(stable_prefix_chars / len(prompt), 6) if prompt else 0.0,
+        "dynamic_payload_ratio": round(dynamic_payload_chars / len(prompt), 6) if prompt else 0.0,
+        "diff_stat_chars": diff_stat_chars,
+        "patch_body_chars": patch_chars,
+        "estimated_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),
+        "estimated_stable_prefix_tokens": _estimated_tokens_from_chars(stable_prefix_chars),
+        "estimated_dynamic_payload_tokens": _estimated_tokens_from_chars(dynamic_payload_chars),
+        "estimated_diff_stat_tokens": _estimated_tokens_from_chars(diff_stat_chars),
+        "estimated_patch_body_tokens": _estimated_tokens_from_chars(patch_chars),
+    }
 
 
 def _can_auto_merge(

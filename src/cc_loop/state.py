@@ -92,6 +92,7 @@ def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
         "diff_files": artifact_root / "diff.files.txt",
         "patches_dir": artifact_root / "patches",
         "review_prompt": artifact_root / "review.prompt.txt",
+        "review_prompt_metrics": artifact_root / "review.prompt.metrics.json",
         "review_raw": artifact_root / "review.raw.jsonl",
         "review_last_message": artifact_root / "review.last-message.txt",
         "review_parsed": artifact_root / "review.parsed.json",
