@@ -21,6 +21,7 @@ The product boundary is intentionally narrow:
 | v0.7 | Dynamic replanning | Let planner revise the graph from test/review feedback. |
 | v0.8 | Multi-role routing | Route different node kinds to different providers/reviewers. |
 | v0.9 | Parallel execution | Run independent graph nodes concurrently behind a merge queue. | **Done** |
+| v0.10 | Observability and eval | Prompt metadata, attempt traces, eval CI, analytics export. | **Done** |
 
 ## Design Principles
 
@@ -314,6 +315,47 @@ safe merges.
 - State remains valid under concurrent runners.
 - Failed nodes block dependents but not unrelated nodes.
 - Full test suite includes concurrency tests and passes reliably.
+
+## v0.10: Observability and Eval
+
+### Objective
+
+Add lightweight eval/CI, prompt version metadata, per-attempt traces, and
+analytics export compatibility inspired by Promptfoo, Langfuse, Agenta, and
+Helicone — without network dependencies or provider behavior changes.
+
+### Required Capabilities
+
+1. **Eval / CI loop**
+   - `cc-loop eval --task-id ID --suite PATH [--json]`
+   - Local JSON suite with artifact assertions (`==`, `!=`, comparisons,
+     `contains`, `exists`).
+   - Exit `0` pass, `1` fail, `2` invalid input.
+
+2. **Prompt metadata**
+   - Adjacent `*.prompt.meta.json` for planner, implementer, and reviewer.
+   - Fields: `prompt_name`, `prompt_version`, `label`, `layout`, provider,
+     model, task/attempt context.
+
+3. **Attempt trace**
+   - `attempt.trace.json` updated incrementally after planner, implementer,
+     tests, reviewer, and merge phases.
+   - Heuristic token estimates; resilient to missing files.
+
+4. **Analytics export**
+   - `cc-loop export --task-id ID --format jsonl --output PATH`
+   - One row per phase/provider call for downstream gateway tools.
+
+5. **Report integration**
+   - `report --json` includes `observability` with trace path, reviewer metrics
+     summary, and prompt metadata paths.
+
+### Acceptance Criteria
+
+- All new artifacts are additive; old tasks and state files still load.
+- Eval, export, and report work from existing artifacts without rerunning.
+- `python -m pytest tests/ -q` passes.
+- `docs/INTEGRATION.md` documents new commands and contracts.
 
 ## Coding Guidance for Implementers
 

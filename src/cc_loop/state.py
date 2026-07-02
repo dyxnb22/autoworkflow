@@ -80,11 +80,13 @@ def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
     """Return deterministic artifact paths for one attempt."""
     return {
         "plan_prompt": artifact_root / "plan.prompt.txt",
+        "plan_prompt_meta": artifact_root / "plan.prompt.meta.json",
         "plan_raw": artifact_root / "plan.raw.jsonl",
         "plan_last_message": artifact_root / "plan.last-message.txt",
         "plan_parsed": artifact_root / "plan.parsed.json",
         "plan_provider": artifact_root / "plan.provider.txt",
         "implementer_prompt": artifact_root / "implementer.prompt.txt",
+        "implementer_prompt_meta": artifact_root / "implementer.prompt.meta.json",
         "implementer_raw": artifact_root / "implementer.raw.json",
         "implementer_provider": artifact_root / "implementer.provider.txt",
         "test_output": artifact_root / "test.output.txt",
@@ -92,12 +94,14 @@ def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
         "diff_files": artifact_root / "diff.files.txt",
         "patches_dir": artifact_root / "patches",
         "review_prompt": artifact_root / "review.prompt.txt",
+        "review_prompt_meta": artifact_root / "review.prompt.meta.json",
         "review_prompt_metrics": artifact_root / "review.prompt.metrics.json",
         "review_raw": artifact_root / "review.raw.jsonl",
         "review_last_message": artifact_root / "review.last-message.txt",
         "review_parsed": artifact_root / "review.parsed.json",
         "review_provider": artifact_root / "review.provider.txt",
         "merge_output": artifact_root / "merge.output.txt",
+        "attempt_trace": artifact_root / "attempt.trace.json",
     }
 
 

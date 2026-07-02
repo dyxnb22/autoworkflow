@@ -29,6 +29,7 @@ from cc_loop.git import (
     merge_branch_into_base,
 )
 from cc_loop.preflight import PreflightResult, run_preflight
+from cc_loop.prompt_metadata import build_prompt_metadata, write_prompt_metadata
 from cc_loop.providers.base import ProviderRunResult, get_provider
 from cc_loop.repair_prompts import build_repair_prompt
 from cc_loop.events import EventType, append_event
@@ -48,6 +49,7 @@ from cc_loop.state import (
     worktree_path,
 )
 from cc_loop.subprocess_util import run_with_timeout
+from cc_loop.trace import estimate_tokens_from_path, update_trace_phase
 from cc_loop.task_graph import (
     completed_dependency_labels,
     effective_node_policy,
@@ -483,6 +485,12 @@ def run_planning_phase(
         prompt=prompt,
         provider_name=provider_name,
     )
+    _write_planning_prompt_metadata(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        provider_name=provider_name,
+    )
 
     if not worktree.is_dir():
         try:
@@ -580,6 +588,18 @@ def run_planning_phase(
             message=node.title,
         )
     save_state(state, state_root)
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="planning",
+        status="completed",
+        prompt_path=str(artifact_paths["plan_prompt"]),
+        prompt_meta_path=str(artifact_paths["plan_prompt_meta"]),
+        raw_path=str(artifact_paths["plan_raw"]),
+        estimated_prompt_tokens=estimate_tokens_from_path(artifact_paths["plan_prompt"]),
+    )
     return state
 
 
@@ -626,6 +646,12 @@ def _run_graph_node_setup(
         prompt=prompt,
         provider_name=provider_name,
     )
+    _write_planning_prompt_metadata(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        provider_name=provider_name,
+    )
     artifact_paths["plan_parsed"].write_text(
         json.dumps(attempt.plan_json, indent=2) + "\n",
         encoding="utf-8",
@@ -657,6 +683,18 @@ def _run_graph_node_setup(
                 message=node.title,
             )
     save_state(state, state_root)
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="planning",
+        status="completed",
+        prompt_path=str(artifact_paths["plan_prompt"]),
+        prompt_meta_path=str(artifact_paths["plan_prompt_meta"]),
+        raw_path=str(artifact_paths["plan_raw"]),
+        estimated_prompt_tokens=estimate_tokens_from_path(artifact_paths["plan_prompt"]),
+    )
     return state
 
 
@@ -689,6 +727,12 @@ def run_implementer_phase(
     _write_implementer_artifacts_before(
         artifact_paths=artifact_paths,
         prompt=prompt,
+        provider_name=provider_name,
+    )
+    _write_implementer_prompt_metadata(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
         provider_name=provider_name,
     )
 
@@ -745,6 +789,18 @@ def run_implementer_phase(
         message=provider_name,
         details={"exit_code": run_result.exit_code},
     )
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="implementation",
+        status="completed",
+        prompt_path=str(artifact_paths["implementer_prompt"]),
+        prompt_meta_path=str(artifact_paths["implementer_prompt_meta"]),
+        raw_path=str(artifact_paths["implementer_raw"]),
+        estimated_prompt_tokens=estimate_tokens_from_path(artifact_paths["implementer_prompt"]),
+    )
     return state
 
 
@@ -778,6 +834,16 @@ def run_test_phase(
             attempt,
             EventType.TESTS_COMPLETED,
             message="skipped",
+        )
+        update_trace_phase(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            phase="testing",
+            status="skipped",
+            output_path=str(artifact_paths["test_output"]),
+            exit_code=None,
         )
         save_state(state, state_root)
         return state
@@ -822,6 +888,16 @@ def run_test_phase(
         EventType.TESTS_COMPLETED,
         message=attempt.test_status,
         details={"exit_code": attempt.test_exit_code},
+    )
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="testing",
+        status=attempt.test_status,
+        output_path=str(artifact_paths["test_output"]),
+        exit_code=attempt.test_exit_code,
     )
     save_state(state, state_root)
     return state
@@ -877,6 +953,12 @@ def run_review_phase(
     artifact_paths["review_prompt_metrics"].write_text(
         json.dumps(review_prompt_metrics, indent=2) + "\n",
         encoding="utf-8",
+    )
+    _write_reviewer_prompt_metadata(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        provider_name=reviewer_chain[0],
     )
 
     all_reviews: list[dict[str, Any]] = []
@@ -965,6 +1047,21 @@ def run_review_phase(
             "estimated_dynamic_payload_tokens": review_prompt_metrics["estimated_dynamic_payload_tokens"],
         },
     )
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="review",
+        status="completed",
+        prompt_path=str(artifact_paths["review_prompt"]),
+        prompt_meta_path=str(artifact_paths["review_prompt_meta"]),
+        raw_path=str(artifact_paths["review_raw"]),
+        metrics_path=str(artifact_paths["review_prompt_metrics"]),
+        decision=attempt.decision,
+        estimated_prompt_tokens=review_prompt_metrics["estimated_prompt_tokens"],
+        stable_prefix_ratio=review_prompt_metrics["stable_prefix_ratio"],
+    )
     save_state(state, state_root)
     return state
 
@@ -1042,6 +1139,16 @@ def _run_finalize_phase(
         write_failure_report(artifact_paths["plan_prompt"].parent, report)
         attempt.merge_error = report.message
         artifact_paths["merge_output"].write_text(str(exc) + "\n", encoding="utf-8")
+        update_trace_phase(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            phase="merge",
+            status="failed",
+            output_path=str(artifact_paths["merge_output"]),
+            error=attempt.merge_error,
+        )
         state.status = TaskStatus.STOPPED
         save_state(state, state_root)
         return state, attempt, artifact_paths
@@ -1051,6 +1158,16 @@ def _run_finalize_phase(
         write_failure_report(artifact_paths["plan_prompt"].parent, report)
         attempt.merge_error = report.message
         artifact_paths["merge_output"].write_text(str(exc) + "\n", encoding="utf-8")
+        update_trace_phase(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            phase="merge",
+            status="failed",
+            output_path=str(artifact_paths["merge_output"]),
+            error=attempt.merge_error,
+        )
         state.status = TaskStatus.STOPPED
         save_state(state, state_root)
         return state, attempt, artifact_paths
@@ -1059,6 +1176,16 @@ def _run_finalize_phase(
     clear_report_from_attempt(attempt)
     failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
     _emit_run_event(state_root, state, attempt, EventType.MERGE_COMPLETED)
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="merge",
+        status="merged",
+        output_path=str(artifact_paths["merge_output"]),
+        error="",
+    )
 
     graph = ensure_task_graph(state)
     if graph is not None and attempt.graph_node_id:
@@ -1516,6 +1643,12 @@ def _run_implementer_with_prompt(
         prompt=prompt,
         provider_name=provider_name,
     )
+    _write_implementer_prompt_metadata(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        provider_name=provider_name,
+    )
     attempt.phase = AttemptPhase.EXECUTING
     save_state(state, state_root)
 
@@ -1618,6 +1751,60 @@ def _write_implementer_artifacts_after(
     artifact_paths["implementer_provider"].write_text(run_result.provider + "\n", encoding="utf-8")
     if not artifact_paths["implementer_raw"].exists():
         artifact_paths["implementer_raw"].write_text("", encoding="utf-8")
+
+
+def _write_planning_prompt_metadata(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    provider_name: str,
+) -> None:
+    metadata = build_prompt_metadata(
+        role="planner",
+        provider=provider_name,
+        config=state.config,
+        state=state,
+        attempt=attempt,
+        prompt_path=artifact_paths["plan_prompt"],
+    )
+    write_prompt_metadata(artifact_paths["plan_prompt_meta"], metadata)
+
+
+def _write_implementer_prompt_metadata(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    provider_name: str,
+) -> None:
+    metadata = build_prompt_metadata(
+        role="implementer",
+        provider=provider_name,
+        config=state.config,
+        state=state,
+        attempt=attempt,
+        prompt_path=artifact_paths["implementer_prompt"],
+    )
+    write_prompt_metadata(artifact_paths["implementer_prompt_meta"], metadata)
+
+
+def _write_reviewer_prompt_metadata(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    provider_name: str,
+) -> None:
+    metadata = build_prompt_metadata(
+        role="reviewer",
+        provider=provider_name,
+        config=state.config,
+        state=state,
+        attempt=attempt,
+        prompt_path=artifact_paths["review_prompt"],
+    )
+    write_prompt_metadata(artifact_paths["review_prompt_meta"], metadata)
 
 
 def _provider_timeout_seconds(config: LoopConfig, provider_name: str) -> int:

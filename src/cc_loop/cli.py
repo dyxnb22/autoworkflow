@@ -18,6 +18,8 @@ from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, fai
 from cc_loop.report import build_report, format_report_human
 from cc_loop.runner_control import cancel_task, cleanup_task, stop_runner
 from cc_loop.runner_heartbeat import refresh_heartbeat, remove_heartbeat
+from cc_loop.evals import format_eval_human, run_eval_suite
+from cc_loop.export import write_jsonl_export
 from cc_loop.events import EventType, append_event, read_events
 from cc_loop.inspect import (
     build_status_snapshot,
@@ -203,6 +205,16 @@ def _build_parser() -> argparse.ArgumentParser:
     report_parser = subparsers.add_parser("report", help="Show task report")
     _task_id_arg(report_parser)
     report_parser.add_argument("--json", action="store_true", default=False)
+
+    eval_parser = subparsers.add_parser("eval", help="Run a local eval suite against task artifacts")
+    _task_id_arg(eval_parser)
+    eval_parser.add_argument("--suite", required=True, type=Path, help="Path to eval suite JSON file")
+    eval_parser.add_argument("--json", action="store_true", default=False)
+
+    export_parser = subparsers.add_parser("export", help="Export observability rows for analytics tools")
+    _task_id_arg(export_parser)
+    export_parser.add_argument("--format", choices=["jsonl"], default="jsonl", help="Export format")
+    export_parser.add_argument("--output", required=True, type=Path, help="Output file path")
 
     return parser
 
@@ -462,6 +474,40 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2))
     else:
         print(format_report_human(report))
+    return 0
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        return 1
+    state = load_state(task_id, args.state_root)
+    try:
+        result = run_eval_suite(state, args.state_root, args.suite.expanduser())
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(format_eval_human(result), end="")
+    return 0 if result.get("passed") else 1
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        return 1
+    if args.format != "jsonl":
+        print(f"error: unsupported export format: {args.format}", file=sys.stderr)
+        return 2
+    state = load_state(task_id, args.state_root)
+    if not state.history:
+        print("error: task has no attempts to export", file=sys.stderr)
+        return 2
+    output_path = args.output.expanduser()
+    row_count = write_jsonl_export(state, args.state_root, output_path)
+    print(f"exported {row_count} rows to {output_path}")
     return 0
 
 
@@ -871,6 +917,8 @@ def main(argv: list[str] | None = None) -> int:
         "cancel": cmd_cancel,
         "cleanup": cmd_cleanup,
         "report": cmd_report,
+        "eval": cmd_eval,
+        "export": cmd_export,
     }
     return handlers[args.command](args)
 
