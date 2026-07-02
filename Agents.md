@@ -5,6 +5,7 @@ Canonical agent reference for cc-loop. **Package 0.4.0.**
 ## Docs
 
 - [docs/INTEGRATION.md](docs/INTEGRATION.md) — external CLI/JSON contract
+- [docs/EVOLUTION.md](docs/EVOLUTION.md) — v0.4-v0.9 roadmap and implementation guidance
 - [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) — task graph orchestration (v0.4)
 - [docs/RECOVERY.md](docs/RECOVERY.md) — failure classification, repair budgets, auto dispatch
 - [docs/EXIT_CODES.md](docs/EXIT_CODES.md)

@@ -55,6 +55,7 @@ References:
 
 - [Integration contract](docs/INTEGRATION.md)
 - [Task graph orchestration](docs/TASK_GRAPH.md)
+- [Evolution roadmap](docs/EVOLUTION.md)
 - [Exit codes](docs/EXIT_CODES.md)
 - [Project plan](docs/PROJECT_PLAN.md)
 - [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
