@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from cc_loop.state import (
     task_dir,
 )
 from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph, graph_status_summary
+from cc_loop.trace import build_trace_snapshot, trace_file_path
 
 
 def _latest_attempt(state: TaskState):
@@ -44,6 +46,53 @@ def _problem_nodes(graph) -> dict[str, list[dict[str, str]]]:
         if n.status.value in result:
             result[n.status.value].append({"id": n.id, "title": n.title, "notes": n.notes})
     return result
+
+
+def _safe_read_json(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _observability_section(
+    state: TaskState,
+    attempt,
+    state_root: Path,
+    artifact_paths: dict[str, str],
+) -> dict[str, Any]:
+    if attempt is None:
+        return {}
+
+    artifact_root = artifacts_dir(state.task_id, attempt.iteration, attempt.retry, state_root)
+    paths = plan_artifact_paths(artifact_root)
+    _ = build_trace_snapshot(state, attempt, artifact_root, state.config)
+    metrics = _safe_read_json(paths["review_prompt_metrics"])
+
+    reviewer_metrics_summary = None
+    if metrics is not None:
+        reviewer_metrics_summary = {
+            "layout": metrics.get("layout"),
+            "stable_prefix_ratio": metrics.get("stable_prefix_ratio"),
+            "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
+        }
+
+    return {
+        "trace_path": str(trace_file_path(artifact_root)),
+        "reviewer_prompt_metrics": reviewer_metrics_summary,
+        "prompt_metadata_paths": {
+            "planner": artifact_paths.get("plan_prompt_meta", str(paths["plan_prompt_meta"])),
+            "implementer": artifact_paths.get(
+                "implementer_prompt_meta", str(paths["implementer_prompt_meta"])
+            ),
+            "reviewer": artifact_paths.get(
+                "review_prompt_meta", str(paths["review_prompt_meta"])
+            ),
+        },
+    }
 
 
 def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
@@ -127,6 +176,7 @@ def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
         "merge_result": merge_result,
         "failure_summary": failure_summary,
         "artifact_paths": artifact_paths,
+        "observability": _observability_section(state, attempt, state_root, artifact_paths),
         "events_path": str(events_path(state_root, state.task_id)),
         "task_dir": str(task_dir(state.task_id, state_root)),
         "log_path": str(runner_log_path(state_root, state.task_id)),
@@ -163,6 +213,17 @@ def format_report_human(report: dict[str, Any]) -> str:
         lines.append(f"  Phase: {attempt['phase']}")
         if attempt.get("graph_node_id"):
             lines.append(f"  Node: {attempt['graph_node_id']}")
+        lines.append("")
+
+    observability = report.get("observability") or {}
+    reviewer_metrics = observability.get("reviewer_prompt_metrics") or {}
+    if reviewer_metrics:
+        ratio = reviewer_metrics.get("stable_prefix_ratio")
+        tokens = reviewer_metrics.get("estimated_prompt_tokens")
+        if ratio is not None:
+            lines.append(f"Reviewer stable prefix ratio: {ratio}")
+        if tokens is not None:
+            lines.append(f"Reviewer estimated prompt tokens: {tokens}")
         lines.append("")
 
     failure = report.get("failure_summary") or {}

@@ -2,7 +2,7 @@
 
 This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
 
-**Package version:** 0.9.0  
+**Package version:** 0.10.0  
 **Integration schema version:** 1
 
 ## Purpose
@@ -25,6 +25,8 @@ These commands and flags are the integration contract. Other commands exist for 
 | `cc-loop status [--task-id ID] [--json]` | Poll task state |
 | `cc-loop graph [--task-id ID] [--json] [--history]` | Inspect task graph progress (v0.4+); `--history` shows graph mutations (v0.7) |
 | `cc-loop report [--task-id ID] [--json]` | Task report with graph progress, failures, artifacts (v0.6) |
+| `cc-loop eval --task-id ID --suite PATH [--json]` | Run local eval suite against latest attempt artifacts (v0.10) |
+| `cc-loop export --task-id ID --format jsonl --output PATH` | Export analytics-compatible JSONL rows (v0.10) |
 | `cc-loop stop --task-id ID [--json]` | Stop detached runner (v0.5) |
 | `cc-loop cancel --task-id ID [--json]` | Stop runner and mark task cancelled (v0.5) |
 | `cc-loop cleanup --task-id ID [--json]` | Remove task-owned runtime artifacts (v0.5) |
@@ -64,7 +66,7 @@ Stdout is a single JSON object. No extra prose.
 ```json
 {
   "schema_version": 1,
-  "cc_loop_version": "0.9.0",
+  "cc_loop_version": "0.10.0",
   "task_id": "abc123",
   "goal": "...",
   "target_repo": "/absolute/path",
@@ -278,3 +280,81 @@ cc-loop doctor --repo PATH [--base-branch main]
 ```
 
 Success: exit 0, prints `ok` or `{"ok": true}`. Failure: exit 1, message on stderr.
+
+## v0.10 artifacts and observability (additive)
+
+Each attempt artifact directory may include:
+
+| Artifact | Description |
+|----------|-------------|
+| `plan.prompt.meta.json` | Planner prompt version/label/deployment metadata |
+| `implementer.prompt.meta.json` | Implementer prompt metadata |
+| `review.prompt.meta.json` | Reviewer prompt metadata |
+| `review.prompt.metrics.json` | Reviewer cache-layout metrics (stable prefix ratio, token estimates) |
+| `attempt.trace.json` | Normalized per-attempt trace with phase status and artifact paths |
+
+### Prompt metadata contract (`schema_version` 1)
+
+```json
+{
+  "schema_version": 1,
+  "role": "reviewer",
+  "prompt_name": "cc-loop-reviewer",
+  "prompt_version": "0.10.0",
+  "label": "production",
+  "layout": "stable-prefix-v1",
+  "provider": "codex",
+  "model": "",
+  "task_id": "abc123",
+  "iteration": 1,
+  "retry": 0,
+  "graph_node_id": "T1",
+  "created_at": "2026-07-02T12:00:00+00:00",
+  "prompt_path": "/absolute/path/review.prompt.txt"
+}
+```
+
+### Trace contract (`schema_version` 1)
+
+`attempt.trace.json` summarizes providers, models, and per-phase status with
+artifact paths and heuristic `estimated_prompt_tokens` values (`ceil(chars / 4)`).
+
+### `eval` command
+
+```
+cc-loop eval --task-id ID --suite PATH [--json]
+```
+
+- Loads the latest attempt artifacts for the task.
+- Evaluates JSON artifact assertions from a local suite file (`schema_version` 1).
+- Exit `0` when all cases pass, `1` when any fail, `2` for invalid suite/input.
+- Supported assertion ops: `==`, `!=`, `>=`, `>`, `<=`, `<`, `contains`, `exists`.
+
+### `export` command
+
+```
+cc-loop export --task-id ID --format jsonl --output PATH
+```
+
+Writes one JSON object per line for planner, implementer, testing, reviewer, and
+merge phases. Rows include `schema_version`, task/attempt identifiers, provider,
+model, prompt paths, token estimates, reviewer `decision`, `stable_prefix_ratio`
+when available, and `timestamp`.
+
+### `report --json` observability fields (additive)
+
+```json
+"observability": {
+  "trace_path": "/absolute/path/attempt.trace.json",
+  "reviewer_prompt_metrics": {
+    "layout": "stable-prefix-v1",
+    "stable_prefix_ratio": 0.8,
+    "estimated_prompt_tokens": 456
+  },
+  "prompt_metadata_paths": {
+    "planner": "/absolute/path/plan.prompt.meta.json",
+    "implementer": "/absolute/path/implementer.prompt.meta.json",
+    "reviewer": "/absolute/path/review.prompt.meta.json"
+  }
+}
+```
