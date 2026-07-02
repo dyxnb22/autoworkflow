@@ -118,19 +118,20 @@ def run_single_node_pipeline(
         state.status = TaskStatus.RUNNING
         save_state(state, state_root)
 
-    state = _run_graph_node_setup(
-        state,
-        state_root,
-        artifact_paths,
-        graph=ensure_task_graph(state),
-        max_retries=int(state.config.get("max_retries_per_step", 2)),
-        attempt=attempt,
-    )
-    state = run_implementer_phase(state, state_root, artifact_paths, attempt=attempt)
-    state = run_test_phase(state, state_root, artifact_paths, attempt=attempt)
-    state = run_review_phase(state, state_root, artifact_paths, attempt=attempt)
-
-    with task_state_lock(state_root, state.task_id):
+        # The phase helpers persist the full TaskState. Keep the node pipeline
+        # under the task lock so a worker cannot save a stale snapshot over a
+        # sibling node's newer attempt/graph state.
+        state = _run_graph_node_setup(
+            state,
+            state_root,
+            artifact_paths,
+            graph=ensure_task_graph(state),
+            max_retries=int(state.config.get("max_retries_per_step", 2)),
+            attempt=attempt,
+        )
+        state = run_implementer_phase(state, state_root, artifact_paths, attempt=attempt)
+        state = run_test_phase(state, state_root, artifact_paths, attempt=attempt)
+        state = run_review_phase(state, state_root, artifact_paths, attempt=attempt)
         state = load_state(state.task_id, state_root)
         if history_index < len(state.history):
             attempt = state.history[history_index]

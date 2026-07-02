@@ -7,10 +7,14 @@ import threading
 import unittest
 
 import tests.fake_providers  # noqa: F401
-from cc_loop.parallel_scheduler import discover_parallel_runnable, parallel_execution_enabled
+from cc_loop.parallel_scheduler import (
+    discover_parallel_runnable,
+    execute_parallel_batch,
+    parallel_execution_enabled,
+)
 from cc_loop.state import load_state, save_state
 from cc_loop.state_lock import atomic_write_json, task_state_lock
-from cc_loop.task_graph import graph_from_planner_json
+from cc_loop.task_graph import ensure_task_graph, graph_from_planner_json
 from tests.helpers import TempEnv, make_task
 
 
@@ -97,6 +101,73 @@ class ParallelSchedulerTests(unittest.TestCase):
             self.assertFalse(parallel_execution_enabled(state))
             state.config["allow_parallel_execution"] = True
             self.assertTrue(parallel_execution_enabled(state))
+        finally:
+            env.close()
+
+    def test_execute_parallel_batch_preserves_all_node_state(self) -> None:
+        env = TempEnv()
+        try:
+            repo = env.repo()
+            state_root = env.state_root()
+            worktree_root = env.worktree_root()
+            make_task(
+                repo=repo,
+                state_root=state_root,
+                task_id="par-run",
+                config={
+                    "planner_provider": "fake-planner",
+                    "implementer_provider": "fake-graph-implementer",
+                    "reviewer_provider": "fake-reviewer",
+                    "test_command": ["true"],
+                    "max_parallel_nodes": 2,
+                    "allow_parallel_execution": True,
+                },
+            )
+            state = load_state("par-run", state_root)
+            state.task_graph = graph_from_planner_json(
+                {
+                    "mode": "task_graph",
+                    "nodes": [
+                        {
+                            "id": "T1",
+                            "title": "Create hello.txt",
+                            "description": "Create hello.txt",
+                            "dependencies": [],
+                        },
+                        {
+                            "id": "T2",
+                            "title": "Create world.txt",
+                            "description": "Create world.txt",
+                            "dependencies": [],
+                        },
+                    ],
+                }
+            )
+            save_state(state, state_root)
+
+            import cc_loop.parallel_scheduler as parallel_scheduler
+            import cc_loop.run as run_module
+
+            old_parallel_root = parallel_scheduler.DEFAULT_WORKTREE_ROOT
+            old_run_root = run_module.DEFAULT_WORKTREE_ROOT
+            parallel_scheduler.DEFAULT_WORKTREE_ROOT = worktree_root
+            run_module.DEFAULT_WORKTREE_ROOT = worktree_root
+            try:
+                execute_parallel_batch(load_state("par-run", state_root), state_root)
+            finally:
+                parallel_scheduler.DEFAULT_WORKTREE_ROOT = old_parallel_root
+                run_module.DEFAULT_WORKTREE_ROOT = old_run_root
+
+            state = load_state("par-run", state_root)
+            graph = ensure_task_graph(state)
+            assert graph is not None
+            self.assertEqual(state.running_attempts, {})
+            self.assertEqual(state.merge_queue, [])
+            self.assertEqual({node.id: node.status.value for node in graph.nodes}, {"T1": "passed", "T2": "passed"})
+            self.assertEqual({attempt.graph_node_id for attempt in state.history}, {"T1", "T2"})
+            self.assertTrue(all(attempt.phase.value == "merged" for attempt in state.history))
+            self.assertTrue((repo / "hello.txt").is_file())
+            self.assertTrue((repo / "world.txt").is_file())
         finally:
             env.close()
 
