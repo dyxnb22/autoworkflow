@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from cc_loop.failure import FailureReport, FailureType
 from cc_loop.state import AttemptRecord, TaskState
+from cc_loop.task_graph import ensure_task_graph, get_node
 
 
 def build_repair_prompt(
@@ -25,6 +26,23 @@ def build_repair_prompt(
     return builder(state=state, attempt=attempt, report=report)
 
 
+def _graph_node_context(state: TaskState, attempt: AttemptRecord) -> str:
+    graph = ensure_task_graph(state)
+    if graph is None or not attempt.graph_node_id:
+        return ""
+    node = get_node(graph, attempt.graph_node_id)
+    if node is None:
+        return f"Graph node: {attempt.graph_node_id}\n"
+    criteria = node.acceptance_criteria or ["(none specified)"]
+    return (
+        f"Graph node: {node.id} — {node.title}\n"
+        f"Node description: {node.description or '(none)'}\n"
+        "Acceptance criteria:\n"
+        + "\n".join(f"- {item}" for item in criteria)
+        + "\n"
+    )
+
+
 def _safety_rules() -> str:
     return (
         "Safety rules:\n"
@@ -44,6 +62,7 @@ def _merge_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: Fa
         f"Task ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
         f"Iteration: {attempt.iteration} retry: {attempt.retry}\n"
+        f"{_graph_node_context(state, attempt)}"
         f"Failure: {report.message}\n"
         f"Conflict files: {', '.join(conflict_files) or '(see merge output)'}\n"
         f"Merge stderr tail:\n{stderr_tail}\n"
@@ -58,12 +77,18 @@ def _test_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: Fai
     plan_prompt = ""
     if attempt.plan_json:
         plan_prompt = str(attempt.plan_json.get("prompt", "")).strip()
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is not None:
+            plan_prompt = node.description or plan_prompt
     return (
         "You are the cc-loop implementer running a test-failure repair.\n"
         f"{_safety_rules()}\n"
         f"Task ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
         f"Iteration: {attempt.iteration} retry: {attempt.retry}\n"
+        f"{_graph_node_context(state, attempt)}"
         f"Failed tests: {', '.join(failed_tests) or '(see test.output.txt)'}\n"
         f"Test output tail:\n{stderr_tail}\n"
         f"Original implementation prompt:\n{plan_prompt}\n"
@@ -77,6 +102,7 @@ def _provider_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report:
         f"{_safety_rules()}\n"
         f"Task ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
+        f"{_graph_node_context(state, attempt)}"
         f"Phase: {report.details.get('phase', attempt.phase.value)}\n"
         f"Provider: {report.details.get('provider', '')}\n"
         f"Failure: {report.message}\n"
@@ -92,6 +118,7 @@ def _reviewer_stop_repair_prompt(*, state: TaskState, attempt: AttemptRecord, re
         f"{_safety_rules()}\n"
         f"Task ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
+        f"{_graph_node_context(state, attempt)}"
         f"Reviewer stop reason: {report.stop_reason}\n"
         f"Issues: {issues}\n"
         f"Required changes:\n{retry_prompt or report.message}\n"
@@ -104,5 +131,6 @@ def _generic_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: 
         f"{_safety_rules()}\n"
         f"Task ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
+        f"{_graph_node_context(state, attempt)}"
         f"Failure: {report.message}\n"
     )

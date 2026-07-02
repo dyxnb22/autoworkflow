@@ -199,6 +199,13 @@ class ClaudeCodeAdapter(ProviderAdapter):
             data = _extract_json(text)
         except json.JSONDecodeError:
             data = _extract_lenient_planner_json(text)
+        if data.get("mode") == "task_graph" or isinstance(data.get("nodes"), list):
+            return {
+                "mode": "task_graph",
+                "summary": data.get("summary", ""),
+                "nodes": data.get("nodes", []),
+                "is_final_step": bool(data.get("is_final_step", False)),
+            }
         return {
             "prompt": data["prompt"],
             "expected_changes": data.get("expected_changes", ""),

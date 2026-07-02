@@ -1326,9 +1326,13 @@ def _begin_attempt(
     return attempt
 
 
-def summarize_attempt(attempt: AttemptRecord) -> str:
+def summarize_attempt(attempt: AttemptRecord, state: TaskState | None = None) -> str:
     """Human-readable next-action hint for CLI output."""
     if attempt.phase == AttemptPhase.MERGED:
+        graph = ensure_task_graph(state) if state is not None else None
+        if graph is not None and not graph_complete(graph):
+            node = attempt.graph_node_id or graph.current_node_id or "?"
+            return f"node {node} merged; run `cc-loop auto` or `cc-loop run` for next graph node"
         return "attempt merged; task complete"
     if attempt.phase == AttemptPhase.FAILED:
         return "attempt failed; inspect artifacts before resuming"

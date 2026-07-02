@@ -1,14 +1,25 @@
 # AGENTS.md
 
-Canonical agent reference for cc-loop. **Package 0.3.0.**
+Canonical agent reference for cc-loop. **Package 0.4.0.**
 
 ## Docs
 
 - [docs/INTEGRATION.md](docs/INTEGRATION.md) — external CLI/JSON contract
+- [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) — task graph orchestration (v0.4)
 - [docs/RECOVERY.md](docs/RECOVERY.md) — failure classification, repair budgets, auto dispatch
 - [docs/EXIT_CODES.md](docs/EXIT_CODES.md)
 - [CLAUDE.md](CLAUDE.md) — Claude Code entry
 - [.cursor/rules/cc-loop.mdc](.cursor/rules/cc-loop.mdc) — Cursor rules
+
+## v0.4 task graph modules
+
+| Module | Role |
+|--------|------|
+| `task_graph.py` | `TaskGraph`, `GraphNode`, dispatcher, planner JSON parsing |
+| `run.py` | node-scoped prompts; sequential graph execution in `auto` |
+| `inspect.py` | `task_graph` block in `status --json`; `format_task_graph_human` |
+
+Planner prefers `mode: task_graph` JSON; legacy single-step JSON auto-wraps to one-node graph.
 
 ## v0.3 recovery modules
 
@@ -26,4 +37,4 @@ Canonical agent reference for cc-loop. **Package 0.3.0.**
 python -m pytest tests/ -q
 ```
 
-Recovery tests: `test_failure_classification.py`, `test_recovery_dispatch.py`, `test_auto_recovery.py`
+Graph tests: `test_task_graph.py`. Recovery tests: `test_failure_classification.py`, `test_recovery_dispatch.py`, `test_auto_recovery.py`

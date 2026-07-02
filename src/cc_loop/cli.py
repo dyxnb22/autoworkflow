@@ -278,7 +278,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"merge_error: {attempt.merge_error}")
         print(f"worktree_path: {attempt.worktree_path}")
         print(f"artifacts: {artifact_root}")
-        print(f"next: {summarize_attempt(attempt)}")
+        print(f"next: {summarize_attempt(attempt, state)}")
     else:
         print("next: cc-loop run")
     return 0
@@ -373,7 +373,7 @@ def _print_run_summary(
         print(f"merge_output: {artifact_paths['merge_output']}")
     if attempt.merge_error:
         print(f"merge_error: {attempt.merge_error}")
-    print(f"next: {summarize_attempt(attempt)}")
+    print(f"next: {summarize_attempt(attempt, state)}")
 
 
 def cmd_run(args: argparse.Namespace) -> int:

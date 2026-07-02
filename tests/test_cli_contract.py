@@ -349,6 +349,42 @@ Use stable IDs like "T1".",
         self.assertTrue(data["is_final_step"])
 
 
+    def test_planner_parse_task_graph_json(self) -> None:
+        adapter = ClaudeCodeAdapter()
+        env = TempEnv()
+        try:
+            output = env.root / "planner-graph.txt"
+            output.write_text(
+                '''```json
+{
+  "mode": "task_graph",
+  "summary": "Two step plan",
+  "nodes": [
+    {
+      "id": "T1",
+      "title": "Scaffold",
+      "description": "Create package skeleton",
+      "kind": "implementation",
+      "owner": "implementer",
+      "dependencies": [],
+      "acceptance_criteria": ["imports work"],
+      "files_scope": ["src/"]
+    }
+  ],
+  "is_final_step": false
+}
+```''',
+                encoding="utf-8",
+            )
+            data = adapter.parse_planner_output(output)
+        finally:
+            env.close()
+
+        self.assertEqual(data["mode"], "task_graph")
+        self.assertEqual(len(data["nodes"]), 1)
+        self.assertEqual(data["nodes"][0]["id"], "T1")
+
+
 class DetachTests(unittest.TestCase):
     def setUp(self) -> None:
         self.env = TempEnv()

@@ -1,5 +1,5 @@
 ---
-description: cc-loop v0.2.0 — local agent orchestrator (Python 3.11+)
+description: cc-loop v0.4.0 — local agent orchestrator (Python 3.11+)
 globs:
   - "src/cc_loop/**/*.py"
   - "tests/**/*.py"
@@ -8,9 +8,9 @@ alwaysApply: true
 
 # cc-loop
 
-Orchestrator only — not a coding agent. Loop: `state → planner → worktree → implementer → tests → reviewer → merge/retry/stop`.
+Orchestrator only — not a coding agent. Loop: `state → planner → task graph → worktree → implementer → tests → reviewer → merge/retry/stop` (sequential graph nodes in v0.4).
 
-**Version:** 0.3.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md)
+**Version:** 0.4.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Task graph:** [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md)
 
 ## Tests
 
@@ -18,15 +18,15 @@ Orchestrator only — not a coding agent. Loop: `state → planner → worktree 
 python -m pytest tests/ -q
 ```
 
-Real git in `TempEnv`; do not mock git. Contract tests: `tests/test_cli_contract.py`.
+Real git in `TempEnv`; do not mock git. Contract tests: `tests/test_cli_contract.py`. Graph tests: `tests/test_task_graph.py`.
 
-## Layout (new/changed in v0.2.0)
+## Layout
 
-`inspect.py` · `list_tasks.py` · `detach.py` · `failure.py` · `recovery.py` · `repair_prompts.py`
+`inspect.py` · `list_tasks.py` · `detach.py` · `failure.py` · `recovery.py` · `repair_prompts.py` · `task_graph.py`
 
 ## CLI surface (do not break without INTEGRATION.md update)
 
-`init` `doctor` `list` `status --json` `auto --detach` · `--task-id` on run/resume/status/auto · `CC_LOOP_STATE_ROOT`
+`init` `doctor` `list` `status --json` `graph --json` `auto --detach` · `--task-id` on run/resume/status/auto/graph · `CC_LOOP_STATE_ROOT`
 
 Global `--state-root` must precede subcommand.
 
@@ -39,6 +39,7 @@ Global `--state-root` must precede subcommand.
 - Dirty repo blocks run; bounded `max_review_patch_bytes` for reviewer
 - `claude-code` planner/reviewer: `print_only=True` in `run.py`
 - Persist raw provider output even on parse failure
+- Legacy state without `task_graph` must load; planner legacy JSON wraps to single-node graph
 
 ## Provider change checklist
 

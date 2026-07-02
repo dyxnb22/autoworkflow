@@ -200,6 +200,53 @@ class TaskGraphTests(unittest.TestCase):
         restored = TaskGraph.from_dict(json.loads(json.dumps(graph.to_dict())))
         self.assertEqual(restored.nodes[0].title, "A")
 
+    def test_repair_prompt_includes_graph_node_context(self) -> None:
+        from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition
+        from cc_loop.repair_prompts import build_repair_prompt
+        from cc_loop.state import AttemptRecord, TaskStatus, utc_now_iso
+
+        graph = graph_from_planner_json(
+            {
+                "mode": "task_graph",
+                "nodes": [
+                    {
+                        "id": "T1",
+                        "title": "Parser",
+                        "description": "Implement parser module",
+                        "dependencies": [],
+                        "acceptance_criteria": ["parser tests pass"],
+                    }
+                ],
+            }
+        )
+        state = TaskState(
+            task_id="repair-graph",
+            goal="build parser",
+            target_repo="/tmp/r",
+            base_branch="main",
+            base_commit="abc",
+            status=TaskStatus.RUNNING,
+            iteration=1,
+            config=merge_loop_config({}),
+            task_graph=graph,
+        )
+        attempt = AttemptRecord(
+            iteration=1,
+            retry=0,
+            created_at=utc_now_iso(),
+            base_commit="abc",
+            graph_node_id="T1",
+        )
+        report = FailureReport(
+            failure_type=FailureType.TEST_IMPLEMENTATION,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message="tests failed",
+            details={"stderr_tail": "AssertionError"},
+        )
+        prompt = build_repair_prompt(state=state, attempt=attempt, report=report)
+        self.assertIn("Graph node: T1", prompt)
+        self.assertIn("parser tests pass", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
