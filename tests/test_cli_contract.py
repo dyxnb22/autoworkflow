@@ -16,6 +16,7 @@ from cc_loop.cli import main, resolve_task_id
 from cc_loop.inspect import build_status_snapshot, runner_pid_path
 from cc_loop.detach import spawn_detached_auto
 from cc_loop.providers.claude_code import ClaudeCodeAdapter
+from cc_loop.providers.claude_code import _extract_json
 from cc_loop.state import load_state, save_state, state_path
 from tests.helpers import TempEnv, init_git_repo, make_task
 
@@ -251,6 +252,57 @@ class ClaudeCodePrintTests(unittest.TestCase):
             print_only=True,
         )
         self.assertIn("--print", args)
+
+    def test_extract_json_handles_nested_markdown_fences_in_string(self) -> None:
+        text = '''```json
+{
+  "prompt": "Create files:\\n```\\nsrc/app.py\\n```",
+  "expected_changes": "files",
+  "acceptance_criteria": "tests pass",
+  "is_final_step": true
+}
+```'''
+        data = _extract_json(text)
+        self.assertEqual(data["prompt"], "Create files:\n```\nsrc/app.py\n```")
+        self.assertTrue(data["is_final_step"])
+
+    def test_planner_parse_falls_back_for_unescaped_multiline_prompt(self) -> None:
+        adapter = ClaudeCodeAdapter()
+        env = TempEnv()
+        try:
+            output = env.root / "planner.txt"
+            output.write_text(
+                '''Here is the plan:
+```json
+{
+  "prompt": "Build the project.
+
+Create files:
+```toml
+[project]
+name = "demo"
+```
+Use stable IDs like "T1".",
+
+  "expected_changes": "pyproject.toml and src files",
+
+  "acceptance_criteria": "1. tests pass
+2. CLI works",
+
+  "is_final_step": true
+}
+```''',
+                encoding="utf-8",
+            )
+            data = adapter.parse_planner_output(output)
+        finally:
+            env.close()
+
+        self.assertIn("Build the project.", data["prompt"])
+        self.assertIn("[project]", data["prompt"])
+        self.assertEqual(data["expected_changes"], "pyproject.toml and src files")
+        self.assertIn("CLI works", data["acceptance_criteria"])
+        self.assertTrue(data["is_final_step"])
 
 
 class DetachTests(unittest.TestCase):

@@ -13,6 +13,8 @@ from cc_loop.failure import (
     apply_report_to_attempt,
     classify_merge_failure,
     classify_provider_failure,
+    clear_report_from_attempt,
+    failure_report_path,
     write_failure_report,
 )
 from cc_loop.git import (
@@ -350,6 +352,8 @@ def run_planning_phase(
         encoding="utf-8",
     )
     attempt.plan_json = plan_json
+    clear_report_from_attempt(attempt)
+    failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
     attempt.phase = AttemptPhase.WORKTREE_CREATED
     save_state(state, state_root)
     return state
@@ -665,6 +669,8 @@ def _run_finalize_phase(
         return state, attempt, artifact_paths
 
     attempt.phase = AttemptPhase.MERGED
+    clear_report_from_attempt(attempt)
+    failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
     state.status = TaskStatus.DONE
     save_state(state, state_root)
     return state, attempt, artifact_paths

@@ -109,6 +109,13 @@ def apply_report_to_attempt(attempt: AttemptRecord, report: FailureReport) -> No
     attempt.attempted_repairs = list(report.attempted_repairs)
 
 
+def clear_report_from_attempt(attempt: AttemptRecord) -> None:
+    attempt.failure_type = ""
+    attempt.recovery_disposition = ""
+    attempt.stop_reason = ""
+    attempt.failure_details = {}
+
+
 def extract_conflict_files(text: str) -> list[str]:
     files: list[str] = []
     for match in _CONFLICT_FILE_RE.finditer(text):

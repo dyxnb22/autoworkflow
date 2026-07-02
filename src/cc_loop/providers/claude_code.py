@@ -16,14 +16,77 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.MULTILINE)
 
 def _extract_json(text: str) -> dict[str, Any]:
     """Extract and parse the first JSON object from a text response."""
-    match = _JSON_FENCE_RE.search(text)
-    if match:
-        return json.loads(match.group(1).strip())
+    for match in _JSON_FENCE_RE.finditer(text):
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            continue
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         return json.loads(text[start : end + 1])
     return json.loads(text.strip())
+
+
+def _extract_lenient_string_field(text: str, key: str, following_keys: tuple[str, ...]) -> str:
+    start_marker = f'"{key}"'
+    start = text.find(start_marker)
+    if start == -1:
+        raise KeyError(key)
+    colon = text.find(":", start + len(start_marker))
+    if colon == -1:
+        raise KeyError(key)
+    value_start = text.find('"', colon)
+    if value_start == -1:
+        raise KeyError(key)
+    value_start += 1
+
+    candidates = []
+    for next_key in following_keys:
+        marker = f'"{next_key}"'
+        marker_index = text.find(marker, value_start)
+        if marker_index != -1:
+            comma = text.rfind(",", value_start, marker_index)
+            if comma != -1:
+                candidates.append(comma)
+    if not candidates:
+        end_quote = text.rfind('"')
+        if end_quote <= value_start:
+            raise KeyError(key)
+        end = end_quote
+    else:
+        end = min(candidates)
+
+    value = text[value_start:end].strip()
+    if value.endswith('"'):
+        value = value[:-1]
+    return value.strip()
+
+
+def _extract_lenient_planner_json(text: str) -> dict[str, Any]:
+    """Parse Claude's JSON-like planner output when multiline strings are not escaped."""
+    prompt = _extract_lenient_string_field(
+        text,
+        "prompt",
+        ("expected_changes", "acceptance_criteria", "is_final_step"),
+    )
+    expected_changes = _extract_lenient_string_field(
+        text,
+        "expected_changes",
+        ("acceptance_criteria", "is_final_step"),
+    )
+    acceptance_criteria = _extract_lenient_string_field(
+        text,
+        "acceptance_criteria",
+        ("is_final_step",),
+    )
+    final_match = re.search(r'"is_final_step"\s*:\s*(true|false)', text, re.IGNORECASE)
+    return {
+        "prompt": prompt,
+        "expected_changes": expected_changes,
+        "acceptance_criteria": acceptance_criteria,
+        "is_final_step": bool(final_match and final_match.group(1).lower() == "true"),
+    }
 
 
 @register_provider
@@ -132,7 +195,10 @@ class ClaudeCodeAdapter(ProviderAdapter):
 
     def parse_planner_output(self, last_message_path: Path) -> dict[str, Any]:
         text = last_message_path.read_text(encoding="utf-8")
-        data = _extract_json(text)
+        try:
+            data = _extract_json(text)
+        except json.JSONDecodeError:
+            data = _extract_lenient_planner_json(text)
         return {
             "prompt": data["prompt"],
             "expected_changes": data.get("expected_changes", ""),
