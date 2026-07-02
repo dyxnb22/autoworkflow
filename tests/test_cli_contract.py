@@ -13,6 +13,7 @@ from unittest import mock
 
 import tests.fake_providers  # noqa: F401
 from cc_loop.cli import main, resolve_task_id
+from cc_loop import __version__
 from cc_loop.inspect import build_status_snapshot, runner_pid_path
 from cc_loop.task_graph import graph_from_planner_json
 from cc_loop.detach import spawn_detached_auto
@@ -86,7 +87,7 @@ class ListAndStatusJsonTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["cc_loop_version"], "0.4.0")
+        self.assertEqual(payload["cc_loop_version"], __version__)
         self.assertEqual(payload["task_id"], "snap-task")
         self.assertEqual(payload["next_action"], "run")
         self.assertFalse(payload["running"])

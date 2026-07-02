@@ -1,6 +1,6 @@
-# Task graph orchestration (v0.4)
+# Task graph orchestration (v0.4–v0.9)
 
-cc-loop v0.4 adds a **task graph** layer on top of the linear planner → implementer → test → reviewer pipeline. The planner can decompose a goal into multiple dependent nodes; cc-loop executes them sequentially (one node per iteration) while tracking per-node status, prompts, and recovery.
+cc-loop v0.4 adds a **task graph** layer on top of the linear planner → implementer → test → reviewer pipeline. v0.7 adds dynamic replanning; v0.8 adds per-node provider/policy routing; v0.9 adds parallel execution for independent nodes.
 
 ## Modes
 
@@ -69,7 +69,7 @@ cc-loop stores the graph in `state.json` under `task_graph` and runs nodes in de
 8. **Continue** — if more nodes remain, `auto` starts the next iteration for the next runnable node.
 9. **Done** — when all required nodes are `passed`, task status becomes `done`.
 
-Nodes run **sequentially** in v0.4. The state model and dispatcher are designed so parallel workers can be added later.
+Nodes run **sequentially** by default (`max_parallel_nodes: 1`). Set `max_parallel_nodes` > 1 in task config for parallel execution of independent nodes (v0.9). Approved parallel nodes merge through a serial merge queue.
 
 ## Multi-agent orchestration
 
@@ -88,6 +88,8 @@ cc-loop status --task-id TASK_ID          # human summary includes graph progres
 cc-loop status --task-id TASK_ID --json   # additive task_graph block
 cc-loop graph --task-id TASK_ID           # human node list
 cc-loop graph --task-id TASK_ID --json    # graph JSON snapshot
+cc-loop graph --task-id TASK_ID --history # graph mutation events (v0.7)
+cc-loop report --task-id TASK_ID --json   # full task report (v0.6)
 ```
 
 Example human `graph` output:
@@ -114,6 +116,19 @@ Test failures, merge conflicts, and provider errors apply to the **current graph
 
 When a dependency node fails terminally, downstream nodes are marked `blocked`.
 
+## Per-node routing (v0.8)
+
+Graph nodes may optionally specify:
+
+- `planner_provider`, `implementer_provider`, `reviewer_provider`, `reviewer_providers`
+- `test_policy`, `merge_policy`, `max_changed_files`, `max_review_patch_bytes`, `requires_manual_review`, `allow_merge_without_tests`
+
+Task-level config is the fallback. Node policy cannot weaken task-level safety unless `allow_node_policy_weakening` is explicitly enabled.
+
+## Dynamic replanning (v0.7)
+
+Reviewer `decision: replan` triggers a planner graph patch (`mode: graph_patch`). Valid patches apply to the persisted graph; invalid patches fail with a structured failure report. Mutations are recorded in `graph_events.jsonl`.
+
 ## Runnable node rules
 
 A node is runnable when:
@@ -123,9 +138,8 @@ A node is runnable when:
 
 A node is `blocked` when a dependency is terminally failed or references an unknown node id.
 
-## Limitations (v0.4)
+## Limitations
 
-- No parallel node execution.
-- No per-node provider overrides (roles come from task config).
-- Planner must produce valid graph JSON or legacy JSON.
-- Graph replanning mid-task is not supported; the graph is created on the first planning phase.
+- Parallel execution requires `max_parallel_nodes` > 1 and independent runnable nodes.
+- Graph replanning requires reviewer `replan` decision and valid planner patch JSON.
+- Planner must produce valid graph JSON, graph patch JSON, or legacy JSON.

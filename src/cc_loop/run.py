@@ -10,6 +10,8 @@ from cc_loop.config import LoopConfig
 from cc_loop.diff import collect_bounded_review_patches, read_diff_stat_summary
 from cc_loop.failure import (
     FailureReport,
+    FailureType,
+    RecoveryDisposition,
     apply_report_to_attempt,
     classify_merge_failure,
     classify_provider_failure,
@@ -28,6 +30,9 @@ from cc_loop.git import (
 from cc_loop.preflight import PreflightResult, run_preflight
 from cc_loop.providers.base import ProviderRunResult, get_provider
 from cc_loop.repair_prompts import build_repair_prompt
+from cc_loop.events import EventType, append_event
+from cc_loop.graph_patch import GraphPatch, GraphPatchError, apply_patch
+from cc_loop.task_graph import effective_node_providers
 from cc_loop.state import (
     DEFAULT_WORKTREE_ROOT,
     AttemptPhase,
@@ -44,6 +49,7 @@ from cc_loop.state import (
 from cc_loop.subprocess_util import run_with_timeout
 from cc_loop.task_graph import (
     completed_dependency_labels,
+    effective_node_policy,
     ensure_task_graph,
     get_node,
     graph_complete,
@@ -137,6 +143,164 @@ def execute_resume(state: TaskState, state_root: Path) -> tuple[TaskState, Attem
     state.status = TaskStatus.RUNNING
     save_state(state, state_root)
     return _run_from_phase(state, state_root, attempt, artifact_paths, start_phase=attempt.phase)
+
+
+def execute_replan(
+    state: TaskState,
+    state_root: Path,
+    report: FailureReport | None,
+) -> tuple[TaskState, AttemptRecord, dict[str, Path]]:
+    """Run planner to produce and apply a graph patch after reviewer replan."""
+    attempt = _current_attempt(state)
+    artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
+    append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=EventType.REPLAN_STARTED,
+        iteration=attempt.iteration,
+        retry=attempt.retry,
+        graph_node_id=attempt.graph_node_id,
+        message="replanning task graph",
+    )
+    state.status = TaskStatus.REPLANNING
+    attempt.phase = AttemptPhase.REPLANNING
+    save_state(state, state_root)
+
+    graph = ensure_task_graph(state)
+    if graph is None:
+        raise PlanningError("replan requested but task has no graph")
+
+    config: LoopConfig = state.config
+    provider_name = config["planner_provider"]
+    worktree = Path(attempt.worktree_path)
+    prompt = _build_replan_planner_prompt(state, attempt, report)
+    artifact_paths["plan_prompt"].write_text(prompt, encoding="utf-8")
+
+    provider = get_provider(provider_name)
+    timeout_seconds = _planner_timeout_seconds(config, provider_name)
+    print_only = provider_name == "claude-code"
+    run_result = provider.run(
+        worktree_path=worktree,
+        prompt=prompt,
+        output_path=artifact_paths["plan_last_message"],
+        config=config,
+        timeout_seconds=timeout_seconds,
+        raw_output_path=artifact_paths["plan_raw"],
+        print_only=print_only,
+    )
+    if run_result.timed_out or run_result.exit_code != 0:
+        raise PlanningError(f"replan planner failed: exit={run_result.exit_code}")
+
+    patch_json = provider.parse_planner_output(artifact_paths["plan_last_message"])
+    if patch_json.get("mode") != "graph_patch":
+        raise PlanningError("planner replan output must use mode=graph_patch")
+
+    patch = GraphPatch.from_planner_json(patch_json)
+    try:
+        apply_patch(graph, patch)
+    except GraphPatchError as exc:
+        from cc_loop.failure import write_failure_report
+
+        fail_report = FailureReport(
+            failure_type=FailureType.PROVIDER_PARSE_ERROR,
+            disposition=RecoveryDisposition.TERMINAL,
+            message=str(exc),
+            stop_reason="invalid_graph_patch",
+            details=getattr(exc, "details", {}),
+            suggested_actions=["Fix planner graph patch output"],
+        )
+        write_failure_report(artifact_paths["plan_prompt"].parent, fail_report)
+        raise PlanningError(str(exc)) from exc
+
+    append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=EventType.REPLAN_COMPLETED,
+        iteration=attempt.iteration,
+        message=patch.reason,
+        details={"operations": len(patch.operations)},
+        stream="graph",
+    )
+    for op in patch.operations:
+        append_event(
+            state_root,
+            task_id=state.task_id,
+            event_type="graph.patch_applied",
+            message=f"{op.op} {op.node_id}",
+            details=op.to_dict(),
+            stream="graph",
+        )
+
+    state.task_graph = graph
+    state.status = TaskStatus.STOPPED
+    attempt.phase = AttemptPhase.WORKTREE_CREATED
+    save_state(state, state_root)
+    return state, attempt, artifact_paths
+
+
+def _build_replan_planner_prompt(
+    state: TaskState,
+    attempt: AttemptRecord,
+    report: FailureReport | None,
+) -> str:
+    graph = ensure_task_graph(state)
+    context = ""
+    if report is not None:
+        context = (
+            f"\nReplan reason: {report.message}\n"
+            f"Details: {json.dumps(report.details)}\n"
+        )
+    return (
+        "You are the cc-loop planner. The reviewer requested a task graph revision.\n"
+        "Respond with JSON only using mode=graph_patch:\n"
+        "{\n"
+        '  "mode": "graph_patch",\n'
+        '  "reason": "why the graph is being changed",\n'
+        '  "operations": [\n'
+        '    {"op": "add_node", "data": {"id": "T3", "title": "...", ...}},\n'
+        '    {"op": "update_node", "node_id": "T2", "data": {"description": "..."}},\n'
+        '    {"op": "add_dependency", "node_id": "T3", "data": {"dependency": "T1"}},\n'
+        '    {"op": "skip_node", "node_id": "T4", "data": {"reason": "..."}}\n'
+        "  ]\n"
+        "}\n"
+        f"Task goal: {state.goal}\n"
+        f"Current graph: {json.dumps(graph.to_dict() if graph else {})}\n"
+        f"Attempt summary: phase={attempt.phase.value} test={attempt.test_status} decision={attempt.decision}\n"
+        f"{context}"
+    )
+
+
+def _resolve_implementer_provider(state: TaskState, attempt: AttemptRecord) -> str:
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is not None:
+            return effective_node_providers(node, state.providers)["implementer"]  # type: ignore[return-value]
+    return state.config["implementer_provider"]
+
+
+def _resolve_reviewer_chain(state: TaskState, attempt: AttemptRecord) -> list[str]:
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is not None:
+            chain = effective_node_providers(node, state.providers)["reviewer_chain"]
+            return [str(p) for p in chain if p]
+    return [state.config["reviewer_provider"]]
+
+
+def _aggregate_reviewer_decisions(reviews: list[dict[str, Any]]) -> dict[str, Any]:
+    decisions = [str(r.get("decision", "reject")) for r in reviews]
+    if any(d == "stop" for d in decisions):
+        stop_review = next(r for r in reviews if r.get("decision") == "stop")
+        return dict(stop_review)
+    if any(d == "replan" for d in decisions):
+        replan_review = next(r for r in reviews if r.get("decision") == "replan")
+        return dict(replan_review)
+    if any(d == "reject" for d in decisions):
+        reject_review = next(r for r in reviews if r.get("decision") == "reject")
+        return dict(reject_review)
+    return dict(reviews[-1]) if reviews else {"decision": "reject", "reason": "no reviewer output"}
 
 
 def execute_repair_recovery(
@@ -480,7 +644,7 @@ def run_implementer_phase(
         raise ImplementingError("plan_json is missing; planner must succeed before implementer")
 
     config: LoopConfig = state.config
-    provider_name = config["implementer_provider"]
+    provider_name = _resolve_implementer_provider(state, attempt)
     worktree = Path(attempt.worktree_path)
     prompt = build_implementer_prompt(state, attempt.plan_json, attempt=attempt)
 
@@ -514,6 +678,7 @@ def run_implementer_phase(
 
     _write_implementer_artifacts_after(artifact_paths=artifact_paths, run_result=run_result)
     attempt.implementer_exit_code = run_result.exit_code
+    attempt.implementer_provider = provider_name
 
     diff_metadata = capture_worktree_diff_metadata(
         worktree,
@@ -602,13 +767,13 @@ def run_review_phase(
     state_root: Path,
     artifact_paths: dict[str, Path],
 ) -> TaskState:
-    """Build bounded review context and run the configured reviewer provider."""
+    """Build bounded review context and run the configured reviewer provider(s)."""
     attempt = _current_attempt(state)
     if attempt.review_json is not None and attempt.decision:
         return state
 
     config: LoopConfig = state.config
-    provider_name = config["reviewer_provider"]
+    reviewer_chain = _resolve_reviewer_chain(state, attempt)
     worktree = Path(attempt.worktree_path)
     attempt.phase = AttemptPhase.REVIEWING
     save_state(state, state_root)
@@ -630,61 +795,69 @@ def run_review_phase(
         test_status=attempt.test_status,
     )
     artifact_paths["review_prompt"].write_text(prompt, encoding="utf-8")
-    artifact_paths["review_provider"].write_text(provider_name + "\n", encoding="utf-8")
-    artifact_paths["review_raw"].write_text("", encoding="utf-8")
-    artifact_paths["review_last_message"].write_text("", encoding="utf-8")
 
-    try:
-        provider = get_provider(provider_name)
-    except ValueError as exc:
-        _mark_review_failed(state, state_root)
-        raise ReviewError(str(exc)) from exc
+    all_reviews: list[dict[str, Any]] = []
+    for idx, provider_name in enumerate(reviewer_chain):
+        artifact_paths["review_provider"].write_text(provider_name + "\n", encoding="utf-8")
+        artifact_paths["review_raw"].write_text("", encoding="utf-8")
+        artifact_paths["review_last_message"].write_text("", encoding="utf-8")
 
-    timeout_seconds = _reviewer_timeout_seconds(config, provider_name)
-    print_only = provider_name == "claude-code"
-    try:
-        run_result = provider.run(
-            worktree_path=worktree,
-            prompt=prompt,
-            output_path=artifact_paths["review_last_message"],
-            config=config,
-            timeout_seconds=timeout_seconds,
-            raw_output_path=artifact_paths["review_raw"],
-            print_only=print_only,
-        )
-    except NotImplementedError as exc:
-        _mark_review_failed(state, state_root)
-        raise ReviewError(str(exc)) from exc
+        try:
+            provider = get_provider(provider_name)
+        except ValueError as exc:
+            _mark_review_failed(state, state_root)
+            raise ReviewError(str(exc)) from exc
 
-    artifact_paths["review_provider"].write_text(run_result.provider + "\n", encoding="utf-8")
-    attempt.review_raw_path = str(artifact_paths["review_raw"])
+        timeout_seconds = _reviewer_timeout_seconds(config, provider_name)
+        print_only = provider_name == "claude-code"
+        try:
+            run_result = provider.run(
+                worktree_path=worktree,
+                prompt=prompt,
+                output_path=artifact_paths["review_last_message"],
+                config=config,
+                timeout_seconds=timeout_seconds,
+                raw_output_path=artifact_paths["review_raw"],
+                print_only=print_only,
+            )
+        except NotImplementedError as exc:
+            _mark_review_failed(state, state_root)
+            raise ReviewError(str(exc)) from exc
 
-    if run_result.timed_out:
-        _mark_review_failed(state, state_root)
-        raise ReviewError(f"{provider_name} reviewer timed out")
+        artifact_paths["review_provider"].write_text(run_result.provider + "\n", encoding="utf-8")
+        attempt.review_raw_path = str(artifact_paths["review_raw"])
 
-    if run_result.exit_code != 0:
-        _mark_review_failed(state, state_root)
-        raise ReviewError(f"{provider_name} reviewer exited with code {run_result.exit_code}")
+        if run_result.timed_out:
+            _mark_review_failed(state, state_root)
+            raise ReviewError(f"{provider_name} reviewer timed out")
 
-    last_message_path = artifact_paths["review_last_message"]
-    if not last_message_path.is_file():
-        _mark_review_failed(state, state_root)
-        raise ReviewError(f"reviewer last-message artifact missing: {last_message_path}")
+        if run_result.exit_code != 0:
+            _mark_review_failed(state, state_root)
+            raise ReviewError(f"{provider_name} reviewer exited with code {run_result.exit_code}")
 
-    try:
-        review_json = provider.parse_reviewer_output(last_message_path)
-    except (json.JSONDecodeError, KeyError, TypeError, NotImplementedError) as exc:
-        _mark_review_failed(state, state_root)
-        raise ReviewError(f"reviewer output parse failed: {exc}") from exc
+        last_message_path = artifact_paths["review_last_message"]
+        if not last_message_path.is_file():
+            _mark_review_failed(state, state_root)
+            raise ReviewError(f"reviewer last-message artifact missing: {last_message_path}")
 
+        try:
+            review_json = provider.parse_reviewer_output(last_message_path)
+        except (json.JSONDecodeError, KeyError, TypeError, NotImplementedError) as exc:
+            _mark_review_failed(state, state_root)
+            raise ReviewError(f"reviewer output parse failed: {exc}") from exc
+
+        review_artifact = artifact_paths["review_parsed"].parent / f"review.parsed.{idx}.json"
+        review_artifact.write_text(json.dumps(review_json, indent=2) + "\n", encoding="utf-8")
+        all_reviews.append(review_json)
+
+    review_json = _aggregate_reviewer_decisions(all_reviews)
     artifact_paths["review_parsed"].write_text(
         json.dumps(review_json, indent=2) + "\n",
         encoding="utf-8",
     )
     attempt.review_json = review_json
     attempt.decision = str(review_json.get("decision", "reject"))
-    attempt.review_provider = run_result.provider
+    attempt.review_provider = ",".join(reviewer_chain)
 
     if attempt.decision == "approve":
         attempt.phase = AttemptPhase.APPROVED
@@ -704,6 +877,11 @@ def _run_finalize_phase(
     config: LoopConfig = state.config
 
     if attempt.decision == "stop":
+        state.status = TaskStatus.STOPPED
+        save_state(state, state_root)
+        return state, attempt, artifact_paths
+
+    if attempt.decision == "replan":
         state.status = TaskStatus.STOPPED
         save_state(state, state_root)
         return state, attempt, artifact_paths
@@ -984,7 +1162,8 @@ def build_reviewer_prompt(
         '  "retry_prompt": "",\n'
         '  "stop_reason": ""\n'
         "}\n"
-        'Allowed decisions: "approve", "reject", "stop".\n\n'
+        'Allowed decisions: "approve", "reject", "stop", "replan".\n'
+        'For replan include replan_reason and replan_prompt or suggested_changes.\n\n'
         f"Task ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
         f"Iteration: {attempt.iteration}\n"

@@ -302,6 +302,20 @@ def classify_reviewer_outcome(attempt: AttemptRecord) -> FailureReport | None:
             suggested_actions=["Retry from base commit if retries remain"],
         )
 
+    if decision == "replan":
+        return FailureReport(
+            failure_type=FailureType.REVIEWER_REJECT,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message=review_json.get("replan_reason", review_json.get("reason", "reviewer requested replan")),
+            stop_reason="replan_requested",
+            details={
+                "replan_reason": review_json.get("replan_reason", ""),
+                "replan_prompt": review_json.get("replan_prompt", ""),
+                "suggested_changes": review_json.get("suggested_changes", ""),
+            },
+            suggested_actions=["Planner will revise the task graph"],
+        )
+
     if decision != "stop":
         return None
 

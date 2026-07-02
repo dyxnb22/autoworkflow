@@ -33,6 +33,13 @@ class LoopConfig(TypedDict, total=False):
     auto_recover_tests: bool
     auto_recover_provider_errors: bool
     recovery_retry_backoff_seconds: int
+    max_wall_clock_seconds: int
+    max_consecutive_failures: int
+    max_artifact_log_bytes: int
+    max_changed_files_per_attempt: int
+    stale_heartbeat_seconds: int
+    max_parallel_nodes: int
+    allow_node_policy_weakening: bool
 
 
 DEFAULT_CONFIG: LoopConfig = {
@@ -61,6 +68,13 @@ DEFAULT_CONFIG: LoopConfig = {
     "auto_recover_tests": True,
     "auto_recover_provider_errors": True,
     "recovery_retry_backoff_seconds": 0,
+    "max_wall_clock_seconds": 0,
+    "max_consecutive_failures": 0,
+    "max_artifact_log_bytes": 0,
+    "max_changed_files_per_attempt": 0,
+    "stale_heartbeat_seconds": 120,
+    "max_parallel_nodes": 1,
+    "allow_node_policy_weakening": False,
 }
 
 

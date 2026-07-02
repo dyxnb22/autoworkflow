@@ -10,7 +10,7 @@ alwaysApply: true
 
 Orchestrator only — not a coding agent. Loop: `state → planner → task graph → worktree → implementer → tests → reviewer → merge/retry/stop` (sequential graph nodes in v0.4).
 
-**Version:** 0.4.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Task graph:** [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md)
+**Version:** 0.9.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Task graph:** [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md)
 
 ## Tests
 
@@ -29,6 +29,8 @@ Real git in `TempEnv`; do not mock git. Contract tests: `tests/test_cli_contract
 `init` `doctor` `list` `status --json` `graph --json` `auto --detach` · `--task-id` on run/resume/status/auto/graph · `CC_LOOP_STATE_ROOT`
 
 Global `--state-root` must precede subcommand.
+
+New commands (v0.5+): `stop`, `cancel`, `cleanup`, `report`. Graph: `--history`. Parallel: `max_parallel_nodes` in config.
 
 ## Invariants
 

@@ -1,6 +1,6 @@
 # CLAUDE.md — cc-loop
 
-**Package:** 0.4.0 · Read [AGENTS.md](AGENTS.md) · Task graph: [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · Recovery: [docs/RECOVERY.md](docs/RECOVERY.md)
+**Package:** 0.9.0 · Read [AGENTS.md](AGENTS.md) · Task graph: [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · Recovery: [docs/RECOVERY.md](docs/RECOVERY.md)
 
 ## What you are working on
 

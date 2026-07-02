@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.9.0 — 2026-07-02
+
+Full evolution from v0.4 task graph orchestrator through v0.9 parallel execution.
+
+### v0.4.x — Contract stabilization
+
+- Stale `failure.report.json` no longer pollutes successful `status --json` snapshots
+- Graph node status synced with attempt phase in status output
+- Contract tests for legacy state load, planner JSON wrapping, recovery-derived `next_action`
+
+### v0.5 — Unattended reliability
+
+- `cc-loop stop --task-id ID [--json]`
+- `cc-loop cancel --task-id ID [--json]`
+- `cc-loop cleanup --task-id ID [--json]`
+- `runner.heartbeat.json` from detached `auto` with staleness detection
+- `status --json` additive: `runner_state`, `last_heartbeat_at`, `runner_started_at`, `elapsed_seconds`, `can_stop`, `can_resume`, `can_cleanup`, `log_path`
+- Budgets: `max_wall_clock_seconds`, `max_consecutive_failures`, `max_artifact_log_bytes`, `max_changed_files_per_attempt`
+
+### v0.6 — Reports and event stream
+
+- `events.jsonl` append-only audit stream
+- `cc-loop report --task-id ID [--json]`
+- `status --json` additive: `current_message`
+
+### v0.7 — Dynamic replanning
+
+- Reviewer `decision: replan` with `replan_reason` / `replan_prompt`
+- `graph_patch.py` — add/update/skip nodes, dependency edits, validation
+- `graph_events.jsonl` and `cc-loop graph --history [--json]`
+- Replanning phase orchestration via `execute_replan`
+
+### v0.8 — Multi-role routing
+
+- Per-node `planner_provider`, `implementer_provider`, `reviewer_provider`, `reviewer_providers`
+- Per-node policy fields with safety guard (`allow_node_policy_weakening`)
+- Multi-reviewer chain with conservative aggregation
+- `status`/`graph` JSON expose `effective_providers` and `policy` per node
+
+### v0.9 — Parallel execution
+
+- `max_parallel_nodes` concurrent scheduling for independent graph nodes
+- `state_lock.py` — file lock + atomic writes (reentrant per thread)
+- Merge queue serializes approved parallel nodes
+- Failed nodes block dependents only; unrelated nodes continue
+
+### New modules
+
+- `runner_heartbeat.py`, `runner_control.py`, `events.py`, `report.py`, `graph_patch.py`, `budgets.py`, `state_lock.py`, `merge_queue.py`, `parallel_scheduler.py`
+
+### Preserved
+
+- Integration schema version 1 (additive JSON only)
+- Legacy state files without `task_graph` still load
+- `auto` uses `recovery.decide_auto_step`
+- No `pkill`, no main-worktree edits
+
 ## v0.4.0 — 2026-07-02
 
 Task graph orchestration for multi-node workflows.
@@ -85,50 +142,9 @@ Initial v1 release.
 ### Added
 
 - `cc-loop init` — initialize a task state file from a goal and target repo
-  - `--test-command`, `--planner`, `--reviewer`, `--implementer`, `--allow-merge-without-tests`, `--max-iterations`, `--max-retries`, `--base-branch`, `--task-id` flags
 - `cc-loop run` — execute one planning → implementation → test → review → merge iteration
-- `cc-loop resume` — continue an interrupted or stopped attempt without corrupting history
-- `cc-loop auto` — run unattended until done, with retry-exhaustion detection and macOS notifications
-  - `--max-iterations` override flag
+- `cc-loop resume` — continue an interrupted or stopped attempt
+- `cc-loop auto` — run unattended until done
 - `cc-loop status` — show current phase, decision, artifact paths, and next-action hint
-- `--state-root` global flag to override `~/.cc-loop`
-- Provider adapters: `codex` (planner, reviewer), `cursor` (implementer), `claude-code` (planner, reviewer, implementer)
-- State machine with full phase tracking: `preflight` → `planning` → `worktree_created` → `executing` → `testing` → `reviewing` → `approved`/`rejected`/`merged`/`failed`
-- Isolated git worktree per attempt; merge via ephemeral worktree to avoid switching user's checkout
-- Bounded diff collection for reviewer context (`max_review_patch_bytes`)
-- Timeout-safe subprocess handling with process-group kill (no `pkill -f`)
-- Legacy state migration for renamed fields (`cursor_*` → `implementer_*`)
-- `cc-loop resume` from `approved` phase retries merge after merge failure
-- Retry from base commit after reviewer `reject`; reviewer `stop` leaves worktree inspectable
-
-### Config defaults
-
-```json
-{
-  "planner_provider": "codex",
-  "reviewer_provider": "codex",
-  "implementer_provider": "cursor",
-  "codex_timeout_seconds": 300,
-  "cursor_timeout_seconds": 900,
-  "claude_code_timeout_seconds": 600,
-  "test_timeout_seconds": 600,
-  "max_iterations": 10,
-  "max_retries_per_step": 2,
-  "auto_merge": true,
-  "allow_merge_without_tests": false,
-  "max_review_patch_bytes": 60000
-}
-```
-
-### Known limitations (v0.2.0)
-
-- macOS notifications only (uses `osascript`); no equivalent on Linux/Windows
-- No automatic worktree cleanup; failed/rejected worktrees are left for manual inspection
-- `--state-root` is a global flag and must precede the subcommand (`cc-loop --state-root PATH list`, not `cc-loop list --state-root PATH`)
-
-### Known limitations (v0.1.0, historical)
-- `run`, `resume`, `status`, `auto` auto-detect the most recently modified task; there is no `--task-id` selector on these commands
-- Model names (`codex_model`, `cursor_model`, `claude_code_model`) and `cursor_force`/`cursor_sandbox` must be set by editing `state.json` directly after `init`
-- macOS notifications only (uses `osascript`); no equivalent on Linux/Windows
-- No automatic worktree cleanup; failed/rejected worktrees are left for manual inspection
-- Single active task at a time per `--state-root`
+- Provider adapters: `codex`, `cursor`, `claude-code`
+- Isolated git worktree per attempt; bounded diff collection; timeout-safe subprocess handling

@@ -18,7 +18,9 @@ from cc_loop.state import (
     plan_artifact_paths,
     task_dir,
 )
-from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph, graph_status_summary
+from cc_loop.budgets import wall_clock_elapsed_seconds
+from cc_loop.runner_heartbeat import is_heartbeat_stale, read_heartbeat
+from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph, graph_status_summary, sync_graph_node_with_attempt
 
 INTEGRATION_SCHEMA_VERSION = 1
 
@@ -99,18 +101,57 @@ def derive_next_action(
     return derive_next_action_from_step(step, report)
 
 
-def build_failure_snapshot(attempt: AttemptRecord | None, state_root: Path, task_id: str) -> dict:
+def _empty_failure_snapshot(attempt: AttemptRecord | None = None) -> dict:
+    base = {
+        "failure_type": "",
+        "disposition": "",
+        "stop_reason": "",
+        "recovery_retry_count": 0,
+        "merge_retry_count": 0,
+        "attempted_repairs": [],
+        "suggested_actions": [],
+        "details": {},
+    }
+    if attempt is not None:
+        base["recovery_retry_count"] = attempt.recovery_retry_count
+        base["merge_retry_count"] = attempt.merge_retry_count
+        base["attempted_repairs"] = list(attempt.attempted_repairs)
+    return base
+
+
+def _attempt_indicates_failure(attempt: AttemptRecord, state: TaskState) -> bool:
+    if attempt.failure_type:
+        return True
+    if attempt.merge_error:
+        return True
+    if attempt.phase == AttemptPhase.FAILED:
+        return True
+    if state.status == TaskStatus.FAILED:
+        return True
+    if attempt.decision in {"reject", "stop"}:
+        return True
+    if attempt.phase == AttemptPhase.REJECTED:
+        return True
+    return False
+
+
+def build_failure_snapshot(
+    attempt: AttemptRecord | None,
+    state_root: Path,
+    task_id: str,
+    *,
+    state: TaskState | None = None,
+) -> dict:
     if attempt is None:
-        return {
-            "failure_type": "",
-            "disposition": "",
-            "stop_reason": "",
-            "recovery_retry_count": 0,
-            "merge_retry_count": 0,
-            "attempted_repairs": [],
-            "suggested_actions": [],
-            "details": {},
-        }
+        return _empty_failure_snapshot()
+
+    if state is not None:
+        if state.status == TaskStatus.DONE and attempt.phase == AttemptPhase.MERGED and not attempt.merge_error:
+            return _empty_failure_snapshot(attempt)
+        if attempt.phase == AttemptPhase.MERGED and not attempt.merge_error and not attempt.failure_type:
+            return _empty_failure_snapshot(attempt)
+        if not _attempt_indicates_failure(attempt, state):
+            return _empty_failure_snapshot(attempt)
 
     artifact_root = artifacts_dir(task_id, attempt.iteration, attempt.retry, state_root)
     report = read_failure_report(artifact_root)
@@ -192,9 +233,77 @@ def build_attempt_snapshot(
     }
 
 
+def derive_current_message(state: TaskState, attempt: AttemptRecord | None, running: bool) -> str:
+    if running:
+        if attempt is not None and attempt.graph_node_id:
+            return f"Running node {attempt.graph_node_id}"
+        return "Auto runner active"
+    if state.status == TaskStatus.DONE:
+        return "Task completed"
+    if state.status == TaskStatus.CANCELLED:
+        return "Task cancelled"
+    if state.status == TaskStatus.REPLANNING:
+        return "Replanning task graph"
+    if attempt is None:
+        return "Ready to run"
+    if attempt.merge_error:
+        return "Merge failed — recovery available"
+    if attempt.phase == AttemptPhase.MERGED:
+        graph = ensure_task_graph(state)
+        if graph is not None and graph_status_summary(graph)["passed"] < graph_status_summary(graph)["total"]:
+            return "Node merged — more graph nodes remain"
+        return "Merged successfully"
+    if attempt.decision == "stop":
+        return "Reviewer requested stop"
+    if attempt.phase == AttemptPhase.REJECTED:
+        return "Reviewer rejected — retry available"
+    if attempt.phase == AttemptPhase.APPROVED:
+        return "Approved — pending merge"
+    if attempt.phase == AttemptPhase.REVIEWING:
+        return "Review in progress"
+    if attempt.phase == AttemptPhase.TESTING:
+        return "Running tests"
+    if attempt.phase == AttemptPhase.EXECUTING:
+        return "Implementer running"
+    if attempt.phase == AttemptPhase.PLANNING:
+        return "Planning"
+    return f"Phase: {attempt.phase.value}"
+
+
+def _runner_capability_flags(state: TaskState, state_root: Path, running: bool) -> dict[str, bool]:
+    return {
+        "can_stop": running,
+        "can_resume": state.status
+        in {
+            TaskStatus.STOPPED,
+            TaskStatus.INTERRUPTED,
+            TaskStatus.RUNNING,
+            TaskStatus.REPLANNING,
+        },
+        "can_cleanup": state.status
+        in {
+            TaskStatus.STOPPED,
+            TaskStatus.DONE,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.INITIALIZED,
+        }
+        and not running,
+    }
+
+
 def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
     attempt = state.history[-1] if state.history else None
     running, runner_pid = is_runner_alive(state_root, state.task_id)
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt is not None:
+        sync_graph_node_with_attempt(graph, attempt, max_retries=int(state.config.get("max_retries_per_step", 2)))
+
+    stale_seconds = int(state.config.get("stale_heartbeat_seconds", 120) or 120)
+    hb = read_heartbeat(state_root, state.task_id)
+    caps = _runner_capability_flags(state, state_root, running)
+    from cc_loop.runner_control import runner_state_label
+
     snapshot = {
         "schema_version": INTEGRATION_SCHEMA_VERSION,
         "cc_loop_version": __version__,
@@ -206,14 +315,26 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
         "status": state.status.value,
         "iteration": state.iteration,
         "attempt": build_attempt_snapshot(state, attempt, state_root),
-        "failure": build_failure_snapshot(attempt, state_root, state.task_id),
+        "failure": build_failure_snapshot(attempt, state_root, state.task_id, state=state),
         "next_action": derive_next_action(state, attempt, running=running, state_root=state_root),
         "running": running,
         "runner_pid": runner_pid,
+        "runner_state": runner_state_label(state_root, state.task_id, stale_heartbeat_seconds=stale_seconds),
+        "last_heartbeat_at": hb.updated_at if hb else "",
+        "runner_started_at": hb.started_at if hb else "",
+        "elapsed_seconds": int(wall_clock_elapsed_seconds(state)),
+        "log_path": str(runner_log_path(state_root, state.task_id)),
+        "current_message": derive_current_message(state, attempt, running),
+        **caps,
     }
-    graph = ensure_task_graph(state)
     if graph is not None:
-        snapshot["task_graph"] = build_graph_snapshot(graph)
+        snapshot["task_graph"] = build_graph_snapshot(
+            graph,
+            state_providers=state.providers,
+            config=dict(state.config),
+        )
+        if len(getattr(state, "running_attempts", None) or {}) > 1:
+            snapshot["running_node_ids"] = list(state.running_attempts.keys())
     return snapshot
 
 

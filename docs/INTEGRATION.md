@@ -2,7 +2,7 @@
 
 This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
 
-**Package version:** 0.4.0  
+**Package version:** 0.9.0  
 **Integration schema version:** 1
 
 ## Purpose
@@ -23,7 +23,11 @@ These commands and flags are the integration contract. Other commands exist for 
 | `cc-loop doctor --repo PATH` | Preflight without creating a task |
 | `cc-loop list [--repo PATH] [--json]` | Enumerate tasks |
 | `cc-loop status [--task-id ID] [--json]` | Poll task state |
-| `cc-loop graph [--task-id ID] [--json]` | Inspect task graph progress (v0.4) |
+| `cc-loop graph [--task-id ID] [--json] [--history]` | Inspect task graph progress (v0.4+); `--history` shows graph mutations (v0.7) |
+| `cc-loop report [--task-id ID] [--json]` | Task report with graph progress, failures, artifacts (v0.6) |
+| `cc-loop stop --task-id ID [--json]` | Stop detached runner (v0.5) |
+| `cc-loop cancel --task-id ID [--json]` | Stop runner and mark task cancelled (v0.5) |
+| `cc-loop cleanup --task-id ID [--json]` | Remove task-owned runtime artifacts (v0.5) |
 | `cc-loop auto --detach [--task-id ID]` | Start unattended loop in background |
 | `cc-loop resume [--task-id ID]` | Continue after stop/interrupt (optional; polling may be enough) |
 
@@ -60,7 +64,7 @@ Stdout is a single JSON object. No extra prose.
 ```json
 {
   "schema_version": 1,
-  "cc_loop_version": "0.4.0",
+  "cc_loop_version": "0.9.0",
   "task_id": "abc123",
   "goal": "...",
   "target_repo": "/absolute/path",
@@ -108,7 +112,16 @@ Stdout is a single JSON object. No extra prose.
   },
   "next_action": "resume",
   "running": false,
-  "runner_pid": null
+  "runner_pid": null,
+  "runner_state": "idle",
+  "last_heartbeat_at": "",
+  "runner_started_at": "",
+  "elapsed_seconds": 0,
+  "can_stop": false,
+  "can_resume": true,
+  "can_cleanup": true,
+  "log_path": "/absolute/path/to/runner.log",
+  "current_message": "Ready to run"
 }
 ```
 
@@ -130,6 +143,16 @@ Stdout is a single JSON object. No extra prose.
 | `running` | bool | `true` when `runner.pid` exists and process is alive |
 | `runner_pid` | int \| null | PID from detached `auto`, or null |
 | `task_graph` | object \| omitted | Present when task has a graph (v0.4 additive) |
+| `runner_state` | string | `idle`, `running`, `stopped`, `stale_pid`, `stale_heartbeat` (v0.5 additive) |
+| `last_heartbeat_at` | string | ISO8601 from `runner.heartbeat.json` or empty (v0.5) |
+| `runner_started_at` | string | ISO8601 runner start or empty (v0.5) |
+| `elapsed_seconds` | int | Wall-clock seconds since first attempt (v0.5) |
+| `can_stop` | bool | Whether `cc-loop stop` can terminate a runner (v0.5) |
+| `can_resume` | bool | Whether resume/auto can continue (v0.5) |
+| `can_cleanup` | bool | Whether cleanup is safe (v0.5) |
+| `log_path` | string | Path to `runner.log` (v0.5) |
+| `current_message` | string | Short UI-friendly status message (v0.6) |
+| `running_node_ids` | array | Parallel running node ids when applicable (v0.9) |
 
 The `task_graph` block is omitted for legacy tasks without a graph. See [TASK_GRAPH.md](TASK_GRAPH.md).
 
@@ -215,9 +238,10 @@ See [EXIT_CODES.md](EXIT_CODES.md).
 1. Spawns a background child running `auto` without `--detach`
 2. Writes child PID to `<state-root>/tasks/<id>/runner.pid`
 3. Appends child stdout/stderr to `<state-root>/tasks/<id>/runner.log`
-4. Parent prints one line: `detached pid=<pid> task_id=<id> log=<path>` and exits 0
+4. Child refreshes `<state-root>/tasks/<id>/runner.heartbeat.json` each loop iteration (v0.5)
+5. Parent prints one line: `detached pid=<pid> task_id=<id> log=<path>` and exits 0
 
-Poll `status --json` fields `running` and `runner_pid` to track the background runner.
+Poll `status --json` fields `running`, `runner_pid`, `runner_state`, and `last_heartbeat_at`.
 
 ## State file `schema_version`
 

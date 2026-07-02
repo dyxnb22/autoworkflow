@@ -20,7 +20,7 @@ The product boundary is intentionally narrow:
 | v0.6 | Reports and event stream | Make completed or failed runs easy to understand. |
 | v0.7 | Dynamic replanning | Let planner revise the graph from test/review feedback. |
 | v0.8 | Multi-role routing | Route different node kinds to different providers/reviewers. |
-| v0.9 | Parallel execution | Run independent graph nodes concurrently behind a merge queue. |
+| v0.9 | Parallel execution | Run independent graph nodes concurrently behind a merge queue. | **Done** |
 
 ## Design Principles
 

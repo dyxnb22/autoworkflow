@@ -52,6 +52,16 @@ class GraphNode:
     created_at: str
     updated_at: str
     notes: str = ""
+    planner_provider: str = ""
+    implementer_provider: str = ""
+    reviewer_provider: str = ""
+    reviewer_providers: list[str] = field(default_factory=list)
+    test_policy: str = ""
+    merge_policy: str = ""
+    max_changed_files: int = 0
+    max_review_patch_bytes: int = 0
+    requires_manual_review: bool = False
+    allow_merge_without_tests: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -76,6 +86,16 @@ class GraphNode:
             created_at=data.get("created_at", utc_now_iso()),
             updated_at=data.get("updated_at", utc_now_iso()),
             notes=data.get("notes", ""),
+            planner_provider=str(data.get("planner_provider", "")),
+            implementer_provider=str(data.get("implementer_provider", "")),
+            reviewer_provider=str(data.get("reviewer_provider", "")),
+            reviewer_providers=list(data.get("reviewer_providers") or []),
+            test_policy=str(data.get("test_policy", "")),
+            merge_policy=str(data.get("merge_policy", "")),
+            max_changed_files=int(data.get("max_changed_files", 0) or 0),
+            max_review_patch_bytes=int(data.get("max_review_patch_bytes", 0) or 0),
+            requires_manual_review=bool(data.get("requires_manual_review", False)),
+            allow_merge_without_tests=data.get("allow_merge_without_tests"),
         )
 
 
@@ -252,9 +272,19 @@ def get_node(graph: TaskGraph, node_id: str) -> GraphNode | None:
     return None
 
 
-def next_runnable_node(graph: TaskGraph, *, max_retries: int = 2) -> GraphNode | None:
-    """Return the first runnable node in graph order, or None."""
+def next_runnable_nodes(
+    graph: TaskGraph,
+    *,
+    max_retries: int = 2,
+    limit: int = 1,
+    exclude: set[str] | None = None,
+) -> list[GraphNode]:
+    """Return up to `limit` runnable nodes in graph order."""
+    excluded = exclude or set()
+    result: list[GraphNode] = []
     for node in graph.nodes:
+        if node.id in excluded:
+            continue
         if _unknown_dependencies(graph, node):
             if node.status == GraphNodeStatus.PENDING:
                 node.status = GraphNodeStatus.BLOCKED
@@ -270,8 +300,16 @@ def next_runnable_node(graph: TaskGraph, *, max_retries: int = 2) -> GraphNode |
         if not _dependencies_passed(graph, node):
             continue
         if _is_runnable_status(node.status, node.retry_count, max_retries):
-            return node
-    return None
+            result.append(node)
+            if len(result) >= limit:
+                break
+    return result
+
+
+def next_runnable_node(graph: TaskGraph, *, max_retries: int = 2) -> GraphNode | None:
+    """Return the first runnable node in graph order, or None."""
+    nodes = next_runnable_nodes(graph, max_retries=max_retries, limit=1)
+    return nodes[0] if nodes else None
 
 
 def mark_node_running(graph: TaskGraph, node_id: str) -> None:
@@ -347,8 +385,62 @@ def graph_status_summary(graph: TaskGraph) -> dict[str, int]:
     return counts
 
 
-def build_graph_snapshot(graph: TaskGraph) -> dict[str, Any]:
+def effective_node_providers(node: GraphNode, state_providers: dict[str, str]) -> dict[str, str | list[str]]:
+    """Resolve per-node provider overrides with task-level fallback."""
+    return {
+        "planner": node.planner_provider or state_providers.get("planner", ""),
+        "implementer": node.implementer_provider or state_providers.get("implementer", ""),
+        "reviewer": node.reviewer_provider or state_providers.get("reviewer", ""),
+        "reviewer_chain": node.reviewer_providers or (
+            [node.reviewer_provider] if node.reviewer_provider else [state_providers.get("reviewer", "")]
+        ),
+    }
+
+
+def effective_node_policy(node: GraphNode, config: dict) -> dict[str, Any]:
+    """Resolve per-node policy with task-level defaults (never silently weaken safety)."""
+    allow_weakening = bool(config.get("allow_node_policy_weakening", False))
+    task_allow_no_tests = bool(config.get("allow_merge_without_tests", False))
+    node_allow = node.allow_merge_without_tests
+    if node_allow is True and not allow_weakening and not task_allow_no_tests:
+        node_allow = False
+    return {
+        "test_policy": node.test_policy or "inherit",
+        "merge_policy": node.merge_policy or "inherit",
+        "max_changed_files": node.max_changed_files or int(config.get("max_changed_files_per_attempt", 0) or 0),
+        "max_review_patch_bytes": node.max_review_patch_bytes or int(config.get("max_review_patch_bytes", 60000)),
+        "requires_manual_review": node.requires_manual_review,
+        "allow_merge_without_tests": node_allow if node_allow is not None else task_allow_no_tests,
+    }
+
+
+def sync_graph_node_with_attempt(graph: TaskGraph, attempt, max_retries: int = 2) -> None:
+    """Align graph node status with the current attempt phase when inconsistent."""
+    if not attempt or not attempt.graph_node_id:
+        return
+    node = get_node(graph, attempt.graph_node_id)
+    if node is None:
+        return
+    phase = attempt.phase.value if hasattr(attempt.phase, "value") else str(attempt.phase)
+    if phase in {"executing", "testing", "reviewing", "worktree_created", "planning"}:
+        if node.status not in {GraphNodeStatus.RUNNING, GraphNodeStatus.PASSED}:
+            node.status = GraphNodeStatus.RUNNING
+            node.updated_at = utc_now_iso()
+            graph.current_node_id = node.id
+    elif phase == "merged" and node.status != GraphNodeStatus.PASSED:
+        node.status = GraphNodeStatus.PASSED
+        if attempt.iteration not in node.attempt_iterations:
+            node.attempt_iterations.append(attempt.iteration)
+        node.updated_at = utc_now_iso()
+    elif phase == "rejected" and node.status == GraphNodeStatus.RUNNING:
+        node.status = GraphNodeStatus.REJECTED
+        node.updated_at = utc_now_iso()
+
+
+def build_graph_snapshot(graph: TaskGraph, *, state_providers: dict[str, str] | None = None, config: dict | None = None) -> dict[str, Any]:
     """Build the integration/status JSON task_graph block."""
+    providers = state_providers or {}
+    cfg = config or {}
     return {
         "schema_version": graph.schema_version,
         "current_node_id": graph.current_node_id,
@@ -362,8 +454,13 @@ def build_graph_snapshot(graph: TaskGraph) -> dict[str, Any]:
                 "dependencies": list(node.dependencies),
                 "status": node.status.value,
                 "retry_count": node.retry_count,
+                "effective_providers": effective_node_providers(node, providers),
+                "policy": effective_node_policy(node, cfg),
             }
             for node in graph.nodes
+        ],
+        "running_node_ids": [
+            n.id for n in graph.nodes if n.status == GraphNodeStatus.RUNNING
         ],
     }
 
