@@ -14,6 +14,7 @@ from unittest import mock
 import tests.fake_providers  # noqa: F401
 from cc_loop.cli import main, resolve_task_id
 from cc_loop.inspect import build_status_snapshot, runner_pid_path
+from cc_loop.detach import spawn_detached_auto
 from cc_loop.providers.claude_code import ClaudeCodeAdapter
 from cc_loop.state import load_state, save_state, state_path
 from tests.helpers import TempEnv, init_git_repo, make_task
@@ -281,6 +282,27 @@ class DetachTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(code, 0)
+        self.assertTrue(runner_pid_path(self.state_root, "detach-task").is_file())
+
+    def test_detached_child_puts_state_root_before_subcommand(self) -> None:
+        popen_calls = []
+
+        class FakeProcess:
+            pid = 99998
+
+        def fake_popen(argv, **kwargs):
+            popen_calls.append((argv, kwargs))
+            return FakeProcess()
+
+        with mock.patch("cc_loop.detach.subprocess.Popen", side_effect=fake_popen):
+            pid = spawn_detached_auto(state_root=self.state_root, task_id="detach-task")
+
+        self.assertEqual(pid, 99998)
+        argv = popen_calls[0][0]
+        state_root_index = argv.index("--state-root")
+        auto_index = argv.index("auto")
+        self.assertLess(state_root_index, auto_index)
+        self.assertEqual(argv[state_root_index + 1], str(self.state_root))
         self.assertTrue(runner_pid_path(self.state_root, "detach-task").is_file())
 
 

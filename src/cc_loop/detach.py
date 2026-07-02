@@ -26,11 +26,11 @@ def spawn_detached_auto(
         sys.executable,
         "-m",
         "cc_loop.cli",
+        "--state-root",
+        str(state_root),
         "auto",
         "--task-id",
         task_id,
-        "--state-root",
-        str(state_root),
     ]
     if max_iterations is not None:
         argv.extend(["--max-iterations", str(max_iterations)])
