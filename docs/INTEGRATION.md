@@ -2,7 +2,7 @@
 
 This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
 
-**Package version:** 0.2.0  
+**Package version:** 0.3.0  
 **Integration schema version:** 1
 
 ## Purpose
@@ -59,7 +59,7 @@ Stdout is a single JSON object. No extra prose.
 ```json
 {
   "schema_version": 1,
-  "cc_loop_version": "0.2.0",
+  "cc_loop_version": "0.3.0",
   "task_id": "abc123",
   "goal": "...",
   "target_repo": "/absolute/path",
@@ -176,7 +176,7 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 
 ## Semantic versioning policy
 
-- **Patch** (0.2.x): bug fixes, no contract change
+- **Patch** (0.3.x): bug fixes, no contract change
 - **Minor** (0.x.0): backward-compatible additions (new optional JSON fields)
 - **Major** (x.0.0): breaking CLI or JSON changes — bump integration `schema_version`
 

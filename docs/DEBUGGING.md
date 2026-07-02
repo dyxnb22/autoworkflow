@@ -141,10 +141,13 @@ Symptom: `merge_error` is set in `state.json`, `merge.output.txt` contains git o
 
 The worktree branch was approved and tests passed, but the merge into `base_branch` failed (typically a conflict).
 
-Options:
+**v0.3 auto recovery:** `cc-loop auto` classifies merge failures and writes `failure.report.json` in the attempt artifact directory. Poll `status --json` for the `failure` block (`failure_type`, `disposition`, `stop_reason`). Recoverable types such as `merge_conflict` trigger implementer repair within `max_merge_recovery_attempts`; `merge_worktree_busy` retries merge within `max_merge_retries`. When budgets are exhausted, `next_action` is `terminal` and `failure_type` becomes `recovery_budget_exhausted`. See [RECOVERY.md](RECOVERY.md).
 
-1. Manually resolve conflicts in the worktree, commit, then `cc-loop resume`.
-2. Manually merge the branch from the worktree into the base branch, then mark the task done by editing `state.json`:
+If `auto` is not running or recovery stopped:
+
+1. Inspect `failure.report.json` and `merge.output.txt` for the classified failure type and suggested actions.
+2. Manually resolve conflicts in the worktree, commit, then `cc-loop resume`.
+3. Manually merge the branch from the worktree into the base branch, then mark the task done by editing `state.json`:
    ```json
    "status": "done"
    ```

@@ -45,13 +45,16 @@ class RecoveryDispatchTests(unittest.TestCase):
             disposition=RecoveryDisposition.RECOVERABLE,
             message="conflict",
         )
-        step, _ = decide_auto_step(
+        step, report = decide_auto_step(
             state,
             attempt,
             state.config,
             artifact_paths={"plan_prompt": type("P", (), {"parent": __import__('pathlib').Path('/tmp')})()},
         )
-        self.assertIn(step, {AutoStep.REPAIR, AutoStep.MERGE_RETRY, AutoStep.RESUME})
+        self.assertEqual(step, AutoStep.REPAIR)
+        assert report is not None
+        self.assertEqual(report.failure_type, FailureType.MERGE_CONFLICT)
+        self.assertEqual(report.disposition, RecoveryDisposition.RECOVERABLE)
 
     def test_merge_retry_budget(self) -> None:
         attempt = _attempt(merge_retry_count=2)

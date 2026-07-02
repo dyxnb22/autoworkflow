@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import tests.fake_providers  # noqa: F401
 from cc_loop.cli import _run_auto_loop
 from cc_loop.git import GitCommandError, GitCommandResult
-from cc_loop.state import AttemptPhase, TaskStatus, load_state
+from cc_loop.state import TaskStatus, artifacts_dir, load_state
 from tests.helpers import TempEnv, make_task
 
 
@@ -64,10 +63,13 @@ class AutoRecoveryTests(unittest.TestCase):
         with self._patch_worktree_root():
             code = _run_auto_loop(self._args(), "test-auto")
 
+        self.assertEqual(code, 1)
         state = load_state("test-auto", self.state_root)
         attempt = state.history[-1]
-        self.assertIn(attempt.failure_type, {"", "test_implementation", "recovery_budget_exhausted"})
-        self.assertIn(code, {0, 1})
+        self.assertEqual(attempt.failure_type, "recovery_budget_exhausted")
+        self.assertGreater(attempt.recovery_retry_count, 0)
+        artifact_root = artifacts_dir("test-auto", attempt.iteration, attempt.retry, self.state_root)
+        self.assertTrue((artifact_root / "failure.report.json").is_file())
 
     def test_auto_terminal_on_environment_test_failure(self) -> None:
         make_task(
@@ -82,7 +84,9 @@ class AutoRecoveryTests(unittest.TestCase):
         self.assertEqual(code, 1)
         state = load_state("env-auto", self.state_root)
         attempt = state.history[-1]
-        self.assertIn(attempt.failure_type, {"test_environment", "recovery_budget_exhausted", ""})
+        self.assertEqual(attempt.failure_type, "test_environment")
+        artifact_root = artifacts_dir("env-auto", attempt.iteration, attempt.retry, self.state_root)
+        self.assertTrue((artifact_root / "failure.report.json").is_file())
 
 
 if __name__ == "__main__":

@@ -21,6 +21,10 @@ Recoverable failure handling for `auto` loop.
 - Merge failures classified (conflict, worktree busy, permission, etc.)
 - Package version 0.2.0 → 0.3.0
 
+### Fixed
+
+- `auto --detach` child subprocess now passes `--state-root` before the `auto` subcommand so global flag ordering matches the CLI contract (`detach.spawn_detached_auto`; `test_detached_child_puts_state_root_before_subcommand`)
+
 ## v0.2.0 — 2026-06-30
 
 Integration contract release (v1.1).
