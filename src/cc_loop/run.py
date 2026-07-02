@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from cc_loop.budgets import count_changed_files
 from cc_loop.config import LoopConfig
 from cc_loop.diff import collect_bounded_review_patches, read_diff_stat_summary
 from cc_loop.failure import (
@@ -365,6 +366,7 @@ def prepare_run(state: TaskState, state_root: Path) -> tuple[TaskState, AttemptR
         base_branch=state.base_branch,
         providers=state.providers,
         config=state.config,
+        task_graph=ensure_task_graph(state),
     )
 
     iteration = state.iteration + 1
@@ -471,8 +473,10 @@ def run_planning_phase(
             artifact_paths,
             graph=graph,
             max_retries=max_retries,
+            attempt=attempt,
         )
 
+    _emit_run_event(state_root, state, attempt, EventType.PLANNER_STARTED)
     prompt = build_planner_prompt(state)
     _write_planning_artifacts_before(
         artifact_paths=artifact_paths,
@@ -560,6 +564,21 @@ def run_planning_phase(
     clear_report_from_attempt(attempt)
     failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
     attempt.phase = AttemptPhase.WORKTREE_CREATED
+    _emit_run_event(
+        state_root,
+        state,
+        attempt,
+        EventType.PLANNER_COMPLETED,
+        message=graph.summary or "planner produced task graph",
+    )
+    if attempt.graph_node_id:
+        _emit_run_event(
+            state_root,
+            state,
+            attempt,
+            EventType.GRAPH_NODE_STARTED,
+            message=node.title,
+        )
     save_state(state, state_root)
     return state
 
@@ -571,18 +590,25 @@ def _run_graph_node_setup(
     *,
     graph,
     max_retries: int,
+    attempt: AttemptRecord | None = None,
 ) -> TaskState:
     """Prepare worktree and current graph node without re-running the planner."""
-    attempt = _current_attempt(state)
+    attempt = _resolve_attempt(state, attempt)
     config: LoopConfig = state.config
     provider_name = config["planner_provider"]
     worktree = Path(attempt.worktree_path)
     target_repo = Path(state.target_repo)
 
-    node = next_runnable_node(graph, max_retries=max_retries)
-    if node is None:
-        _mark_planning_failed(state, state_root)
-        raise PlanningError("no runnable graph nodes remain")
+    if attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is None:
+            _mark_planning_failed(state, state_root, attempt=attempt)
+            raise PlanningError(f"unknown graph node {attempt.graph_node_id}")
+    else:
+        node = next_runnable_node(graph, max_retries=max_retries)
+        if node is None:
+            _mark_planning_failed(state, state_root, attempt=attempt)
+            raise PlanningError("no runnable graph nodes remain")
 
     mark_node_running(graph, node.id)
     attempt.graph_node_id = node.id
@@ -616,10 +642,20 @@ def _run_graph_node_setup(
         except GitError as exc:
             if attempt.graph_node_id:
                 mark_node_failed(graph, attempt.graph_node_id, str(exc))
-            _mark_planning_failed(state, state_root)
+            _mark_planning_failed(state, state_root, attempt=attempt)
             raise PlanningError(str(exc)) from exc
 
     attempt.phase = AttemptPhase.WORKTREE_CREATED
+    if attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is not None:
+            _emit_run_event(
+                state_root,
+                state,
+                attempt,
+                EventType.GRAPH_NODE_STARTED,
+                message=node.title,
+            )
     save_state(state, state_root)
     return state
 
@@ -628,9 +664,11 @@ def run_implementer_phase(
     state: TaskState,
     state_root: Path,
     artifact_paths: dict[str, Path],
+    *,
+    attempt: AttemptRecord | None = None,
 ) -> TaskState:
     """Run the configured implementer provider and capture worktree diff metadata."""
-    attempt = _current_attempt(state)
+    attempt = _resolve_attempt(state, attempt)
     if attempt.implementer_exit_code is not None:
         if attempt.implementer_exit_code == 0:
             return state
@@ -656,6 +694,7 @@ def run_implementer_phase(
 
     attempt.phase = AttemptPhase.EXECUTING
     save_state(state, state_root)
+    _emit_run_event(state_root, state, attempt, EventType.IMPLEMENTER_STARTED, message=provider_name)
 
     try:
         provider = get_provider(provider_name)
@@ -695,9 +734,17 @@ def run_implementer_phase(
         raise ImplementingError(f"{provider_name} implementer timed out")
 
     if run_result.exit_code != 0:
-        _mark_implementer_failed(state, state_root)
+        _mark_implementer_failed(state, state_root, attempt=attempt)
         raise ImplementingError(f"{provider_name} implementer exited with code {run_result.exit_code}")
 
+    _emit_run_event(
+        state_root,
+        state,
+        attempt,
+        EventType.IMPLEMENTER_COMPLETED,
+        message=provider_name,
+        details={"exit_code": run_result.exit_code},
+    )
     return state
 
 
@@ -705,9 +752,11 @@ def run_test_phase(
     state: TaskState,
     state_root: Path,
     artifact_paths: dict[str, Path],
+    *,
+    attempt: AttemptRecord | None = None,
 ) -> TaskState:
     """Run the configured test command in the worktree."""
-    attempt = _current_attempt(state)
+    attempt = _resolve_attempt(state, attempt)
     if attempt.test_status in {"passed", "failed", "skipped", "timed_out"}:
         return state
 
@@ -717,11 +766,19 @@ def run_test_phase(
     attempt.test_command = test_command
     attempt.phase = AttemptPhase.TESTING
     save_state(state, state_root)
+    _emit_run_event(state_root, state, attempt, EventType.TESTS_STARTED)
 
     if not test_command:
         attempt.test_status = "skipped"
         attempt.test_exit_code = None
         artifact_paths["test_output"].write_text("(tests skipped: test_command not configured)\n", encoding="utf-8")
+        _emit_run_event(
+            state_root,
+            state,
+            attempt,
+            EventType.TESTS_COMPLETED,
+            message="skipped",
+        )
         save_state(state, state_root)
         return state
 
@@ -758,17 +815,33 @@ def run_test_phase(
         attempt.test_status = "failed"
         attempt.test_exit_code = result.returncode
 
+    _emit_run_event(
+        state_root,
+        state,
+        attempt,
+        EventType.TESTS_COMPLETED,
+        message=attempt.test_status,
+        details={"exit_code": attempt.test_exit_code},
+    )
     save_state(state, state_root)
     return state
+
+
+def _review_artifact_path(base: Path, idx: int) -> Path:
+    if idx == 0:
+        return base
+    return base.parent / f"{base.stem}.{idx}{base.suffix}"
 
 
 def run_review_phase(
     state: TaskState,
     state_root: Path,
     artifact_paths: dict[str, Path],
+    *,
+    attempt: AttemptRecord | None = None,
 ) -> TaskState:
     """Build bounded review context and run the configured reviewer provider(s)."""
-    attempt = _current_attempt(state)
+    attempt = _resolve_attempt(state, attempt)
     if attempt.review_json is not None and attempt.decision:
         return state
 
@@ -777,6 +850,7 @@ def run_review_phase(
     worktree = Path(attempt.worktree_path)
     attempt.phase = AttemptPhase.REVIEWING
     save_state(state, state_root)
+    _emit_run_event(state_root, state, attempt, EventType.REVIEWER_STARTED)
 
     patch_paths, patch_body, _used_bytes = collect_bounded_review_patches(
         worktree,
@@ -797,15 +871,19 @@ def run_review_phase(
     artifact_paths["review_prompt"].write_text(prompt, encoding="utf-8")
 
     all_reviews: list[dict[str, Any]] = []
+    review_raw_paths: list[str] = []
     for idx, provider_name in enumerate(reviewer_chain):
-        artifact_paths["review_provider"].write_text(provider_name + "\n", encoding="utf-8")
-        artifact_paths["review_raw"].write_text("", encoding="utf-8")
-        artifact_paths["review_last_message"].write_text("", encoding="utf-8")
+        provider_path = _review_artifact_path(artifact_paths["review_provider"], idx)
+        raw_path = _review_artifact_path(artifact_paths["review_raw"], idx)
+        last_message_path = _review_artifact_path(artifact_paths["review_last_message"], idx)
+        provider_path.write_text(provider_name + "\n", encoding="utf-8")
+        raw_path.write_text("", encoding="utf-8")
+        last_message_path.write_text("", encoding="utf-8")
 
         try:
             provider = get_provider(provider_name)
         except ValueError as exc:
-            _mark_review_failed(state, state_root)
+            _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(str(exc)) from exc
 
         timeout_seconds = _reviewer_timeout_seconds(config, provider_name)
@@ -814,36 +892,35 @@ def run_review_phase(
             run_result = provider.run(
                 worktree_path=worktree,
                 prompt=prompt,
-                output_path=artifact_paths["review_last_message"],
+                output_path=last_message_path,
                 config=config,
                 timeout_seconds=timeout_seconds,
-                raw_output_path=artifact_paths["review_raw"],
+                raw_output_path=raw_path,
                 print_only=print_only,
             )
         except NotImplementedError as exc:
-            _mark_review_failed(state, state_root)
+            _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(str(exc)) from exc
 
-        artifact_paths["review_provider"].write_text(run_result.provider + "\n", encoding="utf-8")
-        attempt.review_raw_path = str(artifact_paths["review_raw"])
+        provider_path.write_text(run_result.provider + "\n", encoding="utf-8")
+        review_raw_paths.append(str(raw_path))
 
         if run_result.timed_out:
-            _mark_review_failed(state, state_root)
+            _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"{provider_name} reviewer timed out")
 
         if run_result.exit_code != 0:
-            _mark_review_failed(state, state_root)
+            _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"{provider_name} reviewer exited with code {run_result.exit_code}")
 
-        last_message_path = artifact_paths["review_last_message"]
         if not last_message_path.is_file():
-            _mark_review_failed(state, state_root)
+            _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"reviewer last-message artifact missing: {last_message_path}")
 
         try:
             review_json = provider.parse_reviewer_output(last_message_path)
         except (json.JSONDecodeError, KeyError, TypeError, NotImplementedError) as exc:
-            _mark_review_failed(state, state_root)
+            _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"reviewer output parse failed: {exc}") from exc
 
         review_artifact = artifact_paths["review_parsed"].parent / f"review.parsed.{idx}.json"
@@ -858,12 +935,20 @@ def run_review_phase(
     attempt.review_json = review_json
     attempt.decision = str(review_json.get("decision", "reject"))
     attempt.review_provider = ",".join(reviewer_chain)
+    attempt.review_raw_path = ",".join(review_raw_paths)
 
     if attempt.decision == "approve":
         attempt.phase = AttemptPhase.APPROVED
     else:
         attempt.phase = AttemptPhase.REJECTED
 
+    _emit_run_event(
+        state_root,
+        state,
+        attempt,
+        EventType.REVIEWER_COMPLETED,
+        message=attempt.decision,
+    )
     save_state(state, state_root)
     return state
 
@@ -901,7 +986,7 @@ def _run_finalize_phase(
         save_state(state, state_root)
         return state, attempt, artifact_paths
 
-    if not _can_auto_merge(attempt, config):
+    if not _can_auto_merge(attempt, config, state=state):
         state.status = TaskStatus.STOPPED
         save_state(state, state_root)
         return state, attempt, artifact_paths
@@ -909,6 +994,7 @@ def _run_finalize_phase(
     worktree = Path(attempt.worktree_path)
     target_repo = Path(state.target_repo)
     attempt.merge_output_path = str(artifact_paths["merge_output"])
+    _emit_run_event(state_root, state, attempt, EventType.MERGE_STARTED)
     try:
         head = commit_worktree_changes(
             worktree,
@@ -956,10 +1042,18 @@ def _run_finalize_phase(
     attempt.phase = AttemptPhase.MERGED
     clear_report_from_attempt(attempt)
     failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
+    _emit_run_event(state_root, state, attempt, EventType.MERGE_COMPLETED)
 
     graph = ensure_task_graph(state)
     if graph is not None and attempt.graph_node_id:
         mark_node_passed(graph, attempt.graph_node_id, attempt.iteration)
+        _emit_run_event(
+            state_root,
+            state,
+            attempt,
+            EventType.GRAPH_NODE_COMPLETED,
+            message=attempt.graph_node_id,
+        )
         if graph_complete(graph):
             state.status = TaskStatus.DONE
         else:
@@ -1181,7 +1275,12 @@ def build_reviewer_prompt(
     )
 
 
-def _can_auto_merge(attempt: AttemptRecord, config: LoopConfig) -> bool:
+def _can_auto_merge(
+    attempt: AttemptRecord,
+    config: LoopConfig,
+    *,
+    state: TaskState | None = None,
+) -> bool:
     if not config.get("auto_merge", True):
         return False
     if attempt.implementer_exit_code != 0:
@@ -1192,8 +1291,31 @@ def _can_auto_merge(attempt: AttemptRecord, config: LoopConfig) -> bool:
         return False
     if attempt.test_status == "timed_out":
         return False
-    if attempt.test_status == "skipped" and not config.get("allow_merge_without_tests", False):
+
+    allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
+    max_changed_files = int(config.get("max_changed_files_per_attempt", 0) or 0)
+    requires_manual_review = False
+
+    if state is not None and attempt.graph_node_id:
+        graph = ensure_task_graph(state)
+        if graph is not None:
+            node = get_node(graph, attempt.graph_node_id)
+            if node is not None:
+                policy = effective_node_policy(node, config)
+                requires_manual_review = bool(policy["requires_manual_review"])
+                allow_merge_without_tests = bool(policy["allow_merge_without_tests"])
+                node_max_files = int(policy["max_changed_files"] or 0)
+                if node_max_files > 0:
+                    max_changed_files = node_max_files
+
+    if requires_manual_review:
         return False
+    if attempt.test_status == "skipped" and not allow_merge_without_tests:
+        return False
+    if max_changed_files > 0 and attempt.diff_stat_path:
+        diff_files_path = Path(attempt.diff_stat_path).parent / "diff.files.txt"
+        if count_changed_files(diff_files_path) > max_changed_files:
+            return False
     return True
 
 
@@ -1211,6 +1333,7 @@ def _begin_retry_attempt(
         base_branch=state.base_branch,
         providers=state.providers,
         config=state.config,
+        task_graph=ensure_task_graph(state),
     )
     retry = rejected_attempt.retry + 1
     iteration = rejected_attempt.iteration
@@ -1438,8 +1561,41 @@ def _current_attempt(state: TaskState) -> AttemptRecord:
     return state.history[-1]
 
 
-def _mark_planning_failed(state: TaskState, state_root: Path) -> None:
-    attempt = _current_attempt(state)
+def _resolve_attempt(state: TaskState, attempt: AttemptRecord | None = None) -> AttemptRecord:
+    if attempt is not None:
+        return attempt
+    return _current_attempt(state)
+
+
+def _emit_run_event(
+    state_root: Path,
+    state: TaskState,
+    attempt: AttemptRecord,
+    event_type: EventType,
+    *,
+    message: str = "",
+    details: dict[str, Any] | None = None,
+) -> None:
+    append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=event_type,
+        iteration=attempt.iteration,
+        retry=attempt.retry,
+        graph_node_id=attempt.graph_node_id or "",
+        phase=attempt.phase.value if hasattr(attempt.phase, "value") else str(attempt.phase),
+        message=message,
+        details=details,
+    )
+
+
+def _mark_planning_failed(
+    state: TaskState,
+    state_root: Path,
+    *,
+    attempt: AttemptRecord | None = None,
+) -> None:
+    attempt = _resolve_attempt(state, attempt)
     graph = ensure_task_graph(state)
     if graph is not None and attempt.graph_node_id:
         mark_node_failed(graph, attempt.graph_node_id, "planning failed")
@@ -1448,8 +1604,13 @@ def _mark_planning_failed(state: TaskState, state_root: Path) -> None:
     save_state(state, state_root)
 
 
-def _mark_implementer_failed(state: TaskState, state_root: Path) -> None:
-    attempt = _current_attempt(state)
+def _mark_implementer_failed(
+    state: TaskState,
+    state_root: Path,
+    *,
+    attempt: AttemptRecord | None = None,
+) -> None:
+    attempt = _resolve_attempt(state, attempt)
     graph = ensure_task_graph(state)
     if graph is not None and attempt.graph_node_id:
         mark_node_failed(graph, attempt.graph_node_id, "implementer failed")
@@ -1458,8 +1619,13 @@ def _mark_implementer_failed(state: TaskState, state_root: Path) -> None:
     save_state(state, state_root)
 
 
-def _mark_review_failed(state: TaskState, state_root: Path) -> None:
-    attempt = _current_attempt(state)
+def _mark_review_failed(
+    state: TaskState,
+    state_root: Path,
+    *,
+    attempt: AttemptRecord | None = None,
+) -> None:
+    attempt = _resolve_attempt(state, attempt)
     graph = ensure_task_graph(state)
     if graph is not None and attempt.graph_node_id:
         mark_node_failed(graph, attempt.graph_node_id, "review failed")

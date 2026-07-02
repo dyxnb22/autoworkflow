@@ -217,7 +217,7 @@ class ClaudeCodeAdapter(ProviderAdapter):
         text = last_message_path.read_text(encoding="utf-8")
         data = _extract_json(text)
         decision = data.get("decision", "reject")
-        if decision not in {"approve", "reject", "stop"}:
+        if decision not in {"approve", "reject", "stop", "replan"}:
             decision = "reject"
         return {
             "decision": decision,

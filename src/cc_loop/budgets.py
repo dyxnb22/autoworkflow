@@ -73,12 +73,17 @@ def artifact_log_bytes(artifact_dir: Path) -> int:
 def count_changed_files(diff_files_path: Path) -> int:
     if not diff_files_path.is_file():
         return 0
-    lines = [
-        line.strip()
-        for line in diff_files_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    return len(lines)
+    count = 0
+    for line in diff_files_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("##"):
+            continue
+        if stripped == "(clean)":
+            continue
+        count += 1
+    return count
 
 
 def check_budgets(

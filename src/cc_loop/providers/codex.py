@@ -99,7 +99,7 @@ class CodexAdapter(ProviderAdapter):
         text = last_message_path.read_text(encoding="utf-8")
         data = json.loads(text)
         decision = data.get("decision", "reject")
-        if decision not in {"approve", "reject", "stop"}:
+        if decision not in {"approve", "reject", "stop", "replan"}:
             decision = "reject"
         return {
             "decision": decision,

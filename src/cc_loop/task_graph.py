@@ -135,6 +135,47 @@ def _coerce_str_list(value: Any) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()] or [text]
 
 
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return bool(value)
+
+
+def graph_node_from_planner_item(item: dict[str, Any], *, now: str | None = None) -> GraphNode | None:
+    """Build a GraphNode from planner JSON or graph_patch node data."""
+    node_id = str(item.get("id", "")).strip()
+    if not node_id:
+        return None
+    ts = now or utc_now_iso()
+    return GraphNode(
+        id=node_id,
+        title=str(item.get("title", node_id)).strip(),
+        description=str(item.get("description", "")).strip(),
+        kind=GraphNodeKind(str(item.get("kind", GraphNodeKind.IMPLEMENTATION.value))),
+        owner=str(item.get("owner", "implementer")).strip(),
+        dependencies=[str(dep).strip() for dep in item.get("dependencies") or [] if str(dep).strip()],
+        acceptance_criteria=_coerce_str_list(item.get("acceptance_criteria")),
+        files_scope=_coerce_str_list(item.get("files_scope")),
+        status=GraphNodeStatus.PENDING,
+        attempt_iterations=[],
+        retry_count=0,
+        created_at=ts,
+        updated_at=ts,
+        planner_provider=str(item.get("planner_provider", "")),
+        implementer_provider=str(item.get("implementer_provider", "")),
+        reviewer_provider=str(item.get("reviewer_provider", "")),
+        reviewer_providers=_coerce_str_list(item.get("reviewer_providers")),
+        test_policy=str(item.get("test_policy", "")),
+        merge_policy=str(item.get("merge_policy", "")),
+        max_changed_files=int(item.get("max_changed_files", 0) or 0),
+        max_review_patch_bytes=int(item.get("max_review_patch_bytes", 0) or 0),
+        requires_manual_review=bool(item.get("requires_manual_review", False)),
+        allow_merge_without_tests=_optional_bool(item.get("allow_merge_without_tests")),
+    )
+
+
 def _node_index(graph: TaskGraph) -> dict[str, GraphNode]:
     return {node.id: node for node in graph.nodes}
 
@@ -195,26 +236,9 @@ def _graph_from_task_graph_json(plan_json: dict[str, Any]) -> TaskGraph:
     for item in plan_json.get("nodes", []):
         if not isinstance(item, dict):
             continue
-        node_id = str(item.get("id", "")).strip()
-        if not node_id:
-            continue
-        nodes.append(
-            GraphNode(
-                id=node_id,
-                title=str(item.get("title", node_id)).strip(),
-                description=str(item.get("description", "")).strip(),
-                kind=GraphNodeKind(str(item.get("kind", GraphNodeKind.IMPLEMENTATION.value))),
-                owner=str(item.get("owner", "implementer")).strip(),
-                dependencies=[str(dep).strip() for dep in item.get("dependencies") or [] if str(dep).strip()],
-                acceptance_criteria=_coerce_str_list(item.get("acceptance_criteria")),
-                files_scope=_coerce_str_list(item.get("files_scope")),
-                status=GraphNodeStatus.PENDING,
-                attempt_iterations=[],
-                retry_count=0,
-                created_at=now,
-                updated_at=now,
-            )
-        )
+        node = graph_node_from_planner_item(item, now=now)
+        if node is not None:
+            nodes.append(node)
     if not nodes:
         raise ValueError("task graph planner output contained no valid nodes")
 

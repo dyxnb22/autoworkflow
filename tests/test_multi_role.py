@@ -78,3 +78,11 @@ class MultiRoleTests(unittest.TestCase):
         ]
         agg = _aggregate_reviewer_decisions(reviews)
         self.assertEqual(agg["decision"], "stop")
+
+    def test_multi_reviewer_replan_wins_over_reject(self) -> None:
+        reviews = [
+            {"decision": "reject", "reason": "no"},
+            {"decision": "replan", "replan_reason": "graph wrong"},
+        ]
+        agg = _aggregate_reviewer_decisions(reviews)
+        self.assertEqual(agg["decision"], "replan")

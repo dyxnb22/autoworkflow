@@ -20,12 +20,24 @@ def lock_path(state_root: Path, task_id: str) -> Path:
     return state_root / "tasks" / task_id / "state.lock"
 
 
-def _lock_depth() -> int:
-    return int(getattr(_lock_local, "depth", 0) or 0)
+def _lock_depths() -> dict[str, int]:
+    depths = getattr(_lock_local, "depths", None)
+    if depths is None:
+        depths = {}
+        _lock_local.depths = depths
+    return depths
 
 
-def _set_lock_depth(value: int) -> None:
-    _lock_local.depth = value
+def _lock_depth(task_id: str) -> int:
+    return int(_lock_depths().get(task_id, 0))
+
+
+def _set_lock_depth(task_id: str, value: int) -> None:
+    depths = _lock_depths()
+    if value <= 0:
+        depths.pop(task_id, None)
+    else:
+        depths[task_id] = value
 
 
 @contextmanager
@@ -35,8 +47,8 @@ def task_state_lock(
     *,
     stale_seconds: int = DEFAULT_STALE_LOCK_SECONDS,
 ) -> Iterator[None]:
-    """Acquire an exclusive file lock for task state read/write (reentrant per thread)."""
-    if _lock_depth() > 0:
+    """Acquire an exclusive file lock for task state read/write (reentrant per thread/task)."""
+    if _lock_depth(task_id) > 0:
         yield
         return
 
@@ -45,11 +57,11 @@ def task_state_lock(
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
     try:
         _acquire_with_stale_detection(fd, path, stale_seconds=stale_seconds)
-        _set_lock_depth(_lock_depth() + 1)
+        _set_lock_depth(task_id, _lock_depth(task_id) + 1)
         try:
             yield
         finally:
-            _set_lock_depth(max(0, _lock_depth() - 1))
+            _set_lock_depth(task_id, _lock_depth(task_id) - 1)
     finally:
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
