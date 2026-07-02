@@ -105,6 +105,43 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--claude-code-model", default=None, help="Claude Code model override")
     init_parser.add_argument("--cursor-force", action="store_true", default=False, help="Pass --force to cursor agent")
     init_parser.add_argument("--cursor-sandbox", default=None, help="Cursor sandbox mode override")
+    init_parser.add_argument("--max-parallel-nodes", type=int, default=None, help="Max concurrent graph nodes (default: 1)")
+    init_parser.add_argument(
+        "--allow-parallel-execution",
+        action="store_true",
+        default=False,
+        help="Enable experimental parallel graph node execution (requires max_parallel_nodes > 1)",
+    )
+    init_parser.add_argument(
+        "--max-wall-clock-seconds",
+        type=int,
+        default=None,
+        help="Stop after this many wall-clock seconds (0 disables)",
+    )
+    init_parser.add_argument(
+        "--max-changed-files-per-attempt",
+        type=int,
+        default=None,
+        help="Stop when changed file count exceeds this limit (0 disables)",
+    )
+    init_parser.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=None,
+        help="Stop after this many consecutive failures (0 disables)",
+    )
+    init_parser.add_argument(
+        "--max-artifact-log-bytes",
+        type=int,
+        default=None,
+        help="Stop when artifact log size exceeds this limit (0 disables)",
+    )
+    init_parser.add_argument(
+        "--allow-node-policy-weakening",
+        action="store_true",
+        default=False,
+        help="Allow per-node policy to weaken task-level safety defaults",
+    )
 
     run_parser = subparsers.add_parser("run", help="Start the task loop from an initialized task")
     _task_id_arg(run_parser)
@@ -239,6 +276,20 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["cursor_force"] = True
     if args.cursor_sandbox is not None:
         overrides["cursor_sandbox"] = args.cursor_sandbox
+    if args.max_parallel_nodes is not None:
+        overrides["max_parallel_nodes"] = args.max_parallel_nodes
+    if args.allow_parallel_execution:
+        overrides["allow_parallel_execution"] = True
+    if args.max_wall_clock_seconds is not None:
+        overrides["max_wall_clock_seconds"] = args.max_wall_clock_seconds
+    if args.max_changed_files_per_attempt is not None:
+        overrides["max_changed_files_per_attempt"] = args.max_changed_files_per_attempt
+    if args.max_consecutive_failures is not None:
+        overrides["max_consecutive_failures"] = args.max_consecutive_failures
+    if args.max_artifact_log_bytes is not None:
+        overrides["max_artifact_log_bytes"] = args.max_artifact_log_bytes
+    if args.allow_node_policy_weakening:
+        overrides["allow_node_policy_weakening"] = True
 
     config = merge_config(overrides)
     base_commit = resolve_base_commit_if_possible(repo, args.base_branch)
@@ -632,6 +683,7 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
             elif (
                 step == AutoStep.RUN
                 and int(state.config.get("max_parallel_nodes", 1) or 1) > 1
+                and state.config.get("allow_parallel_execution", False)
                 and discover_parallel_runnable(state)
             ):
                 state = execute_parallel_batch(state, state_root)

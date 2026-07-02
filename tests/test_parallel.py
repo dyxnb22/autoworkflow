@@ -7,7 +7,7 @@ import threading
 import unittest
 
 import tests.fake_providers  # noqa: F401
-from cc_loop.parallel_scheduler import discover_parallel_runnable
+from cc_loop.parallel_scheduler import discover_parallel_runnable, parallel_execution_enabled
 from cc_loop.state import load_state, save_state
 from cc_loop.state_lock import atomic_write_json, task_state_lock
 from cc_loop.task_graph import graph_from_planner_json
@@ -79,6 +79,24 @@ class ParallelSchedulerTests(unittest.TestCase):
             self.assertEqual(len(nodes), 2)
             ids = {n.id for n in nodes}
             self.assertEqual(ids, {"T1", "T2"})
+        finally:
+            env.close()
+
+    def test_parallel_execution_requires_explicit_opt_in(self) -> None:
+        env = TempEnv()
+        try:
+            repo = env.repo()
+            state_root = env.state_root()
+            make_task(
+                repo=repo,
+                state_root=state_root,
+                task_id="par-gate",
+                config={"max_parallel_nodes": 2},
+            )
+            state = load_state("par-gate", state_root)
+            self.assertFalse(parallel_execution_enabled(state))
+            state.config["allow_parallel_execution"] = True
+            self.assertTrue(parallel_execution_enabled(state))
         finally:
             env.close()
 

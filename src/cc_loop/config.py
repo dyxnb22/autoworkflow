@@ -39,6 +39,7 @@ class LoopConfig(TypedDict, total=False):
     max_changed_files_per_attempt: int
     stale_heartbeat_seconds: int
     max_parallel_nodes: int
+    allow_parallel_execution: bool
     allow_node_policy_weakening: bool
 
 
@@ -74,6 +75,7 @@ DEFAULT_CONFIG: LoopConfig = {
     "max_changed_files_per_attempt": 0,
     "stale_heartbeat_seconds": 120,
     "max_parallel_nodes": 1,
+    "allow_parallel_execution": False,
     "allow_node_policy_weakening": False,
 }
 

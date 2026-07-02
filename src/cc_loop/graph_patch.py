@@ -8,12 +8,12 @@ from typing import Any
 
 from cc_loop.state import utc_now_iso
 from cc_loop.task_graph import (
-    GraphNode,
     GraphNodeKind,
     GraphNodeStatus,
     TaskGraph,
     _node_index,
     get_node,
+    graph_node_from_planner_item,
 )
 
 
@@ -163,23 +163,13 @@ def apply_patch(graph: TaskGraph, patch: GraphPatch) -> TaskGraph:
 
         if op_type == PatchOpType.ADD_NODE:
             node_id = str(op.data.get("id", op.node_id)).strip()
-            graph.nodes.append(
-                GraphNode(
-                    id=node_id,
-                    title=str(op.data.get("title", node_id)),
-                    description=str(op.data.get("description", "")),
-                    kind=GraphNodeKind(str(op.data.get("kind", GraphNodeKind.IMPLEMENTATION.value))),
-                    owner=str(op.data.get("owner", "implementer")),
-                    dependencies=list(op.data.get("dependencies") or []),
-                    acceptance_criteria=list(op.data.get("acceptance_criteria") or []),
-                    files_scope=list(op.data.get("files_scope") or []),
-                    status=GraphNodeStatus.PENDING,
-                    attempt_iterations=[],
-                    retry_count=0,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
+            op_data = dict(op.data)
+            if node_id and "id" not in op_data:
+                op_data["id"] = node_id
+            node = graph_node_from_planner_item(op_data, now=now)
+            if node is None:
+                raise GraphPatchError(f"add_node missing valid id: {op.data}")
+            graph.nodes.append(node)
 
         elif op_type == PatchOpType.UPDATE_NODE:
             node = get_node(graph, op.node_id)
@@ -193,6 +183,27 @@ def apply_patch(graph: TaskGraph, patch: GraphPatch) -> TaskGraph:
                 node.acceptance_criteria = list(op.data["acceptance_criteria"])
             if "files_scope" in op.data:
                 node.files_scope = list(op.data["files_scope"])
+            for key in (
+                "planner_provider",
+                "implementer_provider",
+                "reviewer_provider",
+                "test_policy",
+                "merge_policy",
+            ):
+                if key in op.data:
+                    setattr(node, key, str(op.data[key]))
+            if "reviewer_providers" in op.data:
+                node.reviewer_providers = list(op.data["reviewer_providers"])
+            if "max_changed_files" in op.data:
+                node.max_changed_files = int(op.data["max_changed_files"] or 0)
+            if "max_review_patch_bytes" in op.data:
+                node.max_review_patch_bytes = int(op.data["max_review_patch_bytes"] or 0)
+            if "requires_manual_review" in op.data:
+                node.requires_manual_review = bool(op.data["requires_manual_review"])
+            if "allow_merge_without_tests" in op.data:
+                from cc_loop.task_graph import _optional_bool
+
+                node.allow_merge_without_tests = _optional_bool(op.data["allow_merge_without_tests"])
             node.updated_at = now
 
         elif op_type == PatchOpType.ADD_DEPENDENCY:

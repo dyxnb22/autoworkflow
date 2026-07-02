@@ -16,6 +16,7 @@ from cc_loop.git import (
     resolve_repo_path,
 )
 from cc_loop.providers.base import get_provider
+from cc_loop.task_graph import TaskGraph, effective_node_providers
 
 
 class PreflightError(Exception):
@@ -46,6 +47,32 @@ def _configured_provider_names(providers: dict[str, str]) -> set[str]:
 def verify_providers(providers: dict[str, str]) -> None:
     """Verify only providers referenced by configured roles are installed."""
     for provider_name in sorted(_configured_provider_names(providers)):
+        try:
+            provider = get_provider(provider_name)
+            provider.preflight_check()
+        except ValueError as exc:
+            raise PreflightError(str(exc)) from exc
+        except RuntimeError as exc:
+            raise PreflightError(str(exc)) from exc
+
+
+def verify_graph_node_providers(
+    graph: TaskGraph,
+    state_providers: dict[str, str],
+) -> None:
+    """Verify providers referenced by graph nodes are installed."""
+    names: set[str] = set()
+    for node in graph.nodes:
+        resolved = effective_node_providers(node, state_providers)
+        for key in ("planner", "implementer", "reviewer"):
+            name = str(resolved.get(key, "")).strip()
+            if name:
+                names.add(name)
+        for name in resolved.get("reviewer_chain", []):
+            text = str(name).strip()
+            if text:
+                names.add(text)
+    for provider_name in sorted(names):
         try:
             provider = get_provider(provider_name)
             provider.preflight_check()
@@ -97,6 +124,7 @@ def run_preflight(
     base_branch: str,
     providers: dict[str, str],
     config: LoopConfig,
+    task_graph: TaskGraph | None = None,
 ) -> PreflightResult:
     repo = resolve_repo_path(Path(target_repo))
     if not repo.is_dir():
@@ -122,6 +150,8 @@ def run_preflight(
 
     _verify_test_command(config)
     verify_providers(providers)
+    if task_graph is not None:
+        verify_graph_node_providers(task_graph, providers)
 
     return PreflightResult(
         target_repo=repo,

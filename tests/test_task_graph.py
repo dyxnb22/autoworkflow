@@ -57,7 +57,29 @@ class TaskGraphTests(unittest.TestCase):
         self.assertEqual(graph.current_node_id, "T1")
         self.assertEqual(graph.nodes[0].status, GraphNodeStatus.PENDING)
 
-    def test_wrap_legacy_planner_json(self) -> None:
+    def test_graph_from_planner_json_preserves_node_policy_fields(self) -> None:
+        plan = {
+            "mode": "task_graph",
+            "nodes": [
+                {
+                    "id": "T1",
+                    "title": "Manual review step",
+                    "description": "docs",
+                    "implementer_provider": "claude-code",
+                    "reviewer_providers": ["codex", "claude-code"],
+                    "requires_manual_review": True,
+                    "max_changed_files": 3,
+                    "allow_merge_without_tests": True,
+                }
+            ],
+        }
+        graph = graph_from_planner_json(plan)
+        node = graph.nodes[0]
+        self.assertEqual(node.implementer_provider, "claude-code")
+        self.assertEqual(node.reviewer_providers, ["codex", "claude-code"])
+        self.assertTrue(node.requires_manual_review)
+        self.assertEqual(node.max_changed_files, 3)
+        self.assertTrue(node.allow_merge_without_tests)
         plan = {
             "prompt": "Build feature",
             "expected_changes": "src/feature.py",

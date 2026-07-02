@@ -48,13 +48,17 @@ def _read_proc_cmdline(pid: int) -> str:
         return ""
 
 
-def validate_pid_ownership(pid: int, task_id: str) -> bool:
+def validate_pid_ownership(pid: int, task_id: str, *, state_root: Path | None = None) -> bool:
     """Return True when PID appears to belong to this task's cc-loop runner."""
     if not is_process_alive(pid):
         return False
     cmdline = _read_proc_cmdline(pid)
     if not cmdline:
-        return True
+        if state_root is not None:
+            hb = read_heartbeat(state_root, task_id)
+            if hb is not None and hb.pid == pid and hb.task_id == task_id:
+                return True
+        return False
     markers = ("cc_loop.cli", "cc-loop", "cc_loop")
     if not any(marker in cmdline for marker in markers):
         return False
@@ -107,7 +111,7 @@ def stop_runner(
             pid=None,
         )
 
-    if not validate_pid_ownership(pid, task_id):
+    if not validate_pid_ownership(pid, task_id, state_root=state_root):
         clear_runner_pid_if_matches(state_root, task_id)
         return RunnerControlResult(
             action="stop",
@@ -178,7 +182,7 @@ def cleanup_task(state_root: Path, task_id: str) -> RunnerControlResult:
     pid_path = runner_pid_path(state_root, task_id)
     if pid_path.is_file():
         pid = read_runner_pid(state_root, task_id)
-        if pid is not None and is_process_alive(pid) and validate_pid_ownership(pid, task_id):
+        if pid is not None and is_process_alive(pid) and validate_pid_ownership(pid, task_id, state_root=state_root):
             return RunnerControlResult(
                 action="cleanup",
                 task_id=task_id,
@@ -210,12 +214,30 @@ def cleanup_task(state_root: Path, task_id: str) -> RunnerControlResult:
 
     try:
         state = load_state(task_id, state_root)
+        target_repo = Path(state.target_repo)
         wt_root = _task_worktree_root(state)
         if wt_root.is_dir():
-            import shutil
+            from cc_loop.git import GitError, prune_worktrees, remove_worktree
 
-            shutil.rmtree(wt_root)
-            removed.append(str(wt_root))
+            for child in sorted(wt_root.iterdir()):
+                if not child.is_dir():
+                    continue
+                try:
+                    remove_worktree(target_repo, child, force=True)
+                    removed.append(str(child))
+                except GitError:
+                    import shutil
+
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed.append(str(child))
+            try:
+                wt_root.rmdir()
+            except OSError:
+                pass
+            try:
+                prune_worktrees(target_repo)
+            except GitError as exc:
+                errors.append(str(exc))
     except (OSError, FileNotFoundError) as exc:
         errors.append(str(exc))
 

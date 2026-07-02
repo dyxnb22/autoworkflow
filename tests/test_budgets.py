@@ -30,3 +30,17 @@ class BudgetTests(unittest.TestCase):
         report = check_budgets(state, attempts[-1], state.config)
         assert report is not None
         self.assertEqual(report.stop_reason, "max_consecutive_failures")
+
+    def test_count_changed_files_ignores_headers(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from cc_loop.budgets import count_changed_files
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "diff.files.txt"
+            path.write_text(
+                "## status --porcelain\n(clean)\n\n## base_commit...HEAD\nsrc/a.py\nsrc/b.py\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(count_changed_files(path), 2)
