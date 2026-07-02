@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.0 — 2026-07-02
+
+Task graph orchestration for multi-node workflows.
+
+### Added
+
+- [`src/cc_loop/task_graph.py`](src/cc_loop/task_graph.py) — `TaskGraph`, `GraphNode`, dispatcher (`next_runnable_node`, status transitions, completion)
+- Planner task graph JSON contract (`mode: task_graph`) with automatic legacy single-step wrapping
+- Node-scoped implementer and reviewer prompts
+- `TaskState.task_graph` persistence (backward compatible: absent in old state files)
+- `AttemptRecord.graph_node_id` linking attempts to graph nodes
+- `cc-loop graph [--task-id ID] [--json]` — inspect graph progress
+- `status --json` additive `task_graph` block
+- [`docs/TASK_GRAPH.md`](docs/TASK_GRAPH.md)
+- Tests: `test_task_graph.py`; graph integration tests in `test_run_flow.py`, `test_cli_contract.py`, `test_auto_recovery.py`
+- Fake providers: `fake-graph-planner`, `fake-graph-implementer`
+
+### Changed
+
+- `auto` progresses through graph nodes sequentially (one node per iteration)
+- Planner prompt prefers task graph output; legacy JSON still supported
+- Package version 0.3.0 → 0.4.0
+
+### Preserved
+
+- Legacy single-step planner output and v0.3 recovery behavior
+- Existing CLI commands and integration schema version 1
+
 ## v0.3.0 — 2026-06-30
 
 Recoverable failure handling for `auto` loop.

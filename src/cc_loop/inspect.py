@@ -18,6 +18,7 @@ from cc_loop.state import (
     plan_artifact_paths,
     task_dir,
 )
+from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph, graph_status_summary
 
 INTEGRATION_SCHEMA_VERSION = 1
 
@@ -187,13 +188,14 @@ def build_attempt_snapshot(
         "merge_error": attempt.merge_error or "",
         "artifact_dir": artifact_path,
         "created_at": attempt.created_at or "",
+        "graph_node_id": attempt.graph_node_id or "",
     }
 
 
 def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
     attempt = state.history[-1] if state.history else None
     running, runner_pid = is_runner_alive(state_root, state.task_id)
-    return {
+    snapshot = {
         "schema_version": INTEGRATION_SCHEMA_VERSION,
         "cc_loop_version": __version__,
         "task_id": state.task_id,
@@ -209,6 +211,29 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
         "running": running,
         "runner_pid": runner_pid,
     }
+    graph = ensure_task_graph(state)
+    if graph is not None:
+        snapshot["task_graph"] = build_graph_snapshot(graph)
+    return snapshot
+
+
+def format_task_graph_human(state: TaskState) -> str:
+    """Human-readable task graph progress for CLI output."""
+    graph = ensure_task_graph(state)
+    if graph is None:
+        return "No task graph for this task."
+
+    summary = graph_status_summary(graph)
+    passed = summary["passed"]
+    total = summary["total"]
+    lines = [
+        f"Task graph: {state.task_id}",
+        f"Progress: {passed}/{total} passed",
+        "",
+    ]
+    for node in graph.nodes:
+        lines.append(f"{node.id} {node.status.value:<8} {node.title}")
+    return "\n".join(lines)
 
 
 def state_mtime_iso(state_root: Path, task_id: str) -> str:

@@ -11,6 +11,7 @@ import tests.fake_providers  # noqa: F401 — register fake providers
 from cc_loop.git import GitCommandError, GitCommandResult
 from cc_loop.run import execute_resume, execute_run, prepare_run, run_implementer_phase, run_planning_phase
 from cc_loop.state import AttemptPhase, TaskStatus, load_state, save_state
+from cc_loop.task_graph import ensure_task_graph, graph_complete
 from tests.fake_providers import FakeReviewer
 from tests.helpers import TempEnv, make_task
 
@@ -183,6 +184,59 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(attempt.recovery_disposition, "recoverable")
         self.assertTrue(paths["merge_output"].is_file())
         self.assertTrue((paths["plan_prompt"].parent / "failure.report.json").is_file())
+
+    def test_task_graph_two_node_auto_flow(self) -> None:
+        make_task(
+            repo=self.repo,
+            state_root=self.state_root,
+            task_id="graph-task",
+            config={
+                "planner_provider": "fake-graph-planner",
+                "implementer_provider": "fake-graph-implementer",
+            },
+        )
+        with self._patch_worktree_root():
+            from cc_loop.cli import _run_auto_loop
+            import argparse
+
+            args = argparse.Namespace(state_root=self.state_root, max_iterations=None)
+            code = _run_auto_loop(args, "graph-task")
+
+        self.assertEqual(code, 0)
+        state = load_state("graph-task", self.state_root)
+        graph = ensure_task_graph(state)
+        self.assertIsNotNone(graph)
+        assert graph is not None
+        self.assertTrue(graph_complete(graph))
+        self.assertEqual(state.status, TaskStatus.DONE)
+        self.assertTrue((self.repo / "hello.txt").is_file())
+        self.assertTrue((self.repo / "world.txt").is_file())
+
+        node_ids = {attempt.graph_node_id for attempt in state.history if attempt.phase == AttemptPhase.MERGED}
+        self.assertEqual(node_ids, {"T1", "T2"})
+
+    def test_task_graph_first_node_passed_makes_second_runnable(self) -> None:
+        make_task(
+            repo=self.repo,
+            state_root=self.state_root,
+            task_id="graph-partial",
+            config={
+                "planner_provider": "fake-graph-planner",
+                "implementer_provider": "fake-graph-implementer",
+            },
+        )
+        with self._patch_worktree_root():
+            state = load_state("graph-partial", self.state_root)
+            state, attempt, _paths = execute_run(state, self.state_root)
+
+        graph = ensure_task_graph(state)
+        self.assertIsNotNone(graph)
+        assert graph is not None
+        self.assertEqual(attempt.graph_node_id, "T1")
+        self.assertEqual(graph.nodes[0].status.value, "passed")
+        self.assertEqual(state.status, TaskStatus.STOPPED)
+        self.assertTrue((self.repo / "hello.txt").is_file())
+        self.assertFalse((self.repo / "world.txt").exists())
 
 
 if __name__ == "__main__":

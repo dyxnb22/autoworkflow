@@ -14,6 +14,7 @@ from unittest import mock
 import tests.fake_providers  # noqa: F401
 from cc_loop.cli import main, resolve_task_id
 from cc_loop.inspect import build_status_snapshot, runner_pid_path
+from cc_loop.task_graph import graph_from_planner_json
 from cc_loop.detach import spawn_detached_auto
 from cc_loop.providers.claude_code import ClaudeCodeAdapter
 from cc_loop.providers.claude_code import _extract_json
@@ -85,7 +86,7 @@ class ListAndStatusJsonTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["cc_loop_version"], "0.3.0")
+        self.assertEqual(payload["cc_loop_version"], "0.4.0")
         self.assertEqual(payload["task_id"], "snap-task")
         self.assertEqual(payload["next_action"], "run")
         self.assertFalse(payload["running"])
@@ -111,6 +112,49 @@ class ListAndStatusJsonTests(unittest.TestCase):
         snapshot = build_status_snapshot(load_state("mid-task", self.state_root), self.state_root)
         self.assertEqual(snapshot["attempt"]["phase"], "executing")
         self.assertEqual(snapshot["next_action"], "resume")
+
+    def test_status_json_includes_task_graph_when_present(self) -> None:
+        make_task(repo=self.repo, state_root=self.state_root, task_id="graph-status")
+        state = load_state("graph-status", self.state_root)
+        state.task_graph = graph_from_planner_json(
+            {
+                "mode": "task_graph",
+                "summary": "demo",
+                "nodes": [
+                    {"id": "T1", "title": "One", "description": "", "dependencies": []},
+                ],
+            }
+        )
+        save_state(state, self.state_root)
+        snapshot = build_status_snapshot(load_state("graph-status", self.state_root), self.state_root)
+        self.assertIn("task_graph", snapshot)
+        self.assertEqual(snapshot["task_graph"]["summary"]["total"], 1)
+
+    def test_graph_command_human_and_json(self) -> None:
+        make_task(repo=self.repo, state_root=self.state_root, task_id="graph-cli")
+        state = load_state("graph-cli", self.state_root)
+        state.task_graph = graph_from_planner_json(
+            {
+                "mode": "task_graph",
+                "summary": "demo",
+                "nodes": [
+                    {"id": "T1", "title": "Set up project", "description": "", "dependencies": []},
+                    {"id": "T2", "title": "Implement parser", "description": "", "dependencies": ["T1"]},
+                ],
+            }
+        )
+        save_state(state, self.state_root)
+
+        human = _cli("graph", "--task-id", "graph-cli", state_root=self.state_root)
+        self.assertEqual(human.returncode, 0)
+        self.assertIn("Progress:", human.stdout)
+        self.assertIn("T1", human.stdout)
+
+        payload = _cli("graph", "--task-id", "graph-cli", "--json", state_root=self.state_root)
+        self.assertEqual(payload.returncode, 0)
+        data = json.loads(payload.stdout)
+        self.assertIn("task_graph", data)
+        self.assertEqual(data["task_graph"]["summary"]["total"], 2)
 
 
 class SchemaVersionTests(unittest.TestCase):
