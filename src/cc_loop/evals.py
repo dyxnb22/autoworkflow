@@ -51,6 +51,9 @@ def load_eval_suite(path: Path) -> dict[str, Any]:
     cases = suite.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ValueError("eval suite must include a non-empty cases array")
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            raise ValueError(f"eval suite case at index {index} must be an object")
     return suite
 
 
@@ -114,6 +117,16 @@ def _load_artifact_json(artifact_path: Path) -> dict[str, Any]:
 
 
 def evaluate_case(case: dict[str, Any], artifact_dir: Path) -> CaseResult:
+    if not isinstance(case, dict):
+        return CaseResult(
+            case_id="(invalid-case)",
+            description="",
+            artifact="",
+            passed=False,
+            assertions=[],
+            error="case must be an object",
+        )
+
     case_id = str(case.get("id", ""))
     description = str(case.get("description", ""))
     artifact_name = str(case.get("artifact", ""))

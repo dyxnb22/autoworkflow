@@ -22,6 +22,16 @@ def _safe_read_json(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _coerce_path_list(value: Any) -> list[Path]:
+    if not isinstance(value, list):
+        return []
+    return [Path(item) for item in value if isinstance(item, str) and item]
+
+
+def _estimate_tokens_from_paths(paths: list[Path]) -> int:
+    return sum(estimate_tokens_from_path(path) for path in paths)
+
+
 def _base_row(
     *,
     state: TaskState,
@@ -143,6 +153,8 @@ def build_export_rows(state: TaskState, state_root: Path) -> list[dict[str, Any]
     review = phases.get("review", {})
     metrics = _safe_read_json(artifact_paths["review_prompt_metrics"])
     if review or artifact_paths["review_prompt"].is_file():
+        review_raw_paths = _coerce_path_list(review.get("raw_paths"))
+        review_last_message_paths = _coerce_path_list(review.get("last_message_paths"))
         row = {
             **_base_row(
                 state=state,
@@ -164,11 +176,17 @@ def build_export_rows(state: TaskState, state_root: Path) -> list[dict[str, Any]
                 "estimated_prompt_tokens",
                 estimate_tokens_from_path(artifact_paths["review_prompt"]),
             ),
-            "estimated_output_tokens": estimate_tokens_from_path(
-                artifact_paths["review_last_message"]
+            "estimated_output_tokens": (
+                _estimate_tokens_from_paths(review_last_message_paths)
+                if review_last_message_paths
+                else estimate_tokens_from_path(artifact_paths["review_last_message"])
             ),
             "decision": review.get("decision", attempt.decision),
         }
+        if review_raw_paths:
+            row["raw_output_paths"] = [str(path) for path in review_raw_paths]
+        if review_last_message_paths:
+            row["last_message_paths"] = [str(path) for path in review_last_message_paths]
         stable_prefix_ratio = review.get("stable_prefix_ratio")
         if stable_prefix_ratio is None and metrics is not None:
             stable_prefix_ratio = metrics.get("stable_prefix_ratio")

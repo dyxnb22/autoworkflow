@@ -743,6 +743,14 @@ def run_implementer_phase(
     try:
         provider = get_provider(provider_name)
     except ValueError as exc:
+        _update_implementer_trace(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            status="failed",
+            error=str(exc),
+        )
         _mark_implementer_failed(state, state_root)
         raise ImplementingError(str(exc)) from exc
 
@@ -756,6 +764,14 @@ def run_implementer_phase(
             timeout_seconds=timeout_seconds,
         )
     except NotImplementedError as exc:
+        _update_implementer_trace(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            status="failed",
+            error=str(exc),
+        )
         _mark_implementer_failed(state, state_root)
         raise ImplementingError(str(exc)) from exc
 
@@ -774,10 +790,28 @@ def run_implementer_phase(
     save_state(state, state_root)
 
     if run_result.timed_out:
+        _update_implementer_trace(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            status="timed_out",
+            exit_code=run_result.exit_code,
+            error=f"{provider_name} implementer timed out",
+        )
         _mark_implementer_failed(state, state_root)
         raise ImplementingError(f"{provider_name} implementer timed out")
 
     if run_result.exit_code != 0:
+        _update_implementer_trace(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            status="failed",
+            exit_code=run_result.exit_code,
+            error=f"{provider_name} implementer exited with code {run_result.exit_code}",
+        )
         _mark_implementer_failed(state, state_root, attempt=attempt)
         raise ImplementingError(f"{provider_name} implementer exited with code {run_result.exit_code}")
 
@@ -789,17 +823,13 @@ def run_implementer_phase(
         message=provider_name,
         details={"exit_code": run_result.exit_code},
     )
-    update_trace_phase(
+    _update_implementer_trace(
         state=state,
         attempt=attempt,
         artifact_paths=artifact_paths,
         config=config,
-        phase="implementation",
         status="completed",
-        prompt_path=str(artifact_paths["implementer_prompt"]),
-        prompt_meta_path=str(artifact_paths["implementer_prompt_meta"]),
-        raw_path=str(artifact_paths["implementer_raw"]),
-        estimated_prompt_tokens=estimate_tokens_from_path(artifact_paths["implementer_prompt"]),
+        exit_code=run_result.exit_code,
     )
     return state
 
@@ -963,10 +993,13 @@ def run_review_phase(
 
     all_reviews: list[dict[str, Any]] = []
     review_raw_paths: list[str] = []
+    review_last_message_paths: list[str] = []
     for idx, provider_name in enumerate(reviewer_chain):
         provider_path = _review_artifact_path(artifact_paths["review_provider"], idx)
         raw_path = _review_artifact_path(artifact_paths["review_raw"], idx)
         last_message_path = _review_artifact_path(artifact_paths["review_last_message"], idx)
+        current_raw_paths = review_raw_paths + [str(raw_path)]
+        current_last_message_paths = review_last_message_paths + [str(last_message_path)]
         provider_path.write_text(provider_name + "\n", encoding="utf-8")
         raw_path.write_text("", encoding="utf-8")
         last_message_path.write_text("", encoding="utf-8")
@@ -974,6 +1007,17 @@ def run_review_phase(
         try:
             provider = get_provider(provider_name)
         except ValueError as exc:
+            _update_review_trace(
+                state=state,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                config=config,
+                status="failed",
+                raw_paths=current_raw_paths,
+                last_message_paths=current_last_message_paths,
+                metrics=review_prompt_metrics,
+                error=str(exc),
+            )
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(str(exc)) from exc
 
@@ -990,27 +1034,83 @@ def run_review_phase(
                 print_only=print_only,
             )
         except NotImplementedError as exc:
+            _update_review_trace(
+                state=state,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                config=config,
+                status="failed",
+                raw_paths=current_raw_paths,
+                last_message_paths=current_last_message_paths,
+                metrics=review_prompt_metrics,
+                error=str(exc),
+            )
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(str(exc)) from exc
 
         provider_path.write_text(run_result.provider + "\n", encoding="utf-8")
         review_raw_paths.append(str(raw_path))
+        review_last_message_paths.append(str(last_message_path))
 
         if run_result.timed_out:
+            _update_review_trace(
+                state=state,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                config=config,
+                status="timed_out",
+                raw_paths=review_raw_paths,
+                last_message_paths=review_last_message_paths,
+                metrics=review_prompt_metrics,
+                error=f"{provider_name} reviewer timed out",
+            )
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"{provider_name} reviewer timed out")
 
         if run_result.exit_code != 0:
+            _update_review_trace(
+                state=state,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                config=config,
+                status="failed",
+                raw_paths=review_raw_paths,
+                last_message_paths=review_last_message_paths,
+                metrics=review_prompt_metrics,
+                error=f"{provider_name} reviewer exited with code {run_result.exit_code}",
+            )
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"{provider_name} reviewer exited with code {run_result.exit_code}")
 
         if not last_message_path.is_file():
+            _update_review_trace(
+                state=state,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                config=config,
+                status="failed",
+                raw_paths=review_raw_paths,
+                last_message_paths=review_last_message_paths,
+                metrics=review_prompt_metrics,
+                error=f"reviewer last-message artifact missing: {last_message_path}",
+            )
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"reviewer last-message artifact missing: {last_message_path}")
 
         try:
             review_json = provider.parse_reviewer_output(last_message_path)
         except (json.JSONDecodeError, KeyError, TypeError, NotImplementedError) as exc:
+            _update_review_trace(
+                state=state,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                config=config,
+                status="failed",
+                raw_paths=review_raw_paths,
+                last_message_paths=review_last_message_paths,
+                metrics=review_prompt_metrics,
+                error=f"reviewer output parse failed: {exc}",
+            )
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"reviewer output parse failed: {exc}") from exc
 
@@ -1047,20 +1147,16 @@ def run_review_phase(
             "estimated_dynamic_payload_tokens": review_prompt_metrics["estimated_dynamic_payload_tokens"],
         },
     )
-    update_trace_phase(
+    _update_review_trace(
         state=state,
         attempt=attempt,
         artifact_paths=artifact_paths,
         config=config,
-        phase="review",
         status="completed",
-        prompt_path=str(artifact_paths["review_prompt"]),
-        prompt_meta_path=str(artifact_paths["review_prompt_meta"]),
-        raw_path=str(artifact_paths["review_raw"]),
-        metrics_path=str(artifact_paths["review_prompt_metrics"]),
+        raw_paths=review_raw_paths,
+        last_message_paths=review_last_message_paths,
+        metrics=review_prompt_metrics,
         decision=attempt.decision,
-        estimated_prompt_tokens=review_prompt_metrics["estimated_prompt_tokens"],
-        stable_prefix_ratio=review_prompt_metrics["stable_prefix_ratio"],
     )
     save_state(state, state_root)
     return state
@@ -1805,6 +1901,75 @@ def _write_reviewer_prompt_metadata(
         prompt_path=artifact_paths["review_prompt"],
     )
     write_prompt_metadata(artifact_paths["review_prompt_meta"], metadata)
+
+
+def _update_implementer_trace(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    config: LoopConfig,
+    status: str,
+    exit_code: int | None = None,
+    error: str = "",
+) -> None:
+    fields: dict[str, Any] = {
+        "prompt_path": str(artifact_paths["implementer_prompt"]),
+        "prompt_meta_path": str(artifact_paths["implementer_prompt_meta"]),
+        "raw_path": str(artifact_paths["implementer_raw"]),
+        "estimated_prompt_tokens": estimate_tokens_from_path(artifact_paths["implementer_prompt"]),
+    }
+    if exit_code is not None:
+        fields["exit_code"] = exit_code
+    if error:
+        fields["error"] = error
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="implementation",
+        status=status,
+        **fields,
+    )
+
+
+def _update_review_trace(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    config: LoopConfig,
+    status: str,
+    raw_paths: list[str],
+    last_message_paths: list[str],
+    metrics: dict[str, Any],
+    decision: str = "",
+    error: str = "",
+) -> None:
+    fields: dict[str, Any] = {
+        "prompt_path": str(artifact_paths["review_prompt"]),
+        "prompt_meta_path": str(artifact_paths["review_prompt_meta"]),
+        "raw_path": str(artifact_paths["review_raw"]),
+        "raw_paths": raw_paths,
+        "last_message_paths": last_message_paths,
+        "metrics_path": str(artifact_paths["review_prompt_metrics"]),
+        "estimated_prompt_tokens": metrics["estimated_prompt_tokens"],
+        "stable_prefix_ratio": metrics["stable_prefix_ratio"],
+    }
+    if decision:
+        fields["decision"] = decision
+    if error:
+        fields["error"] = error
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="review",
+        status=status,
+        **fields,
+    )
 
 
 def _provider_timeout_seconds(config: LoopConfig, provider_name: str) -> int:

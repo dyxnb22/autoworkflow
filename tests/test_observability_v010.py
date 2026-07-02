@@ -15,7 +15,13 @@ from cc_loop.evals import evaluate_assertion, run_eval_suite
 from cc_loop.export import build_export_rows, write_jsonl_export
 from cc_loop.prompt_metadata import build_prompt_metadata, resolve_implementer_layout
 from cc_loop.report import build_report
-from cc_loop.run import build_reviewer_prompt, build_reviewer_prompt_metrics, execute_run
+from cc_loop.run import (
+    ImplementingError,
+    build_reviewer_prompt,
+    build_reviewer_prompt_metrics,
+    execute_run,
+    run_implementer_phase,
+)
 from cc_loop.state import (
     AttemptPhase,
     AttemptRecord,
@@ -289,6 +295,21 @@ class EvalSuiteTests(unittest.TestCase):
         cli = _cli("eval", "--task-id", "eval-task", "--suite", str(bad_suite), state_root=self.state_root)
         self.assertEqual(cli.returncode, 2)
 
+        malformed_case_suite = self.env.root / "malformed-case.json"
+        malformed_case_suite.write_text(
+            json.dumps({"schema_version": 1, "cases": ["not an object"]}),
+            encoding="utf-8",
+        )
+        cli = _cli(
+            "eval",
+            "--task-id",
+            "eval-task",
+            "--suite",
+            str(malformed_case_suite),
+            state_root=self.state_root,
+        )
+        self.assertEqual(cli.returncode, 2)
+
     def test_assertion_ops(self) -> None:
         passed, _ = evaluate_assertion(0.8, ">=", 0.6)
         self.assertTrue(passed)
@@ -382,6 +403,66 @@ class ExportReportTests(unittest.TestCase):
             state_root=self.state_root,
         )
         self.assertEqual(cli.returncode, 0)
+
+    def test_export_sums_multi_reviewer_last_messages(self) -> None:
+        paths = plan_artifact_paths(self.artifact_root)
+        first_last_message = paths["review_last_message"]
+        second_last_message = paths["review_last_message"].parent / "review.last-message.1.txt"
+        first_raw = paths["review_raw"]
+        second_raw = paths["review_raw"].parent / "review.raw.1.jsonl"
+        first_last_message.write_text("12345678", encoding="utf-8")
+        second_last_message.write_text("1234", encoding="utf-8")
+        first_raw.write_text("{}\n", encoding="utf-8")
+        second_raw.write_text("{}\n", encoding="utf-8")
+        update_trace_phase(
+            state=self.state,
+            attempt=self.state.history[-1],
+            artifact_paths=paths,
+            config=self.state.config,
+            phase="review",
+            status="completed",
+            prompt_path=str(paths["review_prompt"]),
+            prompt_meta_path=str(paths["review_prompt_meta"]),
+            raw_path=str(first_raw),
+            raw_paths=[str(first_raw), str(second_raw)],
+            last_message_paths=[str(first_last_message), str(second_last_message)],
+            metrics_path=str(paths["review_prompt_metrics"]),
+            decision="approve",
+            estimated_prompt_tokens=3,
+            stable_prefix_ratio=0.7,
+        )
+
+        rows = build_export_rows(self.state, self.state_root)
+        reviewer = next(row for row in rows if row["role"] == "reviewer")
+        self.assertEqual(reviewer["estimated_output_tokens"], 3)
+        self.assertEqual(reviewer["last_message_paths"], [str(first_last_message), str(second_last_message)])
+
+    def test_failed_implementer_attempt_still_updates_trace_and_export(self) -> None:
+        attempt = _attempt_record(
+            plan_json={"prompt": "do work", "expected_changes": "", "acceptance_criteria": ""},
+            implementer_exit_code=None,
+            implementer_provider="missing-provider",
+            worktree_path=str(self.repo),
+        )
+        state = _state_with_attempt(attempt, task_id="failed-export-task")
+        state.config["implementer_provider"] = "missing-provider"
+        state.providers["implementer"] = "missing-provider"
+        save_state(state, self.state_root)
+        artifact_root = artifacts_dir("failed-export-task", 1, 0, self.state_root)
+        artifact_root.mkdir(parents=True)
+        paths = plan_artifact_paths(artifact_root)
+
+        with self.assertRaises(ImplementingError):
+            run_implementer_phase(state, self.state_root, paths, attempt=attempt)
+
+        trace = json.loads(paths["attempt_trace"].read_text(encoding="utf-8"))
+        self.assertEqual(trace["phases"]["implementation"]["status"], "failed")
+        self.assertIn("unknown provider", trace["phases"]["implementation"]["error"])
+
+        rows = build_export_rows(state, self.state_root)
+        implementer = next(row for row in rows if row["role"] == "implementer")
+        self.assertEqual(implementer["provider"], "missing-provider")
+        self.assertGreater(implementer["estimated_prompt_tokens"], 0)
 
     def test_report_json_includes_observability_fields(self) -> None:
         report = build_report(self.state, self.state_root)
