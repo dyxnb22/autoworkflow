@@ -31,9 +31,9 @@ The design goal is a reliable personal loop:
 
 ## Current status
 
-Status: **v0.4 task graph orchestration** (package 0.4.0).
+Status: **v0.9 parallel execution** (package 0.9.0).
 
-v1 core loop + v0.2.0 integration contract + v0.3 auto recovery + v0.4 task graphs (see [TASK_GRAPH.md](docs/TASK_GRAPH.md), [RECOVERY.md](docs/RECOVERY.md)).
+v1 core loop + v0.2.0 integration contract + v0.3 auto recovery + v0.4 task graphs + v0.5 runner control + v0.6 events/reports + v0.7 replanning + v0.8 multi-role routing + v0.9 parallel execution.
 
 - task initialization, state persistence, and artifact layout under `~/.cc-loop`
 - preflight checks including dirty-repo blocking
@@ -49,6 +49,7 @@ v1 core loop + v0.2.0 integration contract + v0.3 auto recovery + v0.4 task grap
 - `cc-loop auto` for fully unattended execution with macOS notifications
 - `cc-loop status` with phase, decision, artifacts, and next-action hints
 - **v0.2.0:** `--task-id` on operational commands, `list`, `status --json`, `doctor`, `auto --detach`, `CC_LOOP_STATE_ROOT`, init model/cursor flags
+- **v0.9.0:** parallel node execution, merge queue, state file locking, runner control (`stop`/`cancel`/`cleanup`), heartbeat, events, reports, dynamic replanning, per-node provider routing, execution budgets
 - **v0.4.0:** task graph planner output, sequential multi-node `auto`, `cc-loop graph`, node-scoped implementer/reviewer prompts, `status --json` task_graph block
 
 References:
@@ -82,7 +83,9 @@ cc-loop run --task-id my-task
 cc-loop resume --task-id my-task
 cc-loop auto --detach --task-id my-task
 cc-loop status --task-id my-task --json
-cc-loop graph --task-id my-task
+cc-loop report --task-id my-task --json
+cc-loop stop --task-id my-task
+cc-loop graph --task-id my-task --history
 ```
 
 Set `CC_LOOP_STATE_ROOT` to override the default `~/.cc-loop` state directory without passing `--state-root` on every command.

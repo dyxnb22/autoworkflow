@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Canonical agent reference for cc-loop. **Package 0.4.0.**
+Canonical agent reference for cc-loop. **Package 0.9.0.**
 
 ## Docs
 
@@ -11,6 +11,20 @@ Canonical agent reference for cc-loop. **Package 0.4.0.**
 - [docs/EXIT_CODES.md](docs/EXIT_CODES.md)
 - [CLAUDE.md](CLAUDE.md) — Claude Code entry
 - [.cursor/rules/cc-loop.mdc](.cursor/rules/cc-loop.mdc) — Cursor rules
+
+## v0.5–v0.9 modules
+
+| Module | Role |
+|--------|------|
+| `runner_heartbeat.py` | Detached runner heartbeat read/write/staleness |
+| `runner_control.py` | `stop`, `cancel`, `cleanup` |
+| `events.py` | Append-only `events.jsonl` / `graph_events.jsonl` |
+| `report.py` | `cc-loop report` human + JSON |
+| `graph_patch.py` | Dynamic replanning patch model + validation |
+| `budgets.py` | Wall-clock and failure budgets |
+| `state_lock.py` | File lock + atomic state writes |
+| `merge_queue.py` | Serial merge queue for parallel nodes |
+| `parallel_scheduler.py` | Concurrent runnable node dispatch |
 
 ## v0.4 task graph modules
 

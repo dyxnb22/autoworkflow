@@ -39,9 +39,15 @@ When a task uses a task graph, recovery applies to the **current graph node** (`
   "auto_recover_merge": true,
   "auto_recover_tests": true,
   "auto_recover_provider_errors": true,
-  "recovery_retry_backoff_seconds": 0
+  "recovery_retry_backoff_seconds": 0,
+  "max_wall_clock_seconds": 0,
+  "max_consecutive_failures": 0,
+  "max_artifact_log_bytes": 0,
+  "max_changed_files_per_attempt": 0
 }
 ```
+
+`0` means unlimited for budget fields.
 
 ## Artifacts
 

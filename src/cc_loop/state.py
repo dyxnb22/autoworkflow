@@ -20,6 +20,8 @@ class TaskStatus(StrEnum):
     FAILED = "failed"
     STOPPED = "stopped"
     INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
+    REPLANNING = "replanning"
 
 
 class AttemptPhase(StrEnum):
@@ -33,6 +35,7 @@ class AttemptPhase(StrEnum):
     REJECTED = "rejected"
     MERGED = "merged"
     FAILED = "failed"
+    REPLANNING = "replanning"
 
 
 DEFAULT_STATE_ROOT = Path.home() / ".cc-loop"
@@ -150,6 +153,8 @@ class TaskState:
     providers: dict[str, str] = field(default_factory=dict)
     schema_version: int = 1
     task_graph: Any | None = None
+    merge_queue: list[str] = field(default_factory=list)
+    running_attempts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -203,6 +208,8 @@ class TaskState:
             providers=data.get("providers", {}),
             schema_version=data.get("schema_version", 1),
             task_graph=task_graph,
+            merge_queue=list(data.get("merge_queue") or []),
+            running_attempts=dict(data.get("running_attempts") or {}),
         )
 
 
@@ -214,16 +221,32 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def save_state(state: TaskState, state_root: Path | None = None) -> Path:
-    path = state_path(state.task_id, state_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state.to_dict(), indent=2) + "\n", encoding="utf-8")
+def save_state(state: TaskState, state_root: Path | None = None, *, use_lock: bool = True) -> Path:
+    root = state_root or DEFAULT_STATE_ROOT
+    path = state_path(state.task_id, root)
+    payload = json.dumps(state.to_dict(), indent=2) + "\n"
+    if use_lock:
+        from cc_loop.state_lock import atomic_write_text, task_state_lock
+
+        with task_state_lock(root, state.task_id):
+            atomic_write_text(path, payload)
+    else:
+        from cc_loop.state_lock import atomic_write_text
+
+        atomic_write_text(path, payload)
     return path
 
 
-def load_state(task_id: str, state_root: Path | None = None) -> TaskState:
-    path = state_path(task_id, state_root)
-    data = json.loads(path.read_text(encoding="utf-8"))
+def load_state(task_id: str, state_root: Path | None = None, *, use_lock: bool = True) -> TaskState:
+    root = state_root or DEFAULT_STATE_ROOT
+    path = state_path(task_id, root)
+    if use_lock:
+        from cc_loop.state_lock import task_state_lock
+
+        with task_state_lock(root, task_id):
+            data = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        data = json.loads(path.read_text(encoding="utf-8"))
     return TaskState.from_dict(data)
 
 

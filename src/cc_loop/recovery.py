@@ -29,6 +29,7 @@ class AutoStep(StrEnum):
     TERMINAL = "terminal"
     DONE = "done"
     WAIT = "wait"
+    REPLAN = "replan"
 
 
 def _config_bool(config: LoopConfig, key: str, default: bool = True) -> bool:
@@ -96,6 +97,17 @@ def decide_auto_step(
     if running:
         return AutoStep.WAIT, None
 
+    if state.status == TaskStatus.CANCELLED:
+        return AutoStep.TERMINAL, FailureReport(
+            failure_type=FailureType.NONE,
+            disposition=RecoveryDisposition.TERMINAL,
+            message="task cancelled",
+            stop_reason="cancelled",
+        )
+
+    if state.status == TaskStatus.REPLANNING:
+        return AutoStep.REPLAN, None
+
     if state.status == TaskStatus.DONE:
         graph = ensure_task_graph(state)
         if graph is not None:
@@ -134,6 +146,8 @@ def decide_auto_step(
     report: FailureReport | None = None
     if attempt is not None:
         report = classify_reviewer_outcome(attempt)
+        if report is not None and attempt.decision == "replan":
+            return AutoStep.REPLAN, report
         if report is None and artifact_paths is not None:
             report = classify_attempt_outcome(state, attempt, artifact_paths)
         elif report is None and attempt.merge_error:
@@ -209,6 +223,7 @@ def derive_next_action_from_step(step: AutoStep, report: FailureReport | None = 
         AutoStep.REPAIR: "repair",
         AutoStep.MERGE_RETRY: "resume",
         AutoStep.TERMINAL: "terminal",
+        AutoStep.REPLAN: "resume",
     }
     if step == AutoStep.TERMINAL and report is not None:
         if report.failure_type in {

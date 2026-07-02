@@ -15,6 +15,10 @@ from cc_loop.config import merge_config
 from cc_loop.detach import spawn_detached_auto
 from cc_loop.git import resolve_base_commit_if_possible
 from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, failure_report_path
+from cc_loop.report import build_report, format_report_human
+from cc_loop.runner_control import cancel_task, cleanup_task, stop_runner
+from cc_loop.runner_heartbeat import refresh_heartbeat, remove_heartbeat
+from cc_loop.events import EventType, append_event, read_events
 from cc_loop.inspect import (
     build_status_snapshot,
     clear_runner_pid_if_matches,
@@ -40,11 +44,14 @@ from cc_loop.run import (
     RunError,
     classify_provider_exception,
     execute_repair_recovery,
+    execute_replan,
     execute_resume,
     execute_run,
     soft_reset_provider_failure,
     summarize_attempt,
 )
+from cc_loop.parallel_scheduler import discover_parallel_runnable, execute_parallel_batch
+from cc_loop.budgets import check_budgets
 from cc_loop.state import (
     DEFAULT_STATE_ROOT,
     AttemptPhase,
@@ -142,6 +149,23 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_parser = subparsers.add_parser("graph", help="Show task graph progress")
     _task_id_arg(graph_parser)
     graph_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
+    graph_parser.add_argument("--history", action="store_true", default=False, help="Show graph mutation history")
+
+    stop_parser = subparsers.add_parser("stop", help="Stop detached auto runner")
+    _task_id_arg(stop_parser)
+    stop_parser.add_argument("--json", action="store_true", default=False)
+
+    cancel_parser = subparsers.add_parser("cancel", help="Stop runner and mark task cancelled")
+    _task_id_arg(cancel_parser)
+    cancel_parser.add_argument("--json", action="store_true", default=False)
+
+    cleanup_parser = subparsers.add_parser("cleanup", help="Remove task-owned runtime artifacts")
+    _task_id_arg(cleanup_parser)
+    cleanup_parser.add_argument("--json", action="store_true", default=False)
+
+    report_parser = subparsers.add_parser("report", help="Show task report")
+    _task_id_arg(report_parser)
+    report_parser.add_argument("--json", action="store_true", default=False)
 
     return parser
 
@@ -227,6 +251,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         config=config,
     )
     path = save_state(state, args.state_root)
+    append_event(
+        args.state_root,
+        task_id=task_id,
+        event_type=EventType.TASK_INITIALIZED,
+        message=goal[:200],
+    )
     print(f"initialized task {task_id}")
     print(f"state: {path}")
     print(
@@ -312,11 +342,75 @@ def cmd_graph(args: argparse.Namespace) -> int:
             print("No task graph for this task.")
         return 0
 
+    if args.history:
+        events = read_events(args.state_root, task_id, stream="graph")
+        if args.json:
+            print(json.dumps({"graph_events": [e.to_dict() for e in events]}, indent=2))
+        else:
+            for event in events:
+                print(f"{event.timestamp} {event.type} {event.message}")
+        return 0
+
     if args.json:
-        print(json.dumps({"task_graph": build_graph_snapshot(graph)}, indent=2))
+        print(json.dumps({"task_graph": build_graph_snapshot(graph, state_providers=state.providers, config=dict(state.config))}, indent=2))
         return 0
 
     print(format_task_graph_human(state))
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        return 1
+    result = stop_runner(args.state_root, task_id)
+    append_event(
+        args.state_root,
+        task_id=task_id,
+        event_type=EventType.RUNNER_STOPPED,
+        message=result.message,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(result.message)
+    return 0 if result.ok else 1
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        return 1
+    result = cancel_task(args.state_root, task_id)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(result.message)
+    return 0 if result.ok else 1
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        return 1
+    result = cleanup_task(args.state_root, task_id)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(result.message)
+    return 0 if result.ok else 1
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        return 1
+    state = load_state(task_id, args.state_root)
+    report = build_report(state, args.state_root)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(format_report_human(report))
     return 0
 
 
@@ -448,6 +542,13 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
         initial.config["max_iterations"] = args.max_iterations
         save_state(initial, state_root)
 
+    append_event(
+        state_root,
+        task_id=task_id,
+        event_type=EventType.RUNNER_STARTED,
+        message="auto loop started",
+    )
+
     while True:
         state = load_state(task_id, state_root)
         if args.max_iterations is not None:
@@ -458,6 +559,27 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
             _artifact_paths_for_attempt(state, attempt, state_root) if attempt is not None else None
         )
 
+        phase = attempt.phase.value if attempt is not None else ""
+        refresh_heartbeat(
+            state_root,
+            task_id=task_id,
+            pid=os.getpid(),
+            status=state.status.value,
+            phase=phase,
+            iteration=state.iteration,
+            graph_node_id=attempt.graph_node_id if attempt else "",
+        )
+
+        if attempt is not None and artifact_paths is not None:
+            budget_report = check_budgets(
+                state,
+                attempt,
+                state.config,
+                artifact_dir=artifact_paths["plan_prompt"].parent,
+            )
+            if budget_report is not None:
+                return _handle_terminal_auto_stop(state, attempt, state_root, budget_report)
+
         step, report = decide_auto_step(
             state,
             attempt,
@@ -467,11 +589,20 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
         )
 
         if step == AutoStep.DONE:
+            append_event(
+                state_root,
+                task_id=task_id,
+                event_type=EventType.TASK_COMPLETED,
+                iteration=state.iteration,
+                message="task completed",
+            )
+            remove_heartbeat(state_root, task_id)
             print(f"task {state.task_id} completed successfully")
             _notify(f"task {task_id} done", state.goal)
             return 0
 
         if step == AutoStep.TERMINAL:
+            remove_heartbeat(state_root, task_id)
             return _handle_terminal_auto_stop(state, attempt, state_root, report)
 
         if step == AutoStep.WAIT:
@@ -484,7 +615,9 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
         maybe_backoff(state.config)
 
         try:
-            if step == AutoStep.REPAIR:
+            if step == AutoStep.REPLAN:
+                state, attempt, artifact_paths = execute_replan(state, state_root, report)
+            elif step == AutoStep.REPAIR:
                 if report is None or attempt is None:
                     print("error: repair step without failure report", file=sys.stderr)
                     return 1
@@ -496,6 +629,16 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
                     increment_recovery_counter(attempt, report)
                     save_state(state, state_root)
                 state, attempt, artifact_paths = execute_resume(state, state_root)
+            elif (
+                step == AutoStep.RUN
+                and int(state.config.get("max_parallel_nodes", 1) or 1) > 1
+                and discover_parallel_runnable(state)
+            ):
+                state = execute_parallel_batch(state, state_root)
+                attempt = state.history[-1] if state.history else None
+                artifact_paths = (
+                    _artifact_paths_for_attempt(state, attempt, state_root) if attempt else None
+                )
             else:
                 state, attempt, artifact_paths = execute_run(state, state_root)
         except ResumeError as exc:
@@ -672,6 +815,10 @@ def main(argv: list[str] | None = None) -> int:
         "list": cmd_list,
         "doctor": cmd_doctor,
         "graph": cmd_graph,
+        "stop": cmd_stop,
+        "cancel": cmd_cancel,
+        "cleanup": cmd_cleanup,
+        "report": cmd_report,
     }
     return handlers[args.command](args)
 
