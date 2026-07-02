@@ -18,6 +18,7 @@ from cc_loop.failure import (
     write_failure_report,
 )
 from cc_loop.state import AttemptPhase, AttemptRecord, TaskState, TaskStatus
+from cc_loop.task_graph import ensure_task_graph, graph_complete
 
 
 class AutoStep(StrEnum):
@@ -96,6 +97,18 @@ def decide_auto_step(
         return AutoStep.WAIT, None
 
     if state.status == TaskStatus.DONE:
+        graph = ensure_task_graph(state)
+        if graph is not None:
+            if not graph_complete(graph):
+                if state.iteration >= int(config.get("max_iterations", 10)):
+                    return AutoStep.TERMINAL, FailureReport(
+                        failure_type=FailureType.NONE,
+                        disposition=RecoveryDisposition.TERMINAL,
+                        message="reached max_iterations",
+                        stop_reason="max_iterations",
+                    )
+                return AutoStep.RUN, None
+            return AutoStep.DONE, None
         if attempt is not None and attempt.plan_json and not attempt.plan_json.get("is_final_step", True):
             if state.iteration >= int(config.get("max_iterations", 10)):
                 return AutoStep.TERMINAL, FailureReport(

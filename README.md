@@ -22,18 +22,18 @@ The initial default setup is:
 
 The design goal is a reliable personal loop:
 
-1. The configured planner analyzes the target repo and produces a bounded implementation prompt.
-2. `cc-loop` creates an isolated git worktree for the attempt.
-3. The configured implementer runs headlessly in that worktree and makes code changes.
+1. The configured planner analyzes the target repo and produces a task graph (or legacy single-step prompt).
+2. `cc-loop` selects runnable graph nodes and creates an isolated git worktree per node attempt.
+3. The configured implementer runs headlessly in that worktree and makes scoped code changes.
 4. `cc-loop` runs configured tests and gathers bounded diff context.
-5. The configured reviewer reviews the result.
-6. `cc-loop` either merges, retries, stops, or leaves the worktree for manual inspection.
+5. The configured reviewer reviews the current node against its acceptance criteria.
+6. `cc-loop` merges approved nodes, advances the graph, retries, stops, or leaves worktrees for manual inspection.
 
 ## Current status
 
-Status: **v0.3 recoverable failure handling** (package 0.3.0).
+Status: **v0.4 task graph orchestration** (package 0.4.0).
 
-v1 core loop + v0.2.0 integration contract + v0.3 auto recovery (see [RECOVERY.md](docs/RECOVERY.md)).
+v1 core loop + v0.2.0 integration contract + v0.3 auto recovery + v0.4 task graphs (see [TASK_GRAPH.md](docs/TASK_GRAPH.md), [RECOVERY.md](docs/RECOVERY.md)).
 
 - task initialization, state persistence, and artifact layout under `~/.cc-loop`
 - preflight checks including dirty-repo blocking
@@ -49,10 +49,12 @@ v1 core loop + v0.2.0 integration contract + v0.3 auto recovery (see [RECOVERY.m
 - `cc-loop auto` for fully unattended execution with macOS notifications
 - `cc-loop status` with phase, decision, artifacts, and next-action hints
 - **v0.2.0:** `--task-id` on operational commands, `list`, `status --json`, `doctor`, `auto --detach`, `CC_LOOP_STATE_ROOT`, init model/cursor flags
+- **v0.4.0:** task graph planner output, sequential multi-node `auto`, `cc-loop graph`, node-scoped implementer/reviewer prompts, `status --json` task_graph block
 
 References:
 
 - [Integration contract](docs/INTEGRATION.md)
+- [Task graph orchestration](docs/TASK_GRAPH.md)
 - [Exit codes](docs/EXIT_CODES.md)
 - [Project plan](docs/PROJECT_PLAN.md)
 - [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
@@ -79,6 +81,7 @@ cc-loop run --task-id my-task
 cc-loop resume --task-id my-task
 cc-loop auto --detach --task-id my-task
 cc-loop status --task-id my-task --json
+cc-loop graph --task-id my-task
 ```
 
 Set `CC_LOOP_STATE_ROOT` to override the default `~/.cc-loop` state directory without passing `--state-root` on every command.

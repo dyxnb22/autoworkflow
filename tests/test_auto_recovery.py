@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import unittest
 from unittest import mock
 
@@ -76,7 +77,7 @@ class AutoRecoveryTests(unittest.TestCase):
             repo=self.repo,
             state_root=self.state_root,
             task_id="env-auto",
-            config={"test_command": ["python", "-c", "import definitely_missing_pkg_xyz"]},
+            config={"test_command": [sys.executable, "-c", "import definitely_missing_pkg_xyz"]},
         )
         with self._patch_worktree_root():
             code = _run_auto_loop(self._args(), "env-auto")
@@ -87,6 +88,30 @@ class AutoRecoveryTests(unittest.TestCase):
         self.assertEqual(attempt.failure_type, "test_environment")
         artifact_root = artifacts_dir("env-auto", attempt.iteration, attempt.retry, self.state_root)
         self.assertTrue((artifact_root / "failure.report.json").is_file())
+
+    def test_graph_node_test_failure_associated_with_node(self) -> None:
+        make_task(
+            repo=self.repo,
+            state_root=self.state_root,
+            task_id="graph-recovery",
+            config={
+                "planner_provider": "fake-graph-planner",
+                "implementer_provider": "fake-graph-implementer",
+                "test_command": ["false"],
+                "max_recovery_attempts_per_iteration": 1,
+            },
+        )
+        with self._patch_worktree_root():
+            code = _run_auto_loop(self._args(), "graph-recovery")
+
+        self.assertEqual(code, 1)
+        state = load_state("graph-recovery", self.state_root)
+        attempt = state.history[-1]
+        self.assertEqual(attempt.graph_node_id, "T1")
+        self.assertEqual(attempt.failure_type, "recovery_budget_exhausted")
+        graph = state.task_graph
+        self.assertIsNotNone(graph)
+        self.assertEqual(graph.nodes[0].status.value, "running")
 
 
 if __name__ == "__main__":

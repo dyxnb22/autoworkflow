@@ -103,6 +103,7 @@ class AttemptRecord:
     retry: int
     created_at: str
     base_commit: str
+    graph_node_id: str = ""
     head_commit: str = ""
     branch: str = ""
     worktree_path: str = ""
@@ -148,6 +149,7 @@ class TaskState:
     history: list[AttemptRecord] = field(default_factory=list)
     providers: dict[str, str] = field(default_factory=dict)
     schema_version: int = 1
+    task_graph: Any | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -155,6 +157,15 @@ class TaskState:
         data["history"] = [
             {**asdict(attempt), "phase": attempt.phase.value} for attempt in self.history
         ]
+        if self.task_graph is not None:
+            from cc_loop.task_graph import TaskGraph
+
+            if isinstance(self.task_graph, TaskGraph):
+                data["task_graph"] = self.task_graph.to_dict()
+            elif isinstance(self.task_graph, dict):
+                data["task_graph"] = self.task_graph
+        else:
+            data["task_graph"] = None
         return data
 
     @classmethod
@@ -173,6 +184,12 @@ class TaskState:
             legacy_compat.pop("cursor_raw_path", None)
             legacy_compat.pop("cursor_exit_code", None)
             history.append(AttemptRecord(**{**legacy_compat, "phase": phase}))
+        task_graph = None
+        if "task_graph" in data and data["task_graph"] is not None:
+            from cc_loop.task_graph import TaskGraph
+
+            task_graph = TaskGraph.from_dict(data["task_graph"])
+
         return cls(
             task_id=data["task_id"],
             goal=data["goal"],
@@ -185,6 +202,7 @@ class TaskState:
             history=history,
             providers=data.get("providers", {}),
             schema_version=data.get("schema_version", 1),
+            task_graph=task_graph,
         )
 
 

@@ -2,7 +2,7 @@
 
 This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
 
-**Package version:** 0.3.0  
+**Package version:** 0.4.0  
 **Integration schema version:** 1
 
 ## Purpose
@@ -23,6 +23,7 @@ These commands and flags are the integration contract. Other commands exist for 
 | `cc-loop doctor --repo PATH` | Preflight without creating a task |
 | `cc-loop list [--repo PATH] [--json]` | Enumerate tasks |
 | `cc-loop status [--task-id ID] [--json]` | Poll task state |
+| `cc-loop graph [--task-id ID] [--json]` | Inspect task graph progress (v0.4) |
 | `cc-loop auto --detach [--task-id ID]` | Start unattended loop in background |
 | `cc-loop resume [--task-id ID]` | Continue after stop/interrupt (optional; polling may be enough) |
 
@@ -59,7 +60,7 @@ Stdout is a single JSON object. No extra prose.
 ```json
 {
   "schema_version": 1,
-  "cc_loop_version": "0.3.0",
+  "cc_loop_version": "0.4.0",
   "task_id": "abc123",
   "goal": "...",
   "target_repo": "/absolute/path",
@@ -77,7 +78,33 @@ Stdout is a single JSON object. No extra prose.
     "worktree_path": "/path or empty string",
     "merge_error": "",
     "artifact_dir": "/absolute/path/to/artifacts/iter-001",
-    "created_at": "ISO8601 or empty"
+    "created_at": "ISO8601 or empty",
+    "graph_node_id": "T1 or empty for legacy tasks"
+  },
+  "task_graph": {
+    "schema_version": 1,
+    "current_node_id": "T2",
+    "summary": {
+      "total": 5,
+      "pending": 3,
+      "running": 0,
+      "passed": 2,
+      "failed": 0,
+      "rejected": 0,
+      "blocked": 0,
+      "skipped": 0
+    },
+    "nodes": [
+      {
+        "id": "T1",
+        "title": "Set up project structure",
+        "kind": "implementation",
+        "owner": "implementer",
+        "dependencies": [],
+        "status": "passed",
+        "retry_count": 0
+      }
+    ]
   },
   "next_action": "resume",
   "running": false,
@@ -102,6 +129,9 @@ Stdout is a single JSON object. No extra prose.
 | `next_action` | string | Stable enum (see below) |
 | `running` | bool | `true` when `runner.pid` exists and process is alive |
 | `runner_pid` | int \| null | PID from detached `auto`, or null |
+| `task_graph` | object \| omitted | Present when task has a graph (v0.4 additive) |
+
+The `task_graph` block is omitted for legacy tasks without a graph. See [TASK_GRAPH.md](TASK_GRAPH.md).
 
 ### `next_action` values
 
@@ -134,6 +164,25 @@ Optional `failure` object (additive, schema v1):
 ```
 
 See [RECOVERY.md](RECOVERY.md) for failure types and budgets.
+
+## `graph --json` schema (v0.4, additive)
+
+Stdout is a JSON object:
+
+```json
+{
+  "task_graph": {
+    "schema_version": 1,
+    "current_node_id": "T2",
+    "summary": { "total": 2, "passed": 1, "pending": 1, "...": 0 },
+    "nodes": [ { "id": "T1", "title": "...", "status": "passed", "...": "..." } ]
+  }
+}
+```
+
+When no graph exists: `{"task_graph": null}`.
+
+Human `graph` output lists node id, status, and title with a progress line.
 
 ## `list --json` item schema
 

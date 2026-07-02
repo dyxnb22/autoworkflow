@@ -42,6 +42,18 @@ from cc_loop.state import (
     worktree_path,
 )
 from cc_loop.subprocess_util import run_with_timeout
+from cc_loop.task_graph import (
+    completed_dependency_labels,
+    ensure_task_graph,
+    get_node,
+    graph_complete,
+    graph_from_planner_json,
+    mark_node_failed,
+    mark_node_passed,
+    mark_node_rejected,
+    mark_node_running,
+    next_runnable_node,
+)
 
 
 class RunError(Exception):
@@ -274,15 +286,30 @@ def run_planning_phase(
 ) -> TaskState:
     """Create the worktree, run the planner provider, and persist plan_json."""
     attempt = _current_attempt(state)
-    if attempt.plan_json is not None and attempt.phase not in {AttemptPhase.PLANNING, AttemptPhase.PREFLIGHT}:
+    if attempt.plan_json is not None and attempt.phase not in {
+        AttemptPhase.PLANNING,
+        AttemptPhase.PREFLIGHT,
+        AttemptPhase.WORKTREE_CREATED,
+    }:
         return state
 
     config: LoopConfig = state.config
     provider_name = config["planner_provider"]
     worktree = Path(attempt.worktree_path)
     target_repo = Path(state.target_repo)
-    prompt = build_planner_prompt(state)
+    graph = ensure_task_graph(state)
+    max_retries = int(config.get("max_retries_per_step", 2))
 
+    if graph is not None:
+        return _run_graph_node_setup(
+            state,
+            state_root,
+            artifact_paths,
+            graph=graph,
+            max_retries=max_retries,
+        )
+
+    prompt = build_planner_prompt(state)
     _write_planning_artifacts_before(
         artifact_paths=artifact_paths,
         prompt=prompt,
@@ -351,9 +378,83 @@ def run_planning_phase(
         json.dumps(plan_json, indent=2) + "\n",
         encoding="utf-8",
     )
+    try:
+        graph = graph_from_planner_json(plan_json)
+    except (KeyError, TypeError, ValueError) as exc:
+        _mark_planning_failed(state, state_root)
+        raise PlanningError(f"task graph parse failed: {exc}") from exc
+
+    state.task_graph = graph
+    node = next_runnable_node(graph, max_retries=max_retries)
+    if node is None:
+        _mark_planning_failed(state, state_root)
+        raise PlanningError("planner produced a task graph with no runnable nodes")
+
+    mark_node_running(graph, node.id)
+    attempt.graph_node_id = node.id
     attempt.plan_json = plan_json
     clear_report_from_attempt(attempt)
     failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
+    attempt.phase = AttemptPhase.WORKTREE_CREATED
+    save_state(state, state_root)
+    return state
+
+
+def _run_graph_node_setup(
+    state: TaskState,
+    state_root: Path,
+    artifact_paths: dict[str, Path],
+    *,
+    graph,
+    max_retries: int,
+) -> TaskState:
+    """Prepare worktree and current graph node without re-running the planner."""
+    attempt = _current_attempt(state)
+    config: LoopConfig = state.config
+    provider_name = config["planner_provider"]
+    worktree = Path(attempt.worktree_path)
+    target_repo = Path(state.target_repo)
+
+    node = next_runnable_node(graph, max_retries=max_retries)
+    if node is None:
+        _mark_planning_failed(state, state_root)
+        raise PlanningError("no runnable graph nodes remain")
+
+    mark_node_running(graph, node.id)
+    attempt.graph_node_id = node.id
+    if attempt.plan_json is None:
+        attempt.plan_json = {
+            "mode": "task_graph",
+            "summary": graph.summary,
+            "nodes": [n.to_dict() for n in graph.nodes],
+            "is_final_step": False,
+        }
+
+    prompt = build_planner_prompt(state)
+    _write_planning_artifacts_before(
+        artifact_paths=artifact_paths,
+        prompt=prompt,
+        provider_name=provider_name,
+    )
+    artifact_paths["plan_parsed"].write_text(
+        json.dumps(attempt.plan_json, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    if not worktree.is_dir():
+        try:
+            add_worktree(
+                target_repo,
+                path=worktree,
+                branch=attempt.branch,
+                base_commit=attempt.base_commit,
+            )
+        except GitError as exc:
+            if attempt.graph_node_id:
+                mark_node_failed(graph, attempt.graph_node_id, str(exc))
+            _mark_planning_failed(state, state_root)
+            raise PlanningError(str(exc)) from exc
+
     attempt.phase = AttemptPhase.WORKTREE_CREATED
     save_state(state, state_root)
     return state
@@ -381,7 +482,7 @@ def run_implementer_phase(
     config: LoopConfig = state.config
     provider_name = config["implementer_provider"]
     worktree = Path(attempt.worktree_path)
-    prompt = build_implementer_prompt(state, attempt.plan_json)
+    prompt = build_implementer_prompt(state, attempt.plan_json, attempt=attempt)
 
     _write_implementer_artifacts_before(
         artifact_paths=artifact_paths,
@@ -608,6 +709,12 @@ def _run_finalize_phase(
         return state, attempt, artifact_paths
 
     if attempt.decision == "reject":
+        graph = ensure_task_graph(state)
+        if graph is not None and attempt.graph_node_id:
+            reason = ""
+            if attempt.review_json:
+                reason = str(attempt.review_json.get("reason", "")).strip()
+            mark_node_rejected(graph, attempt.graph_node_id, reason)
         if _retry_remaining(state, attempt):
             state.status = TaskStatus.STOPPED
             save_state(state, state_root)
@@ -671,7 +778,18 @@ def _run_finalize_phase(
     attempt.phase = AttemptPhase.MERGED
     clear_report_from_attempt(attempt)
     failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
-    state.status = TaskStatus.DONE
+
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        mark_node_passed(graph, attempt.graph_node_id, attempt.iteration)
+        if graph_complete(graph):
+            state.status = TaskStatus.DONE
+        else:
+            state.status = TaskStatus.STOPPED
+    elif attempt.plan_json and not attempt.plan_json.get("is_final_step", True):
+        state.status = TaskStatus.STOPPED
+    else:
+        state.status = TaskStatus.DONE
     save_state(state, state_root)
     return state, attempt, artifact_paths
 
@@ -679,11 +797,17 @@ def _run_finalize_phase(
 def build_planner_prompt(state: TaskState) -> str:
     """Construct the stdin prompt for the configured planner provider."""
     completed_steps = []
-    for prev in state.history:
-        if prev.phase == AttemptPhase.MERGED and prev.plan_json:
-            completed_steps.append(
-                f"  - iter {prev.iteration}: {prev.plan_json.get('expected_changes', '').strip()}"
-            )
+    graph = ensure_task_graph(state)
+    if graph is not None:
+        for node in graph.nodes:
+            if node.status.value == "passed":
+                completed_steps.append(f"  - {node.id}: {node.title}")
+    else:
+        for prev in state.history:
+            if prev.phase == AttemptPhase.MERGED and prev.plan_json:
+                completed_steps.append(
+                    f"  - iter {prev.iteration}: {prev.plan_json.get('expected_changes', '').strip()}"
+                )
 
     completed_section = ""
     if completed_steps:
@@ -699,7 +823,25 @@ def build_planner_prompt(state: TaskState) -> str:
 
     return (
         "You are the cc-loop planner. Analyze the task goal and repository checkout.\n"
-        "Respond with JSON only using this exact shape:\n"
+        "Respond with JSON only. Prefer task graph mode using this shape:\n"
+        "{\n"
+        '  "mode": "task_graph",\n'
+        '  "summary": "Short summary of the implementation strategy",\n'
+        '  "nodes": [\n'
+        "    {\n"
+        '      "id": "T1",\n'
+        '      "title": "Set up project structure",\n'
+        '      "description": "Create the package skeleton and baseline docs.",\n'
+        '      "kind": "implementation",\n'
+        '      "owner": "implementer",\n'
+        '      "dependencies": [],\n'
+        '      "acceptance_criteria": ["pyproject.toml exists"],\n'
+        '      "files_scope": ["pyproject.toml", "src/"]\n'
+        "    }\n"
+        "  ],\n"
+        '  "is_final_step": false\n'
+        "}\n\n"
+        "Legacy single-step JSON is also accepted:\n"
         "{\n"
         '  "prompt": "Detailed implementation prompt for the implementer provider",\n'
         '  "expected_changes": "Expected files or areas",\n'
@@ -717,8 +859,19 @@ def build_planner_prompt(state: TaskState) -> str:
     )
 
 
-def build_implementer_prompt(state: TaskState, plan_json: dict[str, Any]) -> str:
+def build_implementer_prompt(
+    state: TaskState,
+    plan_json: dict[str, Any],
+    *,
+    attempt: AttemptRecord | None = None,
+) -> str:
     """Construct the prompt for the configured implementer provider."""
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt is not None and attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is not None:
+            return _build_node_implementer_prompt(state, graph, node)
+
     sections = [
         "You are the cc-loop implementer. Apply the planned changes in this worktree checkout.",
         "",
@@ -741,6 +894,55 @@ def build_implementer_prompt(state: TaskState, plan_json: dict[str, Any]) -> str
     return "\n".join(sections).strip() + "\n"
 
 
+def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
+    dep_lines = completed_dependency_labels(graph, node.id)
+    criteria = node.acceptance_criteria or ["(none specified)"]
+    files_scope = node.files_scope or ["(not restricted)"]
+
+    sections = [
+        "You are the cc-loop implementer.",
+        "",
+        "You are implementing one node from a task graph.",
+        "",
+        "Project goal:",
+        state.goal,
+        "",
+        f"Graph summary: {graph.summary or '(none)'}",
+        "",
+        f"Current node:",
+        f"{node.id} — {node.title}",
+        "",
+        "Node description:",
+        node.description or "(none)",
+        "",
+        f"Node kind: {node.kind.value}",
+        f"Node owner: {node.owner}",
+        "",
+        "Acceptance criteria:",
+        *[f"- {item}" for item in criteria],
+        "",
+        "Files scope:",
+        *[f"- {item}" for item in files_scope],
+    ]
+
+    if dep_lines:
+        sections.extend(["", "Completed dependencies:", *[f"- {line}" for line in dep_lines]])
+
+    sections.extend(
+        [
+            "",
+            "Instructions:",
+            "- Focus on this node.",
+            "- Keep changes scoped.",
+            "- Do not undo completed dependency work.",
+            "- Add or update tests for this node.",
+            "- Do not weaken existing tests.",
+            "- Implement only this node's scope unless a small adjacent change is necessary.",
+        ]
+    )
+    return "\n".join(sections).strip() + "\n"
+
+
 def build_reviewer_prompt(
     *,
     state: TaskState,
@@ -750,6 +952,28 @@ def build_reviewer_prompt(
     test_status: str,
 ) -> str:
     """Construct the reviewer prompt with bounded diff context."""
+    graph = ensure_task_graph(state)
+    node_section = ""
+    if graph is not None and attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is not None:
+            criteria = node.acceptance_criteria or ["(none specified)"]
+            dep_lines = completed_dependency_labels(graph, attempt.graph_node_id)
+            node_section = (
+                "\n## Current graph node\n"
+                f"Node: {node.id} — {node.title}\n"
+                f"Kind: {node.kind.value}\n"
+                f"Description: {node.description or '(none)'}\n"
+                "Acceptance criteria:\n"
+                + "\n".join(f"- {item}" for item in criteria)
+                + "\n"
+            )
+            if dep_lines:
+                node_section += "Completed dependencies:\n" + "\n".join(f"- {line}" for line in dep_lines) + "\n"
+            node_section += (
+                "\nReview whether this graph node is complete — not whether the entire project is complete.\n"
+            )
+
     return (
         "You are the cc-loop reviewer. Review the implementation attempt.\n"
         "Respond with JSON only using this exact shape:\n"
@@ -765,10 +989,12 @@ def build_reviewer_prompt(
         f"Goal: {state.goal}\n"
         f"Iteration: {attempt.iteration}\n"
         f"Retry: {attempt.retry}\n"
+        f"Graph node: {attempt.graph_node_id or '(legacy single-step)'}\n"
         f"Implementer exit code: {attempt.implementer_exit_code}\n"
         f"Test status: {test_status}\n"
         f"Base commit: {attempt.base_commit}\n"
-        f"Head commit: {attempt.head_commit}\n\n"
+        f"Head commit: {attempt.head_commit}\n"
+        f"{node_section}\n"
         "## Diff stat\n"
         f"{diff_stat}\n\n"
         "## Selected patches\n"
@@ -827,6 +1053,7 @@ def _begin_retry_attempt(
         worktree=worktree,
         branch=branch,
         artifact_paths=artifact_paths,
+        graph_node_id=rejected_attempt.graph_node_id,
     )
     state.base_commit = preflight.base_commit
     state.status = TaskStatus.RUNNING
@@ -1034,6 +1261,9 @@ def _current_attempt(state: TaskState) -> AttemptRecord:
 
 def _mark_planning_failed(state: TaskState, state_root: Path) -> None:
     attempt = _current_attempt(state)
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        mark_node_failed(graph, attempt.graph_node_id, "planning failed")
     attempt.phase = AttemptPhase.FAILED
     state.status = TaskStatus.FAILED
     save_state(state, state_root)
@@ -1041,6 +1271,9 @@ def _mark_planning_failed(state: TaskState, state_root: Path) -> None:
 
 def _mark_implementer_failed(state: TaskState, state_root: Path) -> None:
     attempt = _current_attempt(state)
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        mark_node_failed(graph, attempt.graph_node_id, "implementer failed")
     attempt.phase = AttemptPhase.FAILED
     state.status = TaskStatus.FAILED
     save_state(state, state_root)
@@ -1048,6 +1281,9 @@ def _mark_implementer_failed(state: TaskState, state_root: Path) -> None:
 
 def _mark_review_failed(state: TaskState, state_root: Path) -> None:
     attempt = _current_attempt(state)
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        mark_node_failed(graph, attempt.graph_node_id, "review failed")
     attempt.phase = AttemptPhase.FAILED
     state.status = TaskStatus.FAILED
     save_state(state, state_root)
@@ -1062,6 +1298,7 @@ def _begin_attempt(
     worktree: Path,
     branch: str,
     artifact_paths: dict[str, Path],
+    graph_node_id: str = "",
 ) -> AttemptRecord:
     config: LoopConfig = state.config
     attempt = AttemptRecord(
@@ -1069,6 +1306,7 @@ def _begin_attempt(
         retry=retry,
         created_at=utc_now_iso(),
         base_commit=preflight.base_commit,
+        graph_node_id=graph_node_id,
         branch=branch,
         worktree_path=str(worktree),
         phase=AttemptPhase.PREFLIGHT,
@@ -1088,9 +1326,13 @@ def _begin_attempt(
     return attempt
 
 
-def summarize_attempt(attempt: AttemptRecord) -> str:
+def summarize_attempt(attempt: AttemptRecord, state: TaskState | None = None) -> str:
     """Human-readable next-action hint for CLI output."""
     if attempt.phase == AttemptPhase.MERGED:
+        graph = ensure_task_graph(state) if state is not None else None
+        if graph is not None and not graph_complete(graph):
+            node = attempt.graph_node_id or graph.current_node_id or "?"
+            return f"node {node} merged; run `cc-loop auto` or `cc-loop run` for next graph node"
         return "attempt merged; task complete"
     if attempt.phase == AttemptPhase.FAILED:
         return "attempt failed; inspect artifacts before resuming"

@@ -15,7 +15,13 @@ from cc_loop.config import merge_config
 from cc_loop.detach import spawn_detached_auto
 from cc_loop.git import resolve_base_commit_if_possible
 from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, failure_report_path
-from cc_loop.inspect import build_status_snapshot, clear_runner_pid_if_matches, runner_log_path
+from cc_loop.inspect import (
+    build_status_snapshot,
+    clear_runner_pid_if_matches,
+    format_task_graph_human,
+    runner_log_path,
+)
+from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph
 from cc_loop.recovery import (
     AutoStep,
     decide_auto_step,
@@ -133,6 +139,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
 
+    graph_parser = subparsers.add_parser("graph", help="Show task graph progress")
+    _task_id_arg(graph_parser)
+    graph_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
+
     return parser
 
 
@@ -249,6 +259,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"goal: {state.goal}")
     print(f"target_repo: {state.target_repo}")
     print(f"iteration: {state.iteration}")
+    graph = ensure_task_graph(state)
+    if graph is not None:
+        from cc_loop.task_graph import graph_status_summary
+
+        summary = graph_status_summary(graph)
+        current = graph.current_node_id or "(none)"
+        print(f"task_graph: {summary['passed']}/{summary['total']} passed (current node: {current})")
     if attempt is not None:
         artifact_root = artifacts_dir(state.task_id, attempt.iteration, attempt.retry, args.state_root)
         print(f"attempt: iter-{attempt.iteration:03d} retry-{attempt.retry:02d}")
@@ -261,7 +278,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"merge_error: {attempt.merge_error}")
         print(f"worktree_path: {attempt.worktree_path}")
         print(f"artifacts: {artifact_root}")
-        print(f"next: {summarize_attempt(attempt)}")
+        print(f"next: {summarize_attempt(attempt, state)}")
     else:
         print("next: cc-loop run")
     return 0
@@ -275,6 +292,31 @@ def cmd_list(args: argparse.Namespace) -> int:
         return 0
     for item in items:
         print(format_task_line(item))
+    return 0
+
+
+def cmd_graph(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        if args.task_id:
+            return 1
+        print("error: no task found; run `cc-loop init` first", file=sys.stderr)
+        return 1
+
+    state = load_state(task_id, args.state_root)
+    graph = ensure_task_graph(state)
+    if graph is None:
+        if args.json:
+            print(json.dumps({"task_graph": None}))
+        else:
+            print("No task graph for this task.")
+        return 0
+
+    if args.json:
+        print(json.dumps({"task_graph": build_graph_snapshot(graph)}, indent=2))
+        return 0
+
+    print(format_task_graph_human(state))
     return 0
 
 
@@ -331,7 +373,7 @@ def _print_run_summary(
         print(f"merge_output: {artifact_paths['merge_output']}")
     if attempt.merge_error:
         print(f"merge_error: {attempt.merge_error}")
-    print(f"next: {summarize_attempt(attempt)}")
+    print(f"next: {summarize_attempt(attempt, state)}")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -629,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "list": cmd_list,
         "doctor": cmd_doctor,
+        "graph": cmd_graph,
     }
     return handlers[args.command](args)
 

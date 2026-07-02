@@ -1,6 +1,10 @@
-# Recovery and failure handling (v0.3)
+# Recovery and failure handling (v0.3+)
 
 cc-loop classifies failures, applies retry budgets, and routes recoverable issues through implementer repair prompts. It does not perform destructive git operations or auto-resolve merge conflicts by picking sides.
+
+## Task graph context (v0.4)
+
+When a task uses a task graph, recovery applies to the **current graph node** (`AttemptRecord.graph_node_id`). Test failures, merge conflicts, and provider errors are classified and repaired in the context of that node. Downstream nodes are marked `blocked` when a dependency fails terminally. See [TASK_GRAPH.md](TASK_GRAPH.md).
 
 ## Principles
 

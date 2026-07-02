@@ -1,10 +1,10 @@
 # CLAUDE.md — cc-loop
 
-**Package:** 0.3.0 · Read [AGENTS.md](AGENTS.md) · Recovery: [docs/RECOVERY.md](docs/RECOVERY.md)
+**Package:** 0.4.0 · Read [AGENTS.md](AGENTS.md) · Task graph: [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · Recovery: [docs/RECOVERY.md](docs/RECOVERY.md)
 
 ## What you are working on
 
-Local CLI orchestrator: planner → worktree → implementer → tests → reviewer → merge/retry/stop. You are editing **cc-loop itself**, not running as its `claude-code` provider unless explicitly testing providers.
+Local CLI orchestrator: planner → worktree → implementer → tests → reviewer → merge/retry/stop. v0.4 adds **task graph** orchestration (sequential multi-node execution). You are editing **cc-loop itself**, not running as its `claude-code` provider unless explicitly testing providers.
 
 ## Quick start
 
@@ -15,13 +15,13 @@ python -m pytest tests/ -q
 
 Use `tests/helpers.TempEnv` and `tests/fake_providers` for integration tests. Real git repos in temp dirs — do not mock git.
 
-## Commands (v0.2.0)
+## Commands
 
 Global flags **before** subcommand: `cc-loop --state-root PATH <cmd> ...`
 
-`init` · `doctor` · `list` · `run` · `resume` · `auto` · `status`
+`init` · `doctor` · `list` · `run` · `resume` · `auto` · `status` · `graph`
 
-Operational commands accept `--task-id`. `status` / `list` / `doctor` support `--json`. `auto --detach` writes `runner.pid` + `runner.log`.
+Operational commands accept `--task-id`. `status` / `list` / `doctor` / `graph` support `--json`. `auto --detach` writes `runner.pid` + `runner.log`.
 
 `CC_LOOP_STATE_ROOT` mirrors `--state-root` when the flag is omitted.
 
@@ -32,11 +32,13 @@ External integration contract: [docs/INTEGRATION.md](docs/INTEGRATION.md)
 | Module | Role |
 |--------|------|
 | `cli.py` | argparse, `resolve_task_id`, command handlers |
-| `run.py` | phase orchestration; claude-code uses `print_only=True` for planner/reviewer |
-| `state.py` | `TaskState`, `schema_version`, persistence |
-| `inspect.py` | `status --json`, `next_action`, runner liveness |
+| `run.py` | phase orchestration; node prompts; claude-code uses `print_only=True` for planner/reviewer |
+| `state.py` | `TaskState`, `task_graph`, `schema_version`, persistence |
+| `task_graph.py` | graph models, dispatcher, planner JSON parsing |
+| `inspect.py` | `status --json`, `task_graph` snapshot, `next_action`, runner liveness |
 | `list_tasks.py` / `detach.py` | `list`, `auto --detach` |
 | `preflight.py` | `run_preflight`, `run_doctor_preflight` |
+| `recovery.py` / `repair_prompts.py` | auto recovery dispatch and repair prompts |
 | `providers/*.py` | codex, cursor, claude_code adapters |
 
 ## claude-code provider (when cc-loop calls Claude)
@@ -51,12 +53,15 @@ claude --dangerously-skip-permissions [-m MODEL] -p "<prompt>"
 
 Orchestrator must pass `print_only=True` for planner/reviewer in `run.py`.
 
+Planner should prefer task graph JSON (`mode: task_graph`); legacy single-step JSON still works.
+
 ## Invariants
 
 - `shell=False` always · no `pkill -f` · bounded review patches · dirty repo blocks run
 - No merge on failed/skipped tests unless `allow_merge_without_tests`
 - Never switch user's main branch checkout
 - Breaking integration surface → update `docs/INTEGRATION.md` and bump `schema_version` if needed
+- Old state files without `task_graph` must still load
 
 ## Tests to run
 
@@ -64,4 +69,4 @@ Orchestrator must pass `print_only=True` for planner/reviewer in `run.py`.
 python -m pytest tests/ -q
 ```
 
-Contract coverage: `tests/test_cli_contract.py`. Full loop: `tests/test_run_flow.py`.
+Contract coverage: `tests/test_cli_contract.py`. Full loop: `tests/test_run_flow.py`. Graph unit tests: `tests/test_task_graph.py`.
