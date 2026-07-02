@@ -1223,7 +1223,11 @@ def build_reviewer_prompt(
     patch_body: str,
     test_status: str,
 ) -> str:
-    """Construct the reviewer prompt with bounded diff context."""
+    """Construct the reviewer prompt with bounded diff context.
+
+    Keep stable reviewer rules before dynamic task/diff payload so provider
+    prefix caches can reuse the rubric and JSON contract across iterations.
+    """
     graph = ensure_task_graph(state)
     node_section = ""
     if graph is not None and attempt.graph_node_id:
@@ -1232,7 +1236,7 @@ def build_reviewer_prompt(
             criteria = node.acceptance_criteria or ["(none specified)"]
             dep_lines = completed_dependency_labels(graph, attempt.graph_node_id)
             node_section = (
-                "\n## Current graph node\n"
+                "\n### Current graph node\n"
                 f"Node: {node.id} — {node.title}\n"
                 f"Kind: {node.kind.value}\n"
                 f"Description: {node.description or '(none)'}\n"
@@ -1247,7 +1251,26 @@ def build_reviewer_prompt(
             )
 
     return (
-        "You are the cc-loop reviewer. Review the implementation attempt.\n"
+        "You are the cc-loop reviewer.\n"
+        "\n"
+        "## Stable Review Contract\n"
+        "Review one implementation attempt and decide whether it is safe to merge.\n"
+        "Judge only the current graph node when a graph node is provided.\n"
+        "Prefer precise, actionable feedback over broad commentary.\n"
+        "Do not request unrelated refactors, style churn, or work outside the scoped node.\n"
+        "Treat generated caches, build artifacts, and unrelated file churn as review findings.\n"
+        "\n"
+        "## Stable Review Rubric\n"
+        "- Verify the implementation satisfies the stated acceptance criteria.\n"
+        "- Verify tests passed, or explain why the attempt must not merge.\n"
+        "- Verify the changed files match the declared scope and do not undo completed dependency work.\n"
+        "- Verify the patch does not weaken existing behavior, tests, safety checks, or documented contracts.\n"
+        "- Approve only when the attempt is complete, scoped, tested, and merge-ready.\n"
+        "- Reject when the attempt is fixable by another implementation pass.\n"
+        "- Stop only when the task is blocked by missing requirements or external input.\n"
+        "- Replan when the task graph or decomposition must change before implementation can continue.\n"
+        "\n"
+        "## Stable JSON Output Contract\n"
         "Respond with JSON only using this exact shape:\n"
         "{\n"
         '  "decision": "approve",\n'
@@ -1257,7 +1280,15 @@ def build_reviewer_prompt(
         '  "stop_reason": ""\n'
         "}\n"
         'Allowed decisions: "approve", "reject", "stop", "replan".\n'
-        'For replan include replan_reason and replan_prompt or suggested_changes.\n\n'
+        'For "approve", keep issues empty and retry_prompt empty.\n'
+        'For "reject", include concise issues and a retry_prompt the implementer can execute.\n'
+        'For "stop", include stop_reason.\n'
+        'For "replan", include replan_reason and replan_prompt or suggested_changes.\n'
+        "\n"
+        "## Dynamic Review Payload\n"
+        "Everything below this line may change on every attempt. Use it as evidence, but keep the stable contract above authoritative.\n"
+        "\n"
+        "### Attempt metadata\n"
         f"Task ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
         f"Iteration: {attempt.iteration}\n"
@@ -1268,9 +1299,9 @@ def build_reviewer_prompt(
         f"Base commit: {attempt.base_commit}\n"
         f"Head commit: {attempt.head_commit}\n"
         f"{node_section}\n"
-        "## Diff stat\n"
+        "### Diff stat\n"
         f"{diff_stat}\n\n"
-        "## Selected patches\n"
+        "### Selected patches\n"
         f"{patch_body or '(no patch content selected)'}\n"
     )
 
