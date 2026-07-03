@@ -12,15 +12,19 @@ from typing import Any
 from cc_loop.providers.base import ProviderAdapter, ProviderRunResult
 from cc_loop.runner_heartbeat import refresh_heartbeat
 from cc_loop.state import AttemptRecord, TaskState
-from cc_loop.subprocess_util import RunResult
+from cc_loop.subprocess_util import RunResult, kill_active_subprocess_group
 
-PROVIDER_RUN_GRACE_SECONDS = 30
+PROVIDER_WORKER_JOIN_SECONDS = 5.0
 
 
 def _heartbeat_interval_seconds(stale_seconds: int) -> float:
     if stale_seconds <= 0:
         return 30.0
     return max(5.0, min(30.0, stale_seconds / 3))
+
+
+def _provider_watchdog_grace_seconds(state: TaskState) -> int:
+    return max(1, int(state.config.get("provider_watchdog_grace_seconds", 5) or 5))
 
 
 def run_provider_with_heartbeat(
@@ -38,9 +42,10 @@ def run_provider_with_heartbeat(
     stop_event = threading.Event()
     interval = _heartbeat_interval_seconds(stale_seconds)
     timeout_seconds = int(provider_kwargs.get("timeout_seconds") or 0)
+    watchdog_grace = _provider_watchdog_grace_seconds(state)
     outer_limit: float | None = None
     if timeout_seconds > 0:
-        outer_limit = float(timeout_seconds + PROVIDER_RUN_GRACE_SECONDS)
+        outer_limit = float(timeout_seconds + watchdog_grace)
 
     def _refresh_loop() -> None:
         while not stop_event.wait(timeout=interval):
@@ -68,7 +73,15 @@ def run_provider_with_heartbeat(
 
     worker = threading.Thread(target=_run_provider, name="cc-loop-provider", daemon=True)
     worker.start()
-    worker.join(timeout=outer_limit)
+    timed_out_externally = False
+    if outer_limit is not None:
+        worker.join(timeout=outer_limit)
+        if worker.is_alive():
+            timed_out_externally = True
+            kill_active_subprocess_group(grace_seconds=0)
+            worker.join(timeout=PROVIDER_WORKER_JOIN_SECONDS)
+    else:
+        worker.join()
 
     stop_event.set()
     thread.join(timeout=1.0)
@@ -82,7 +95,17 @@ def run_provider_with_heartbeat(
         graph_node_id=attempt.graph_node_id,
     )
 
-    if worker.is_alive():
+    if errors:
+        raise errors[0]
+
+    if "result" in holder:
+        result = holder["result"]
+        if timed_out_externally and (result.timed_out or result.hung or result.killed):
+            return result
+        if not timed_out_externally:
+            return result
+
+    if timed_out_externally or worker.is_alive():
         output_path = Path(provider_kwargs.get("output_path", "."))
         return ProviderRunResult(
             provider=provider.name,
@@ -91,13 +114,13 @@ def run_provider_with_heartbeat(
             timed_out=True,
             hung=True,
             killed=True,
-            summary="provider adapter did not return before watchdog deadline",
+            summary=(
+                "provider adapter did not return before watchdog deadline; "
+                "active subprocess group was force-killed"
+            ),
         )
 
-    if errors:
-        raise errors[0]
-
-    return holder["result"]
+    raise RuntimeError("provider worker finished without result or error")
 
 
 def write_command_argv_artifact(
@@ -128,7 +151,7 @@ def _result_entry(
     stderr_path: str = "",
 ) -> dict[str, Any]:
     if isinstance(result, RunResult):
-        return {
+        entry = {
             "exit_code": result.returncode,
             "timed_out": result.timed_out,
             "duration_seconds": round(result.duration_seconds, 3),
@@ -138,6 +161,9 @@ def _result_entry(
             "stdout_path": stdout_path,
             "stderr_path": stderr_path,
         }
+        if result.pid is not None:
+            entry["pid"] = result.pid
+        return entry
     return {
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,

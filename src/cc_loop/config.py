@@ -42,6 +42,7 @@ class LoopConfig(TypedDict, total=False):
     allow_parallel_execution: bool
     allow_node_policy_weakening: bool
     planner_granularity: str
+    provider_watchdog_grace_seconds: int
 
 
 DEFAULT_CONFIG: LoopConfig = {
@@ -79,6 +80,7 @@ DEFAULT_CONFIG: LoopConfig = {
     "allow_parallel_execution": False,
     "allow_node_policy_weakening": False,
     "planner_granularity": "auto",
+    "provider_watchdog_grace_seconds": 5,
 }
 
 

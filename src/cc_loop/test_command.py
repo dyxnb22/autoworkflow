@@ -53,7 +53,14 @@ DOCTOR_SUBCOMMAND_FLAGS = {
 
 GLOBAL_FLAGS = {"--state-root", "--version"}
 
-SUBCOMMANDS_WITH_TEST_COMMAND = frozenset({"init", "doctor"})
+SUBCOMMANDS_WITH_TEST_COMMAND: set[str] = {"init", "doctor"}
+_EXTRA_TEST_COMMAND_FLAGS: dict[str, set[str]] = {}
+
+
+def register_test_command_subcommand(name: str, flags: set[str]) -> None:
+    """Register another CLI subcommand that accepts ``--test-command``."""
+    SUBCOMMANDS_WITH_TEST_COMMAND.add(name)
+    _EXTRA_TEST_COMMAND_FLAGS[name] = set(flags)
 
 
 def _find_subcommand(argv: list[str]) -> str | None:
@@ -69,6 +76,8 @@ def _is_cc_loop_flag(token: str, subcommand: str | None) -> bool:
     if subcommand == "init" and token in INIT_SUBCOMMAND_FLAGS:
         return True
     if subcommand == "doctor" and token in DOCTOR_SUBCOMMAND_FLAGS:
+        return True
+    if subcommand is not None and token in _EXTRA_TEST_COMMAND_FLAGS.get(subcommand, set()):
         return True
     return False
 

@@ -17,9 +17,10 @@ from cc_loop.inspect import build_status_snapshot, runner_pid_path
 from cc_loop.planner_granularity import resolve_planner_granularity
 from cc_loop.run import build_planner_prompt
 from cc_loop.runner_heartbeat import RunnerHeartbeat, write_heartbeat
-from cc_loop.state import AttemptPhase, AttemptRecord, TaskStatus, load_state, save_state, utc_now_iso
+from cc_loop.provider_runtime import run_provider_with_heartbeat
 from cc_loop.subprocess_util import run_with_timeout
-from cc_loop.test_command import expand_test_command_in_argv, normalize_test_command
+from cc_loop.state import AttemptPhase, AttemptRecord, TaskStatus, load_state, save_state, utc_now_iso
+from cc_loop.test_command import expand_test_command_in_argv, normalize_test_command, register_test_command_subcommand
 from tests.helpers import TempEnv, make_task
 
 
@@ -287,6 +288,83 @@ class PlannerGranularityTests(unittest.TestCase):
             self.assertIn("SINGLE NODE", prompt)
         finally:
             env.close()
+
+
+class ProviderWatchdogTests(unittest.TestCase):
+    def test_provider_watchdog_kills_blocked_subprocess(self) -> None:
+        env = TempEnv()
+        try:
+            state_root = env.state_root()
+            repo = env.repo()
+            make_task(repo=repo, state_root=state_root, task_id="watchdog")
+            state = load_state("watchdog", state_root)
+            state.config["provider_watchdog_grace_seconds"] = 1
+            attempt = AttemptRecord(
+                iteration=1,
+                retry=0,
+                created_at=utc_now_iso(),
+                base_commit=state.base_commit,
+                phase=AttemptPhase.EXECUTING,
+            )
+
+            class HangProvider:
+                name = "hang-provider"
+
+                def run(self, **kwargs):
+                    from cc_loop.providers.base import ProviderRunResult
+                    from cc_loop.subprocess_util import run_with_timeout
+                    from pathlib import Path
+
+                    output_path = Path(kwargs["output_path"])
+                    result = run_with_timeout(
+                        [sys.executable, "-c", "import time; time.sleep(120)"],
+                        timeout_seconds=9999,
+                    )
+                    return ProviderRunResult(
+                        provider=self.name,
+                        exit_code=result.returncode,
+                        raw_artifact_path=output_path,
+                        timed_out=result.timed_out,
+                        hung=result.hung,
+                        killed=result.killed,
+                    )
+
+            started = time.monotonic()
+            result = run_provider_with_heartbeat(
+                HangProvider(),
+                state_root=state_root,
+                state=state,
+                attempt=attempt,
+                worktree_path=repo,
+                prompt="hang",
+                output_path=env.root / "out.txt",
+                config=state.config,
+                timeout_seconds=1,
+            )
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 10.0)
+            self.assertTrue(result.timed_out or result.hung)
+        finally:
+            env.close()
+
+
+class TestCommandRegistryTests(unittest.TestCase):
+    def test_register_test_command_subcommand(self) -> None:
+        register_test_command_subcommand("demo", {"--demo-flag"})
+        expanded = expand_test_command_in_argv(
+            [
+                "demo",
+                "--test-command",
+                "pytest",
+                "tests",
+                "-q",
+                "--demo-flag",
+                "1",
+            ]
+        )
+        idx = expanded.index("--test-command")
+        self.assertEqual(expanded[idx + 1], "pytest tests -q")
+        self.assertEqual(expanded[idx + 2], "--demo-flag")
 
 
 if __name__ == "__main__":

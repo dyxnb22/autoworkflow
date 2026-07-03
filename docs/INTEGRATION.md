@@ -268,6 +268,7 @@ In addition to goal/repo/providers/test-command:
 
 - `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. Additional `init`/`doctor` flags may follow the test command. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
 - `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`)
+- `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (config key `provider_watchdog_grace_seconds`, default `5`)
 - `--task-id ID` — explicit task id (recommended for integrations)
 - `--codex-model`, `--cursor-model`, `--claude-code-model`
 - `--cursor-force`, `--cursor-sandbox`

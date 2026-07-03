@@ -125,6 +125,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Planner decomposition: single node, auto (default), or multi-node graph",
     )
+    init_parser.add_argument(
+        "--provider-watchdog-grace-seconds",
+        type=int,
+        default=None,
+        help="Seconds after provider timeout before force-kill (default: 5)",
+    )
     init_parser.add_argument("--planner", default=None, help="Planner provider name (default: codex)")
     init_parser.add_argument("--reviewer", default=None, help="Reviewer provider name (default: codex)")
     init_parser.add_argument("--implementer", default=None, help="Implementer provider name (default: cursor)")

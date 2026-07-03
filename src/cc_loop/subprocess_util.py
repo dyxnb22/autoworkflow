@@ -11,6 +11,10 @@ from dataclasses import dataclass
 
 DEFAULT_KILL_GRACE_SECONDS = 0.5
 COMMUNICATE_DRAIN_SECONDS = 5.0
+REAP_WAIT_SECONDS = 2.0
+
+_active_pgid: int | None = None
+_pid_lock = threading.Lock()
 
 
 @dataclass
@@ -26,6 +30,26 @@ class RunResult:
     interrupted: bool = False
     hung: bool = False
     duration_seconds: float = 0.0
+    pid: int | None = None
+
+
+def get_active_subprocess_pgid() -> int | None:
+    with _pid_lock:
+        return _active_pgid
+
+
+def _set_active_pgid(pid: int | None) -> None:
+    global _active_pgid
+    with _pid_lock:
+        _active_pgid = pid
+
+
+def kill_active_subprocess_group(*, grace_seconds: float = 0.0) -> bool:
+    """Kill the in-flight subprocess group started by :func:`run_with_timeout`."""
+    pid = get_active_subprocess_pgid()
+    if pid is None:
+        return False
+    return _terminate_process_group(pid, grace_seconds=grace_seconds)
 
 
 def _process_group_alive(pid: int) -> bool:
@@ -64,6 +88,14 @@ def _terminate_process_group(pid: int, *, grace_seconds: float = DEFAULT_KILL_GR
     except ProcessLookupError:
         return False
     return True
+
+
+def _reap_process(proc: subprocess.Popen, *, timeout: float = REAP_WAIT_SECONDS) -> None:
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
 
 
 def _drain_communicate(proc: subprocess.Popen, *, timeout: float) -> tuple[str, str]:
@@ -109,6 +141,7 @@ def run_with_timeout(
         popen_kwargs["stdin"] = subprocess.PIPE
 
     proc = subprocess.Popen(**popen_kwargs)
+    _set_active_pgid(proc.pid)
     timed_out = False
     killed = False
     interrupted = False
@@ -124,8 +157,7 @@ def run_with_timeout(
         time.sleep(timeout_seconds + kill_grace_seconds + 1.0)
         if proc.poll() is None:
             force_kill.set()
-            sigkill_required = _terminate_process_group(proc.pid, grace_seconds=kill_grace_seconds)
-            if sigkill_required:
+            if _terminate_process_group(proc.pid, grace_seconds=kill_grace_seconds):
                 force_kill.set()
 
     watchdog_thread: threading.Thread | None = None
@@ -156,6 +188,8 @@ def run_with_timeout(
             killed = True
             if not timed_out and not interrupted:
                 timed_out = True
+        _set_active_pgid(None)
+        _reap_process(proc)
 
     duration_seconds = time.monotonic() - started
     returncode = proc.returncode
@@ -165,6 +199,7 @@ def run_with_timeout(
         hung = True
         killed = True
         _terminate_process_group(proc.pid, grace_seconds=0)
+        _reap_process(proc)
         returncode = -1
 
     return RunResult(
@@ -177,4 +212,5 @@ def run_with_timeout(
         interrupted=interrupted,
         hung=hung,
         duration_seconds=duration_seconds,
+        pid=proc.pid,
     )
