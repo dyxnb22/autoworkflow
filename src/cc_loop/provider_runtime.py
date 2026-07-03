@@ -142,7 +142,7 @@ def run_provider_with_heartbeat(
         phase=attempt.phase.value,
         iteration=state.iteration,
         graph_node_id=attempt.graph_node_id,
-        running_provider=attempt.running_provider,
+        running_provider="",
         provider_progress="",
     )
 

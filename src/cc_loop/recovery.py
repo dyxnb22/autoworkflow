@@ -15,6 +15,9 @@ from cc_loop.failure import (
     classify_attempt_outcome,
     classify_merge_error_message,
     classify_reviewer_outcome,
+    merge_blocked_by_test_gate,
+    reviewer_gate_passed,
+    test_gate_blocked_report,
     write_failure_report,
 )
 from cc_loop.state import AttemptPhase, AttemptRecord, TaskState, TaskStatus
@@ -155,6 +158,27 @@ def decide_auto_step(
     if attempt is None:
         return AutoStep.RUN, None
 
+    if (
+        state.status == TaskStatus.STOPPED
+        and attempt.phase == AttemptPhase.APPROVED
+        and reviewer_gate_passed(attempt)
+    ):
+        if attempt.merge_error:
+            merge_report = classify_merge_error_message(attempt.merge_error)
+            if merge_report.failure_type == FailureType.MERGE_WORKTREE_BUSY:
+                if recovery_budget_remaining(attempt, config, merge_report):
+                    return AutoStep.MERGE_RETRY, merge_report
+                return AutoStep.TERMINAL, budget_exhausted_report(merge_report.failure_type)
+            if merge_report.disposition == RecoveryDisposition.RECOVERABLE:
+                if not recovery_budget_remaining(attempt, config, merge_report):
+                    return AutoStep.TERMINAL, budget_exhausted_report(merge_report.failure_type)
+                if merge_report.failure_type == FailureType.MERGE_CONFLICT:
+                    return AutoStep.REPAIR, merge_report
+            return AutoStep.MERGE_RETRY, merge_report
+        if merge_blocked_by_test_gate(attempt, config, state=state):
+            return AutoStep.TERMINAL, test_gate_blocked_report(attempt)
+        return AutoStep.MERGE_RETRY, None
+
     report: FailureReport | None = None
     if attempt is not None:
         if artifact_paths is not None:
@@ -193,7 +217,6 @@ def decide_auto_step(
         if report.failure_type in {
             FailureType.MERGE_CONFLICT,
             FailureType.TEST_IMPLEMENTATION,
-            FailureType.TEST_GATE_BLOCKED,
             FailureType.PATCH_NOT_CAPTURED,
             FailureType.PROVIDER_EXIT_ERROR,
             FailureType.PROVIDER_TIMEOUT,
@@ -210,15 +233,6 @@ def decide_auto_step(
         and attempt.retry < int(config.get("max_retries_per_step", 2))
     ):
         return AutoStep.RESUME, report
-
-    if state.status == TaskStatus.STOPPED and attempt.phase == AttemptPhase.APPROVED:
-        if attempt.merge_error:
-            if report is not None and report.disposition == RecoveryDisposition.RECOVERABLE:
-                if report.failure_type == FailureType.MERGE_WORKTREE_BUSY:
-                    return AutoStep.MERGE_RETRY, report
-                return AutoStep.REPAIR, report
-            return AutoStep.MERGE_RETRY, report
-        return AutoStep.MERGE_RETRY, report
 
     if state.status == TaskStatus.INITIALIZED:
         return AutoStep.RUN, report
@@ -246,6 +260,7 @@ def derive_next_action_from_step(step: AutoStep, report: FailureReport | None = 
     if step == AutoStep.TERMINAL and report is not None:
         if report.failure_type in {
             FailureType.REVIEWER_STOP_TERMINAL,
+            FailureType.TEST_GATE_BLOCKED,
         }:
             return "inspect"
         if report.failure_type == FailureType.RECOVERY_BUDGET_EXHAUSTED:
