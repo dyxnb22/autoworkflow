@@ -51,6 +51,7 @@ from cc_loop.run import (
     execute_replan,
     execute_resume,
     execute_run,
+    reconcile_patch_not_captured,
     soft_reset_provider_failure,
     summarize_attempt,
 )
@@ -804,6 +805,17 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
             )
             if budget_report is not None:
                 return _handle_terminal_auto_stop(state, attempt, state_root, budget_report)
+
+            if attempt.failure_type == "patch_not_captured":
+                if reconcile_patch_not_captured(
+                    state,
+                    attempt,
+                    artifact_paths,
+                    state_root,
+                    reason="auto_dispatch_recheck",
+                ):
+                    save_state(state, state_root)
+                    attempt = state.history[-1] if state.history else attempt
 
         step, report = decide_auto_step(
             state,
