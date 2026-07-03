@@ -48,6 +48,49 @@ def _problem_nodes(graph) -> dict[str, list[dict[str, str]]]:
     return result
 
 
+def _diagnostics_section(
+    state: TaskState,
+    attempt,
+    failure_summary: dict[str, Any],
+    artifact_paths: dict[str, str],
+    *,
+    test_result: dict[str, Any] | None,
+    review_decision: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if attempt is None:
+        return None
+
+    failure_type = failure_summary.get("failure_type", "")
+    disposition = failure_summary.get("disposition", "")
+    is_problem = bool(
+        failure_type
+        or state.status.value in {"stopped", "failed", "cancelled"}
+        or (attempt.decision in {"reject", "stop"})
+        or (test_result and test_result.get("status") in {"failed", "timed_out"})
+    )
+    if not is_problem:
+        return None
+
+    suggested = list(failure_summary.get("suggested_actions") or [])[:3]
+    key_artifacts: dict[str, str] = {}
+    for key in ("test_output", "review_parsed", "diff_files", "attempt_trace"):
+        path = artifact_paths.get(key, "")
+        if path and Path(path).is_file():
+            key_artifacts[key] = path
+
+    return {
+        "latest_failed_phase": attempt.phase.value if hasattr(attempt.phase, "value") else str(attempt.phase),
+        "failure_type": failure_type,
+        "disposition": disposition,
+        "reviewer_decision": (review_decision or {}).get("decision", ""),
+        "reviewer_reason": (review_decision or {}).get("reason", ""),
+        "test_status": (test_result or {}).get("status", ""),
+        "test_exit_code": (test_result or {}).get("exit_code"),
+        "suggested_actions": suggested,
+        "key_artifact_paths": key_artifacts,
+    }
+
+
 def _safe_read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -160,12 +203,23 @@ def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
         elif attempt.merge_error:
             merge_result = {"result": "failed", "error": attempt.merge_error}
 
-    failure_summary = build_failure_snapshot(attempt, state_root, state.task_id)
+    failure_summary = build_failure_snapshot(attempt, state_root, state.task_id, state=state)
     if attempt is not None and failure_summary.get("failure_type"):
         art_root = artifacts_dir(state.task_id, attempt.iteration, attempt.retry, state_root)
         report_obj = read_failure_report(art_root)
         if report_obj is not None:
             failure_summary["message"] = report_obj.message
+            if report_obj.suggested_actions:
+                failure_summary["suggested_actions"] = list(report_obj.suggested_actions)
+
+    diagnostics = _diagnostics_section(
+        state,
+        attempt,
+        failure_summary,
+        artifact_paths,
+        test_result=test_result,
+        review_decision=review_decision,
+    )
 
     return {
         "task_summary": summary,
@@ -175,6 +229,7 @@ def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
         "review_decision": review_decision,
         "merge_result": merge_result,
         "failure_summary": failure_summary,
+        "diagnostics": diagnostics,
         "artifact_paths": artifact_paths,
         "observability": _observability_section(state, attempt, state_root, artifact_paths),
         "events_path": str(events_path(state_root, state.task_id)),
@@ -227,7 +282,31 @@ def format_report_human(report: dict[str, Any]) -> str:
         lines.append("")
 
     failure = report.get("failure_summary") or {}
-    if failure.get("failure_type"):
+    diagnostics = report.get("diagnostics") or {}
+    if diagnostics:
+        lines.append("Diagnosis:")
+        lines.append(f"  Phase: {diagnostics.get('latest_failed_phase', '')}")
+        if diagnostics.get("failure_type"):
+            lines.append(
+                f"  Failure: {diagnostics['failure_type']} ({diagnostics.get('disposition', '')})"
+            )
+        if diagnostics.get("reviewer_decision"):
+            lines.append(f"  Reviewer: {diagnostics['reviewer_decision']}")
+            if diagnostics.get("reviewer_reason"):
+                lines.append(f"  Reviewer reason: {diagnostics['reviewer_reason']}")
+        if diagnostics.get("test_status"):
+            lines.append(
+                f"  Tests: {diagnostics['test_status']} (exit {diagnostics.get('test_exit_code')})"
+            )
+        for action in diagnostics.get("suggested_actions") or []:
+            lines.append(f"  → {action}")
+        key_paths = diagnostics.get("key_artifact_paths") or {}
+        if key_paths:
+            lines.append("  Artifacts:")
+            for name, path in key_paths.items():
+                lines.append(f"    {name}: {path}")
+        lines.append("")
+    elif failure.get("failure_type"):
         lines.append(f"Failure: {failure['failure_type']} ({failure.get('disposition', '')})")
         if failure.get("stop_reason"):
             lines.append(f"  Reason: {failure['stop_reason']}")

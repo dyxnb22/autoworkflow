@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from cc_loop.config import LoopConfig
+from cc_loop.git import commit_worktree_changes
 from cc_loop.providers.base import ProviderAdapter, ProviderRunResult, register_provider
 
 
@@ -96,6 +97,7 @@ class FakeGraphImplementer(ProviderAdapter):
             (worktree_path / "world.txt").write_text("world\n", encoding="utf-8")
         else:
             (worktree_path / "hello.txt").write_text("hello\n", encoding="utf-8")
+        commit_worktree_changes(worktree_path, "fake graph implementer")
         output_path.write_text('{"result":"ok"}\n', encoding="utf-8")
         return ProviderRunResult(provider=self.name, exit_code=0, raw_artifact_path=output_path)
 
@@ -167,6 +169,7 @@ class FakeImplementer(ProviderAdapter):
         print_only: bool = False,
     ) -> ProviderRunResult:
         (worktree_path / "hello.txt").write_text("hello\n", encoding="utf-8")
+        commit_worktree_changes(worktree_path, "fake implementer")
         output_path.write_text('{"result":"ok"}\n', encoding="utf-8")
         return ProviderRunResult(provider=self.name, exit_code=0, raw_artifact_path=output_path)
 

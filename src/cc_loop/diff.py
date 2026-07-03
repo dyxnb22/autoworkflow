@@ -168,6 +168,19 @@ def _file_patch(worktree: Path, base_commit: str, file_path: str) -> str:
     return _git_output(worktree, "diff", "HEAD", "--", file_path).strip()
 
 
+def has_mergeable_patches(worktree: Path, base_commit: str) -> bool:
+    """Return True when at least one changed file has non-empty patch text."""
+    changed = sorted(set(_changed_files(worktree, base_commit)), key=_priority)
+    for file_path in changed:
+        if Path(file_path).name in _LOCKFILE_NAMES:
+            continue
+        if _is_generated(file_path):
+            continue
+        if _file_patch(worktree, base_commit, file_path):
+            return True
+    return False
+
+
 def collect_bounded_review_patches(
     worktree: Path,
     base_commit: str,

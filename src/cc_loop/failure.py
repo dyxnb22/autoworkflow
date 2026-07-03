@@ -34,6 +34,7 @@ class FailureType(StrEnum):
     REVIEWER_STOP_TERMINAL = "reviewer_stop_terminal"
     REVIEWER_REJECT = "reviewer_reject"
     TEST_GATE_BLOCKED = "test_gate_blocked"
+    PATCH_NOT_CAPTURED = "patch_not_captured"
     PREFLIGHT_DIRTY_REPO = "preflight_dirty_repo"
     RECOVERY_BUDGET_EXHAUSTED = "recovery_budget_exhausted"
     NONE = "none"
@@ -52,6 +53,7 @@ _TERMINAL_STOP_KEYWORDS = (
 
 _CONFLICT_FILE_RE = re.compile(r"CONFLICT.*?:\s*(?:Merge conflict in\s+)?(.+)$", re.MULTILINE)
 _PYTEST_FAILED_RE = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
+_PYTEST_COLLECTION_RE = re.compile(r"ERROR collecting\s+(\S+)", re.MULTILINE | re.IGNORECASE)
 
 
 @dataclass
@@ -236,6 +238,99 @@ def parse_failed_tests(test_output: str) -> list[str]:
     return _PYTEST_FAILED_RE.findall(test_output)
 
 
+def parse_collection_errors(test_output: str) -> list[str]:
+    return _PYTEST_COLLECTION_RE.findall(test_output)
+
+
+def _output_tail(text: str, limit: int = 2000) -> str:
+    return text[-limit:] if text else ""
+
+
+def _detect_pytest_collection_or_import_error(test_output: str) -> tuple[bool, str]:
+    """Return whether output looks like pytest collection/import failure and an error kind."""
+    lower = test_output.lower()
+    if "error collecting" in lower:
+        return True, "pytest_collection_error"
+    if "errors during collection" in lower:
+        return True, "pytest_collection_error"
+    if "importerror while importing test module" in lower:
+        return True, "pytest_import_error"
+    if "importerror: cannot import name" in lower:
+        return True, "import_error"
+    if re.search(r"^E\s+ImportError:", test_output, re.MULTILINE):
+        return True, "import_error"
+    if re.search(r"^E\s+ModuleNotFoundError:", test_output, re.MULTILINE):
+        return True, "module_not_found"
+    if "modulenotfounderror: no module named" in lower and (
+        "error collecting" in lower or "pytest" in lower or "collecting" in lower
+    ):
+        return True, "module_not_found"
+    return False, ""
+
+
+def _import_error_summary(test_output: str) -> str:
+    preferred_tokens = (
+        "ImportError: cannot import name",
+        "ModuleNotFoundError: No module named",
+        "ImportError while importing test module",
+        "ERROR collecting",
+        "errors during collection",
+    )
+    for token in preferred_tokens:
+        for line in test_output.splitlines():
+            stripped = line.strip()
+            if token.lower() in stripped.lower():
+                return stripped
+    return ""
+
+
+def _porcelain_untracked_paths(porcelain: list[str]) -> list[str]:
+    paths: list[str] = []
+    for line in porcelain:
+        if len(line) < 4:
+            continue
+        if line.startswith("??"):
+            path = line[3:].strip()
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            paths.append(path)
+    return paths
+
+
+def classify_uncaptured_patch(
+    *,
+    porcelain: list[str],
+    base_commit: str,
+    head_commit: str,
+    has_committed_changes: bool,
+    has_mergeable_patch: bool,
+) -> FailureReport | None:
+    """Detect worktree changes that were not captured as mergeable commits or patches."""
+    if has_committed_changes or has_mergeable_patch:
+        return None
+    if not porcelain:
+        return None
+
+    untracked = _porcelain_untracked_paths(porcelain)
+    return FailureReport(
+        failure_type=FailureType.PATCH_NOT_CAPTURED,
+        disposition=RecoveryDisposition.RECOVERABLE,
+        message="implementer produced worktree changes without a mergeable commit or patch",
+        details={
+            "porcelain": list(porcelain),
+            "untracked_files": untracked,
+            "head_commit": head_commit,
+            "base_commit": base_commit,
+            "stderr_tail": "\n".join(porcelain),
+        },
+        suggested_actions=[
+            "Stage and commit generated files so base..HEAD contains the implementation diff",
+            "Ensure the implementer edits tracked files or adds new files with git add before finishing",
+            "Re-run implementer repair and include all generated artifacts in the commit",
+        ],
+    )
+
+
 def classify_test_failure(test_output: str, test_status: str) -> FailureReport:
     if test_status == "timed_out":
         return FailureReport(
@@ -247,13 +342,48 @@ def classify_test_failure(test_output: str, test_status: str) -> FailureReport:
         )
 
     failed_tests = parse_failed_tests(test_output)
+    collection_errors = parse_collection_errors(test_output)
     lower = test_output.lower()
-    if "modulenotfounderror" in lower or "importerror" in lower or "command not found" in lower:
+
+    is_collection_or_import, error_kind = _detect_pytest_collection_or_import_error(test_output)
+    if is_collection_or_import:
+        summary = _import_error_summary(test_output)
+        return FailureReport(
+            failure_type=FailureType.TEST_IMPLEMENTATION,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message="tests failed during collection or import; likely implementation issue",
+            details={
+                "failed_tests": failed_tests,
+                "collection_errors": collection_errors,
+                "error_kind": error_kind,
+                "import_error_summary": summary,
+                "stderr_tail": _output_tail(test_output),
+            },
+            suggested_actions=[
+                "Fix import paths, symbol names, or module layout so pytest can collect tests",
+                "Ensure new modules are created in tracked files and committed before testing",
+                "Align implementation exports with test imports",
+            ],
+        )
+
+    if "command not found" in lower:
         return FailureReport(
             failure_type=FailureType.TEST_ENVIRONMENT,
             disposition=RecoveryDisposition.TERMINAL,
             message="tests failed due to environment or dependency issue",
-            details={"failed_tests": failed_tests, "stderr_tail": test_output[-2000:]},
+            details={"failed_tests": failed_tests, "stderr_tail": _output_tail(test_output)},
+            suggested_actions=[
+                "Install missing dependencies in the worktree environment",
+                "Fix test_command configuration",
+            ],
+        )
+
+    if "modulenotfounderror" in lower or "importerror" in lower:
+        return FailureReport(
+            failure_type=FailureType.TEST_ENVIRONMENT,
+            disposition=RecoveryDisposition.TERMINAL,
+            message="tests failed due to environment or dependency issue",
+            details={"failed_tests": failed_tests, "stderr_tail": _output_tail(test_output)},
             suggested_actions=[
                 "Install missing dependencies in the worktree environment",
                 "Fix test_command configuration",
@@ -273,7 +403,7 @@ def classify_test_failure(test_output: str, test_status: str) -> FailureReport:
         failure_type=FailureType.TEST_IMPLEMENTATION,
         disposition=RecoveryDisposition.RECOVERABLE,
         message="tests failed; likely implementation issue",
-        details={"failed_tests": failed_tests, "stderr_tail": test_output[-2000:]},
+        details={"failed_tests": failed_tests, "stderr_tail": _output_tail(test_output)},
         suggested_actions=[
             "Fix implementation to satisfy failing tests",
             "Do not delete or weaken tests unless they are objectively incorrect",
@@ -360,6 +490,24 @@ def classify_reviewer_outcome(attempt: AttemptRecord) -> FailureReport | None:
 def classify_attempt_outcome(state: TaskState, attempt: AttemptRecord, artifact_paths: dict[str, Path]) -> FailureReport | None:
     if attempt.merge_error:
         return classify_merge_error_message(attempt.merge_error)
+
+    if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
+        art_root = artifact_paths.get("plan_prompt")
+        if art_root is not None:
+            report = read_failure_report(art_root.parent)
+            if report is not None:
+                return report
+        details = dict(attempt.failure_details)
+        return FailureReport(
+            failure_type=FailureType.PATCH_NOT_CAPTURED,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message=attempt.stop_reason or "implementer changes were not captured in a mergeable patch",
+            details=details,
+            suggested_actions=[
+                "Stage and commit generated files so base..HEAD contains the implementation diff",
+                "Ensure the implementer edits tracked files or adds new files with git add before finishing",
+            ],
+        )
 
     reviewer_report = classify_reviewer_outcome(attempt)
     if reviewer_report is not None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from cc_loop.config import merge_config
-from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition
+from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, write_failure_report
 from cc_loop.recovery import AutoStep, decide_auto_step, recovery_budget_remaining
 from cc_loop.state import AttemptPhase, AttemptRecord, TaskState, TaskStatus
 
@@ -84,6 +84,33 @@ class RecoveryDispatchTests(unittest.TestCase):
         state = _state(attempt, status=TaskStatus.DONE)
         step, _ = decide_auto_step(state, attempt, state.config)
         self.assertEqual(step, AutoStep.RUN)
+
+    def test_patch_not_captured_requests_repair(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        attempt = _attempt(
+            phase=AttemptPhase.TESTING,
+            failure_type=FailureType.PATCH_NOT_CAPTURED.value,
+            recovery_disposition=RecoveryDisposition.RECOVERABLE.value,
+            stop_reason="uncaptured",
+        )
+        state = _state(attempt, status=TaskStatus.STOPPED)
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_root = Path(tmp)
+            (artifact_root / "plan.prompt.txt").write_text("plan", encoding="utf-8")
+            report = FailureReport(
+                failure_type=FailureType.PATCH_NOT_CAPTURED,
+                disposition=RecoveryDisposition.RECOVERABLE,
+                message="uncaptured patch",
+                details={"untracked_files": ["generated.py"]},
+            )
+            write_failure_report(artifact_root, report)
+            artifact_paths = {"plan_prompt": artifact_root / "plan.prompt.txt"}
+            step, resolved = decide_auto_step(state, attempt, state.config, artifact_paths=artifact_paths)
+        self.assertEqual(step, AutoStep.REPAIR)
+        assert resolved is not None
+        self.assertEqual(resolved.failure_type, FailureType.PATCH_NOT_CAPTURED)
 
 
 if __name__ == "__main__":

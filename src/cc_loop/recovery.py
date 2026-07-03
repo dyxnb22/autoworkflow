@@ -49,11 +49,16 @@ def recovery_budget_remaining(attempt: AttemptRecord, config: LoopConfig, report
     if report.failure_type in {
         FailureType.TEST_IMPLEMENTATION,
         FailureType.TEST_GATE_BLOCKED,
+        FailureType.PATCH_NOT_CAPTURED,
         FailureType.PROVIDER_EXIT_ERROR,
         FailureType.PROVIDER_TIMEOUT,
         FailureType.REVIEWER_STOP_FIXABLE,
     }:
-        if report.failure_type in {FailureType.TEST_IMPLEMENTATION, FailureType.TEST_GATE_BLOCKED}:
+        if report.failure_type in {
+            FailureType.TEST_IMPLEMENTATION,
+            FailureType.TEST_GATE_BLOCKED,
+            FailureType.PATCH_NOT_CAPTURED,
+        }:
             if not _config_bool(config, "auto_recover_tests", True):
                 return False
         if report.failure_type in {FailureType.PROVIDER_EXIT_ERROR, FailureType.PROVIDER_TIMEOUT}:
@@ -145,7 +150,12 @@ def decide_auto_step(
 
     report: FailureReport | None = None
     if attempt is not None:
-        report = classify_reviewer_outcome(attempt)
+        if artifact_paths is not None:
+            outcome = classify_attempt_outcome(state, attempt, artifact_paths)
+            if outcome is not None and outcome.failure_type == FailureType.PATCH_NOT_CAPTURED:
+                report = outcome
+        if report is None:
+            report = classify_reviewer_outcome(attempt)
         if report is not None and attempt.decision == "replan":
             return AutoStep.REPLAN, report
         if report is None and artifact_paths is not None:
@@ -177,6 +187,7 @@ def decide_auto_step(
             FailureType.MERGE_CONFLICT,
             FailureType.TEST_IMPLEMENTATION,
             FailureType.TEST_GATE_BLOCKED,
+            FailureType.PATCH_NOT_CAPTURED,
             FailureType.PROVIDER_EXIT_ERROR,
             FailureType.PROVIDER_TIMEOUT,
             FailureType.REVIEWER_STOP_FIXABLE,

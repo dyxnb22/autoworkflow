@@ -197,6 +197,7 @@ def capture_worktree_diff_metadata(
 
     return {
         "has_changes": has_changes,
+        "has_committed_changes": has_committed_changes,
         "head_commit": head_commit,
         "porcelain": porcelain,
     }

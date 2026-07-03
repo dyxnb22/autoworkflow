@@ -8,12 +8,12 @@ from typing import Any
 
 from cc_loop.state import utc_now_iso
 from cc_loop.task_graph import (
-    GraphNodeKind,
     GraphNodeStatus,
     TaskGraph,
     _node_index,
     get_node,
     graph_node_from_planner_item,
+    parse_graph_node_kind,
 )
 
 
@@ -178,7 +178,7 @@ def apply_patch(graph: TaskGraph, patch: GraphPatch) -> TaskGraph:
                 if key in op.data:
                     setattr(node, key, str(op.data[key]))
             if "kind" in op.data:
-                node.kind = GraphNodeKind(str(op.data["kind"]))
+                node.kind = parse_graph_node_kind(str(op.data["kind"]))
             if "acceptance_criteria" in op.data and node.status != GraphNodeStatus.PASSED:
                 node.acceptance_criteria = list(op.data["acceptance_criteria"])
             if "files_scope" in op.data:

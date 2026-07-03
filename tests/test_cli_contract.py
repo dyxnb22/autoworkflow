@@ -456,5 +456,22 @@ class EnvStateRootTests(unittest.TestCase):
         self.assertEqual([item["task_id"] for item in items], ["env-task"])
 
 
+class ReportPositionalTaskIdTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.env = TempEnv()
+        self.state_root = self.env.state_root()
+        self.repo = self.env.repo()
+        make_task(repo=self.repo, state_root=self.state_root, task_id="report-pos-task")
+
+    def tearDown(self) -> None:
+        self.env.close()
+
+    def test_report_positional_task_id_json(self) -> None:
+        result = _cli("report", "report-pos-task", "--json", state_root=self.state_root)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["task_summary"]["task_id"], "report-pos-task")
+
+
 if __name__ == "__main__":
     unittest.main()
