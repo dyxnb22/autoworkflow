@@ -17,7 +17,7 @@ from cc_loop.failure import (
 )
 from cc_loop.inspect import build_failure_snapshot, build_status_snapshot, derive_current_message
 from cc_loop.recovery import AutoStep, decide_auto_step
-from cc_loop.run import _run_finalize_phase
+from cc_loop.run import _run_finalize_phase, summarize_attempt
 from cc_loop.runner_heartbeat import read_heartbeat, write_heartbeat, RunnerHeartbeat
 from cc_loop.state import (
     AttemptPhase,
@@ -235,6 +235,18 @@ class HeartbeatStatusTransitionTests(unittest.TestCase):
         )
         self.assertNotIn("Reviewer running", message)
         self.assertIn("test gate", message.lower())
+
+    def test_summarize_attempt_mentions_test_gate_block(self) -> None:
+        attempt = _attempt(
+            phase=AttemptPhase.APPROVED,
+            decision="approve",
+            review_json={"decision": "approve"},
+            test_status="failed",
+        )
+        state = _state(attempt)
+        summary = summarize_attempt(attempt, state)
+        self.assertIn("test gate", summary.lower())
+        self.assertNotIn("retry merge", summary)
 
     def test_heartbeat_cleared_after_finalize_test_gate_blocked(self) -> None:
         env = TempEnv()

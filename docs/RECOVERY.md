@@ -94,8 +94,8 @@ If tests failed (or were skipped without `allow_merge_without_tests`) but the re
 
 This is intentional for graph nodes where later nodes own test coverage (for example a skeleton node before a dedicated test node). The loop does **not** spin on test/review; choose one of:
 
-- Fix tests and `cc-loop resume` (re-runs from the saved phase; approved attempts resume straight to finalize/merge retry).
-- Set `allow_merge_without_tests=true` when reviewer approval is sufficient.
-- Inspect artifacts (`test.output.txt`, `review.parsed.json`) and decide manually.
+- Inspect artifacts (`test.output.txt`, `review.parsed.json`) and decide whether the failed/skipped tests should block the node.
+- Fix tests through a repair/testing path before resuming; approved attempts resume straight to finalize/merge retry and do not automatically re-run tests.
+- Set `allow_merge_without_tests=true` when reviewer approval is sufficient for the node.
 
 Stale `failure.report.json` files from earlier recovery attempts are ignored in `status --json` / `report` once the attempt is approved, except when merge failed or the test gate is actively blocking merge.

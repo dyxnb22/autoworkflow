@@ -3060,6 +3060,11 @@ def summarize_attempt(attempt: AttemptRecord, state: TaskState | None = None) ->
     if attempt.phase == AttemptPhase.REJECTED:
         return "reviewer rejected; run `cc-loop resume` to retry from base commit if retries remain"
     if attempt.phase == AttemptPhase.APPROVED:
+        if state is not None and merge_blocked_by_test_gate(attempt, state.config, state=state):
+            return (
+                "reviewer approved but merge is blocked by the test gate; "
+                "inspect artifacts, fix tests through a repair path, or allow merge without tests"
+            )
         return "reviewer approved but merge did not complete; run `cc-loop resume` to retry merge"
     if attempt.test_status and not attempt.decision:
         return "tests finished; resume to run reviewer"
