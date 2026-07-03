@@ -76,11 +76,51 @@ git -C ~/.cc-loop/worktrees/<repo>/<task-id>/iter-NNN status
 
 | File | What it contains |
 |---|---|
-| `review.prompt.txt` | The exact prompt sent to the reviewer (includes diff stat and selected patches) |
+| `review.prompt.txt` | The exact prompt sent to the reviewer (diff stat; patches inline or artifact refs per `review_context_mode`) |
+| `review.prompt.metrics.json` | Reviewer prompt cache layout metrics (stable prefix ratio, omitted patch chars, avoidable miss tokens) |
+| `prompt.cache.json` | Per-attempt prompt cache budget across planner/implementer/reviewer phases |
+| `command.argv.json` | Executed argv per phase; large prompt arguments are redacted as `<prompt:N chars sha256=...>` placeholders |
 | `review.provider.txt` | Which provider was invoked |
 | `review.raw.jsonl` | Raw provider output |
 | `review.last-message.txt` | The final assistant message |
 | `review.parsed.json` | Normalized reviewer JSON: decision, reason, issues, retry_prompt |
+
+#### Reviewer context modes (`review_context_mode`)
+
+Config keys: `review_context_mode` (`hybrid` default), `review_inline_patch_threshold` (default `8000`).
+
+| Mode | Behavior |
+|------|----------|
+| `inline` | Embeds selected patch text in `review.prompt.txt` (legacy behavior) |
+| `artifact_refs` | Omits patch body; prompt lists artifact paths (`diff.stat.txt`, `diff.files.txt`, `test.output.txt`, `patches/`) |
+| `hybrid` | Inlines patches when `patch_body` chars ≤ threshold; otherwise uses artifact refs |
+
+When patches are omitted, check `review.prompt.metrics.json` for `omitted_patch_chars` and `estimated_avoidable_miss_tokens`, and `prompt.cache.json` for cross-phase totals. The reviewer prompt still keeps the stable contract/rubric/JSON shape **before** `## Dynamic Review Payload`.
+
+#### Direct planner mode (`planner_mode: direct`)
+
+Skips the planner provider and writes a single-node task graph derived from the goal. Artifacts still include `plan.prompt.txt`, `plan.prompt.meta.json`, `plan.parsed.json`, and `attempt.trace.json`. `plan.provider.txt` is `(direct)` and `command.argv.json` records `["(planner-skipped-direct)"]` for the planner phase instead of provider argv.
+
+Init example:
+
+```bash
+cc-loop init --goal "Fix CLI flag parsing" --repo "$REPO" --planner-mode direct ...
+```
+
+`--planner-granularity single` still runs the planner; it only affects planner prompt decomposition hints.
+
+#### Prompt cache budget (`prompt.cache.json`)
+
+Per-attempt artifact summarizing planner/implementer/reviewer prompt layout metrics and totals:
+
+- `estimated_prompt_tokens`, `estimated_dynamic_payload_tokens`, `estimated_avoidable_miss_tokens`
+- Reviewer phase includes `context_mode`, `inline_patch`, `omitted_patch_chars`, `recommendations`
+
+Also exposed in `status --json` as optional `prompt_cache` and in `report --json` observability.
+
+#### `command.argv.json` prompt redaction
+
+Diagnostic argv artifacts redact large prompt arguments as `<prompt:N chars sha256=...>` placeholders. Provider execution still uses the full prompt; only the recorded argv artifact is sanitized.
 
 ### Merge phase
 

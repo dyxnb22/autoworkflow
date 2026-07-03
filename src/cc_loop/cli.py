@@ -126,6 +126,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Planner decomposition: single node, auto (default), or multi-node graph",
     )
     init_parser.add_argument(
+        "--planner-mode",
+        choices=["auto", "graph", "single", "direct"],
+        default=None,
+        help="Planner execution mode; direct skips planner provider and synthesizes a single-node plan",
+    )
+    init_parser.add_argument(
+        "--review-context-mode",
+        choices=["hybrid", "inline", "artifact_refs"],
+        default=None,
+        help="Reviewer prompt context: inline patches, artifact refs only, or hybrid threshold",
+    )
+    init_parser.add_argument(
+        "--review-inline-patch-threshold",
+        type=int,
+        default=None,
+        help="Hybrid reviewer mode inlines patches up to this many characters (default: 8000)",
+    )
+    init_parser.add_argument(
         "--provider-watchdog-grace-seconds",
         type=int,
         default=None,
@@ -363,6 +381,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["allow_node_policy_weakening"] = True
     if args.planner_granularity is not None:
         overrides["planner_granularity"] = args.planner_granularity
+    if args.planner_mode is not None:
+        overrides["planner_mode"] = args.planner_mode
+    if args.review_context_mode is not None:
+        overrides["review_context_mode"] = args.review_context_mode
+    if args.review_inline_patch_threshold is not None:
+        overrides["review_inline_patch_threshold"] = args.review_inline_patch_threshold
 
     config = merge_config(overrides)
     base_commit = resolve_base_commit_if_possible(repo, args.base_branch)

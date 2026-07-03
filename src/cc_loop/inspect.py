@@ -10,6 +10,7 @@ from pathlib import Path
 from cc_loop import __version__
 from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, read_failure_report
 from cc_loop.recovery import AutoStep, decide_auto_step, derive_next_action_from_step
+from cc_loop.prompt_cache import prompt_cache_snapshot
 from cc_loop.state import (
     AttemptPhase,
     AttemptRecord,
@@ -56,7 +57,24 @@ def _reviewer_prompt_metrics_snapshot(
         "cache_health": metrics.get("cache_health"),
         "total_prompt_cache_health": metrics.get("total_prompt_cache_health"),
         "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
+        "omitted_patch_chars": metrics.get("omitted_patch_chars"),
+        "estimated_avoidable_miss_tokens": metrics.get("estimated_avoidable_miss_tokens"),
+        "context_mode": metrics.get("context_mode"),
+        "inline_patch": metrics.get("inline_patch"),
     }
+
+
+def _prompt_cache_snapshot(
+    state: TaskState,
+    attempt: AttemptRecord | None,
+    state_root: Path,
+) -> dict | None:
+    if attempt is None:
+        return None
+    paths = plan_artifact_paths(
+        artifacts_dir(state.task_id, attempt.iteration, attempt.retry, state_root)
+    )
+    return prompt_cache_snapshot(paths["prompt_cache"])
 
 
 _ACTIVE_PROVIDER_PHASES = frozenset(
@@ -526,6 +544,9 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
     reviewer_metrics = _reviewer_prompt_metrics_snapshot(state, attempt, state_root)
     if reviewer_metrics is not None:
         snapshot["reviewer_prompt_metrics"] = reviewer_metrics
+    prompt_cache = _prompt_cache_snapshot(state, attempt, state_root)
+    if prompt_cache is not None:
+        snapshot["prompt_cache"] = prompt_cache
     return snapshot
 
 

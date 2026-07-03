@@ -102,6 +102,7 @@ def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
         "review_provider": artifact_root / "review.provider.txt",
         "merge_output": artifact_root / "merge.output.txt",
         "attempt_trace": artifact_root / "attempt.trace.json",
+        "prompt_cache": artifact_root / "prompt.cache.json",
     }
 
 

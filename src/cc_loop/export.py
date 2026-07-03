@@ -202,6 +202,12 @@ def build_export_rows(state: TaskState, state_root: Path) -> list[dict[str, Any]
             cache_health = metrics.get("cache_health")
         if cache_health:
             row["cache_health"] = cache_health
+        prompt_cache = _safe_read_json(artifact_paths["prompt_cache"])
+        if prompt_cache:
+            row["prompt_cache_path"] = str(artifact_paths["prompt_cache"])
+            totals = prompt_cache.get("totals") or {}
+            if totals.get("estimated_avoidable_miss_tokens"):
+                row["estimated_avoidable_miss_tokens"] = totals["estimated_avoidable_miss_tokens"]
         rows.append(row)
 
     merge = phases.get("merge", {})
