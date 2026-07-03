@@ -141,4 +141,6 @@ def mark_heartbeat_terminal(
     existing.status = status
     if phase:
         existing.phase = phase
+    existing.running_provider = ""
+    existing.provider_progress = ""
     write_heartbeat(state_root, existing)

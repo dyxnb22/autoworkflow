@@ -176,7 +176,12 @@ def is_runner_alive(state_root: Path, task_id: str) -> tuple[bool, int | None]:
         return True, pid
 
     hb = read_heartbeat(state_root, task_id)
-    if hb is not None and hb.pid and is_process_alive(hb.pid):
+    if (
+        hb is not None
+        and hb.status in {"running", "replanning"}
+        and hb.pid
+        and is_process_alive(hb.pid)
+    ):
         if validate_pid_ownership(hb.pid, task_id, state_root=state_root):
             return True, hb.pid
     if pid is not None:
@@ -529,11 +534,19 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
 
     stale_seconds = int(state.config.get("stale_heartbeat_seconds", 120) or 120)
     hb = read_heartbeat(state_root, state.task_id)
-    caps = _runner_capability_flags(state, state_root, running)
     from cc_loop.runner_control import runner_state_label
     from cc_loop.test_command import format_test_command_display
 
     runner_state = runner_state_label(state_root, state.task_id, stale_heartbeat_seconds=stale_seconds)
+    if (
+        state.status not in {TaskStatus.RUNNING, TaskStatus.REPLANNING}
+        and read_runner_pid(state_root, state.task_id) is None
+        and hb is not None
+    ):
+        running = False
+        runner_pid = hb.pid or runner_pid
+        runner_state = "stopped"
+    caps = _runner_capability_flags(state, state_root, running)
     live_phase, live_running_provider = _resolve_live_attempt_fields(
         attempt,
         running=running,
