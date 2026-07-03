@@ -57,6 +57,7 @@ from cc_loop.parallel_scheduler import discover_parallel_runnable, execute_paral
 from cc_loop.budgets import check_budgets
 from cc_loop.test_command import (
     TEST_COMMAND_HINT,
+    expand_test_command_in_argv,
     format_test_command_argv,
     format_test_command_display,
     normalize_test_command,
@@ -970,33 +971,12 @@ def _notify(title: str, message: str) -> None:
         pass
 
 
-def _expand_test_command_with_double_dash(argv: list[str]) -> list[str]:
-    """Expand ``--test-command -- ARG...`` before argparse sees a bare ``--``."""
-    result: list[str] = []
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        if token == "--test-command" and i + 1 < len(argv) and argv[i + 1] == "--":
-            result.append("--test-command")
-            i += 2
-            parts: list[str] = []
-            while i < len(argv):
-                parts.append(argv[i])
-                i += 1
-            if parts:
-                result.append(" ".join(parts))
-            continue
-        result.append(token)
-        i += 1
-    return result
-
-
 def _apply_state_root_default(argv: list[str] | None) -> list[str]:
     args = list(sys.argv[1:] if argv is None else argv)
     env_root = os.environ.get("CC_LOOP_STATE_ROOT")
     if env_root and "--state-root" not in args:
         args = ["--state-root", env_root, *args]
-    return _expand_test_command_with_double_dash(args)
+    return expand_test_command_in_argv(args)
 
 
 def main(argv: list[str] | None = None) -> int:

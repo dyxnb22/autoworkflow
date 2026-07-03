@@ -19,7 +19,7 @@ from cc_loop.run import build_planner_prompt
 from cc_loop.runner_heartbeat import RunnerHeartbeat, write_heartbeat
 from cc_loop.state import AttemptPhase, AttemptRecord, TaskStatus, load_state, save_state, utc_now_iso
 from cc_loop.subprocess_util import run_with_timeout
-from cc_loop.test_command import normalize_test_command
+from cc_loop.test_command import expand_test_command_in_argv, normalize_test_command
 from tests.helpers import TempEnv, make_task
 
 
@@ -50,6 +50,117 @@ class TestCommandParsingTests(unittest.TestCase):
             normalize_test_command(["python -m pytest tests/ -q"]),
             ["python", "-m", "pytest", "tests/", "-q"],
         )
+
+    def test_normalize_rejects_shell_operators(self) -> None:
+        with self.assertRaises(ValueError):
+            normalize_test_command(["pytest tests | tee out.log"])
+
+    def test_expand_allows_flags_after_test_command(self) -> None:
+        expanded = expand_test_command_in_argv(
+            [
+                "init",
+                "--goal",
+                "g",
+                "--repo",
+                "/tmp/r",
+                "--test-command",
+                "--",
+                "python",
+                "-m",
+                "pytest",
+                "tests",
+                "-q",
+                "--max-iterations",
+                "3",
+            ]
+        )
+        self.assertEqual(
+            expanded,
+            [
+                "init",
+                "--goal",
+                "g",
+                "--repo",
+                "/tmp/r",
+                "--test-command",
+                "python -m pytest tests -q",
+                "--max-iterations",
+                "3",
+            ],
+        )
+
+    def test_expand_legacy_argv_includes_dash_q(self) -> None:
+        expanded = expand_test_command_in_argv(
+            [
+                "init",
+                "--goal",
+                "g",
+                "--repo",
+                "/tmp/r",
+                "--test-command",
+                "pytest",
+                "tests",
+                "-q",
+                "--planner",
+                "codex",
+            ]
+        )
+        self.assertIn("--test-command", expanded)
+        idx = expanded.index("--test-command")
+        self.assertEqual(expanded[idx + 1], "pytest tests -q")
+        self.assertEqual(expanded[idx + 2], "--planner")
+
+    def test_init_test_command_before_other_flags(self) -> None:
+        env = TempEnv()
+        try:
+            result = _cli(
+                "init",
+                "--goal",
+                "goal",
+                "--repo",
+                str(env.repo()),
+                "--task-id",
+                "tc-mixed",
+                "--test-command",
+                "--",
+                "python",
+                "-m",
+                "pytest",
+                "tests",
+                "-q",
+                "--max-iterations",
+                "7",
+                state_root=env.state_root(),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = load_state("tc-mixed", env.state_root())
+            self.assertEqual(state.config["test_command"], ["python", "-m", "pytest", "tests", "-q"])
+            self.assertEqual(state.config["max_iterations"], 7)
+        finally:
+            env.close()
+
+    def test_init_legacy_dash_q_without_separator(self) -> None:
+        env = TempEnv()
+        try:
+            result = _cli(
+                "init",
+                "--goal",
+                "goal",
+                "--repo",
+                str(env.repo()),
+                "--task-id",
+                "tc-legacy-q",
+                "--test-command",
+                "pytest",
+                "tests",
+                "-q",
+                state_root=env.state_root(),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = load_state("tc-legacy-q", env.state_root())
+            self.assertEqual(state.config["test_command"], ["pytest", "tests", "-q"])
+        finally:
+            env.close()
 
     def test_init_persists_parsed_test_command(self) -> None:
         env = TempEnv()
@@ -92,6 +203,16 @@ class ProviderTimeoutTests(unittest.TestCase):
         self.assertTrue(result.timed_out)
         self.assertTrue(result.killed)
         self.assertGreater(result.duration_seconds, 0.0)
+
+    def test_timeout_marks_hung_when_sigkill_required(self) -> None:
+        script = (
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, lambda *_: None)\n"
+            "time.sleep(30)\n"
+        )
+        result = run_with_timeout([sys.executable, "-c", script], timeout_seconds=1, kill_grace_seconds=0.2)
+        self.assertTrue(result.timed_out)
+        self.assertTrue(result.hung)
 
 
 class StaleHeartbeatStatusTests(unittest.TestCase):

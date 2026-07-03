@@ -150,6 +150,7 @@ class ClaudeCodeAdapter(ProviderAdapter):
             timed_out=result.timed_out,
             interrupted=result.interrupted,
             killed=result.killed,
+            hung=result.hung,
             duration_seconds=result.duration_seconds,
         )
 

@@ -266,7 +266,7 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 
 In addition to goal/repo/providers/test-command:
 
-- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. A single quoted string is also accepted and split with shell rules.
+- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. Additional `init`/`doctor` flags may follow the test command. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
 - `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`)
 - `--task-id ID` — explicit task id (recommended for integrations)
 - `--codex-model`, `--cursor-model`, `--claude-code-model`
@@ -295,7 +295,7 @@ Each attempt artifact directory may include:
 | `review.prompt.metrics.json` | Reviewer cache-layout metrics (stable prefix ratio, token estimates) |
 | `attempt.trace.json` | Normalized per-attempt trace with phase status and artifact paths |
 | `command.argv.json` | Executed argv per phase (`planner`, `implementer`, `reviewer`, `test`) |
-| `subprocess.result.json` | Subprocess exit metadata per phase (`exit_code`, `timed_out`, `duration_seconds`, `killed`, stdout/stderr paths) |
+| `subprocess.result.json` | Subprocess exit metadata per phase (`exit_code`, `timed_out`, `hung`, `duration_seconds`, `killed`, stdout/stderr paths) |
 
 ### Prompt metadata contract (`schema_version` 1)
 

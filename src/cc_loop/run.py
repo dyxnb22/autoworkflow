@@ -247,7 +247,15 @@ def _provider_failure_report(
     phase: str,
     run_result: ProviderRunResult,
 ) -> FailureReport:
-    hung = bool(run_result.killed and not run_result.timed_out and not run_result.interrupted and run_result.exit_code != 0)
+    hung = bool(
+        getattr(run_result, "hung", False)
+        or (
+            run_result.killed
+            and not run_result.timed_out
+            and not run_result.interrupted
+            and run_result.exit_code != 0
+        )
+    )
     return classify_provider_failure(
         phase=phase,
         provider=provider_name,

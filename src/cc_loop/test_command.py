@@ -3,12 +3,113 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 
 TEST_COMMAND_HINT = (
     "Use --test-command -- pytest tests -q "
     "(place `--` before the command so flags like -q are not parsed as cc-loop options)"
 )
+
+SHELL_OPERATOR_RE = re.compile(r"(&&|\|\||[|;&<>])")
+
+INIT_SUBCOMMAND_FLAGS = {
+    "--goal",
+    "--goal-file",
+    "--repo",
+    "--task-id",
+    "--base-branch",
+    "--test-command",
+    "--planner-granularity",
+    "--planner",
+    "--reviewer",
+    "--implementer",
+    "--allow-merge-without-tests",
+    "--max-iterations",
+    "--max-retries",
+    "--codex-model",
+    "--cursor-model",
+    "--claude-code-model",
+    "--cursor-force",
+    "--cursor-sandbox",
+    "--max-parallel-nodes",
+    "--allow-parallel-execution",
+    "--max-wall-clock-seconds",
+    "--max-changed-files-per-attempt",
+    "--max-consecutive-failures",
+    "--max-artifact-log-bytes",
+    "--allow-node-policy-weakening",
+}
+
+DOCTOR_SUBCOMMAND_FLAGS = {
+    "--repo",
+    "--base-branch",
+    "--planner",
+    "--reviewer",
+    "--implementer",
+    "--test-command",
+    "--json",
+}
+
+GLOBAL_FLAGS = {"--state-root", "--version"}
+
+SUBCOMMANDS_WITH_TEST_COMMAND = frozenset({"init", "doctor"})
+
+
+def _find_subcommand(argv: list[str]) -> str | None:
+    for token in argv:
+        if token in SUBCOMMANDS_WITH_TEST_COMMAND:
+            return token
+    return None
+
+
+def _is_cc_loop_flag(token: str, subcommand: str | None) -> bool:
+    if token in GLOBAL_FLAGS:
+        return True
+    if subcommand == "init" and token in INIT_SUBCOMMAND_FLAGS:
+        return True
+    if subcommand == "doctor" and token in DOCTOR_SUBCOMMAND_FLAGS:
+        return True
+    return False
+
+
+def _reject_shell_operators(text: str) -> None:
+    if SHELL_OPERATOR_RE.search(text):
+        raise ValueError(
+            "test_command contains shell operators; pass argv tokens after "
+            f"`--test-command --` instead of a shell pipeline. {TEST_COMMAND_HINT}"
+        )
+
+
+def expand_test_command_in_argv(argv: list[str]) -> list[str]:
+    """Normalize ``--test-command`` sections so cc-loop flags may follow the command."""
+    subcommand = _find_subcommand(argv)
+    if subcommand is None:
+        return list(argv)
+
+    result: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token != "--test-command":
+            result.append(token)
+            i += 1
+            continue
+
+        result.append(token)
+        i += 1
+        if i >= len(argv):
+            break
+
+        parts: list[str] = []
+        if argv[i] == "--":
+            i += 1
+        while i < len(argv) and not _is_cc_loop_flag(argv[i], subcommand):
+            parts.append(argv[i])
+            i += 1
+        if parts:
+            result.append(" ".join(parts))
+    return result
 
 
 def normalize_test_command(argv: list[str] | None) -> list[str] | None:
@@ -27,6 +128,7 @@ def normalize_test_command(argv: list[str] | None) -> list[str] | None:
     if len(parts) == 1:
         token = parts[0].strip()
         if " " in token:
+            _reject_shell_operators(token)
             parts = shlex.split(token)
 
     if not parts or not all(isinstance(part, str) and part for part in parts):

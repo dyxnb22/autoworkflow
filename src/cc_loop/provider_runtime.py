@@ -7,12 +7,14 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from cc_loop.providers.base import ProviderAdapter, ProviderRunResult
 from cc_loop.runner_heartbeat import refresh_heartbeat
 from cc_loop.state import AttemptRecord, TaskState
 from cc_loop.subprocess_util import RunResult
+
+PROVIDER_RUN_GRACE_SECONDS = 30
 
 
 def _heartbeat_interval_seconds(stale_seconds: int) -> float:
@@ -35,6 +37,10 @@ def run_provider_with_heartbeat(
     stale_seconds = int(state.config.get("stale_heartbeat_seconds", 120) or 120)
     stop_event = threading.Event()
     interval = _heartbeat_interval_seconds(stale_seconds)
+    timeout_seconds = int(provider_kwargs.get("timeout_seconds") or 0)
+    outer_limit: float | None = None
+    if timeout_seconds > 0:
+        outer_limit = float(timeout_seconds + PROVIDER_RUN_GRACE_SECONDS)
 
     def _refresh_loop() -> None:
         while not stop_event.wait(timeout=interval):
@@ -50,20 +56,48 @@ def run_provider_with_heartbeat(
 
     thread = threading.Thread(target=_refresh_loop, name="cc-loop-heartbeat", daemon=True)
     thread.start()
-    try:
-        return provider.run(**provider_kwargs)
-    finally:
-        stop_event.set()
-        thread.join(timeout=1.0)
-        refresh_heartbeat(
-            state_root,
-            task_id=state.task_id,
-            pid=pid,
-            status=state.status.value,
-            phase=attempt.phase.value,
-            iteration=state.iteration,
-            graph_node_id=attempt.graph_node_id,
+
+    holder: dict[str, ProviderRunResult] = {}
+    errors: list[BaseException] = []
+
+    def _run_provider() -> None:
+        try:
+            holder["result"] = provider.run(**provider_kwargs)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=_run_provider, name="cc-loop-provider", daemon=True)
+    worker.start()
+    worker.join(timeout=outer_limit)
+
+    stop_event.set()
+    thread.join(timeout=1.0)
+    refresh_heartbeat(
+        state_root,
+        task_id=state.task_id,
+        pid=pid,
+        status=state.status.value,
+        phase=attempt.phase.value,
+        iteration=state.iteration,
+        graph_node_id=attempt.graph_node_id,
+    )
+
+    if worker.is_alive():
+        output_path = Path(provider_kwargs.get("output_path", "."))
+        return ProviderRunResult(
+            provider=provider.name,
+            exit_code=-1,
+            raw_artifact_path=output_path,
+            timed_out=True,
+            hung=True,
+            killed=True,
+            summary="provider adapter did not return before watchdog deadline",
         )
+
+    if errors:
+        raise errors[0]
+
+    return holder["result"]
 
 
 def write_command_argv_artifact(
@@ -87,6 +121,35 @@ def write_command_argv_artifact(
     return path
 
 
+def _result_entry(
+    result: RunResult | ProviderRunResult,
+    *,
+    stdout_path: str = "",
+    stderr_path: str = "",
+) -> dict[str, Any]:
+    if isinstance(result, RunResult):
+        return {
+            "exit_code": result.returncode,
+            "timed_out": result.timed_out,
+            "duration_seconds": round(result.duration_seconds, 3),
+            "killed": result.killed,
+            "interrupted": result.interrupted,
+            "hung": result.hung,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+        }
+    return {
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "duration_seconds": round(result.duration_seconds, 3),
+        "killed": result.killed,
+        "interrupted": result.interrupted,
+        "hung": result.hung,
+        "stdout_path": stdout_path or str(result.raw_artifact_path),
+        "stderr_path": stderr_path,
+    }
+
+
 def write_subprocess_result_artifact(
     artifact_root: Path,
     *,
@@ -106,27 +169,7 @@ def write_subprocess_result_artifact(
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
 
-    if isinstance(result, RunResult):
-        entry = {
-            "exit_code": result.returncode,
-            "timed_out": result.timed_out,
-            "duration_seconds": round(result.duration_seconds, 3),
-            "killed": result.killed,
-            "interrupted": result.interrupted,
-            "stdout_path": stdout_path,
-            "stderr_path": stderr_path,
-        }
-    else:
-        entry = {
-            "exit_code": result.exit_code,
-            "timed_out": result.timed_out,
-            "duration_seconds": round(getattr(result, "duration_seconds", 0.0), 3),
-            "killed": getattr(result, "killed", False),
-            "interrupted": result.interrupted,
-            "stdout_path": stdout_path or str(result.raw_artifact_path),
-            "stderr_path": stderr_path,
-        }
-    payload[phase] = entry
+    payload[phase] = _result_entry(result, stdout_path=stdout_path, stderr_path=stderr_path)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
