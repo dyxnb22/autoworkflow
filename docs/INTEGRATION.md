@@ -447,3 +447,18 @@ When `planner_mode` is `auto` (default), cc-loop may skip the planner provider f
 `planner_mode: direct` still forces direct mode. `planner_mode: single|graph` is never overridden.
 
 `prompt.cache.json` planner phase records `planner_mode_resolved`, `planner_direct_reason`, and `provider_skipped`.
+
+### Task-level terminal artifacts (v0.10+)
+
+On terminal disposition (`done`, `failed`, `cancelled`, or non-recoverable `stopped`), cc-loop writes:
+
+| Artifact | Description |
+|----------|-------------|
+| `run.summary.json` | Same payload as `cc-loop summary --json` |
+| `execution.timeline.json` | Time-ordered phase events from `events.jsonl` with subprocess durations |
+
+Terminal events in `events.jsonl`: `task.completed`, `task.failed`, `task.cancelled` (deduplicated).
+
+### Cursor implementer progress (v0.10+)
+
+When the Cursor implementer produces 0-byte raw output for 30+ seconds, `runner.heartbeat.json` and `status --json` heartbeat include `provider_progress` such as `cursor implementer: waiting for output (45s elapsed)`.

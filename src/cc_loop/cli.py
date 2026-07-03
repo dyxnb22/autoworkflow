@@ -814,13 +814,9 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
         )
 
         if step == AutoStep.DONE:
-            append_event(
-                state_root,
-                task_id=task_id,
-                event_type=EventType.TASK_COMPLETED,
-                iteration=state.iteration,
-                message="task completed",
-            )
+            from cc_loop.summary import finalize_terminal_task
+
+            finalize_terminal_task(state, state_root)
             remove_heartbeat(state_root, task_id)
             print(f"task {state.task_id} completed successfully")
             _notify(f"task {task_id} done", state.goal)

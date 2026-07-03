@@ -1709,9 +1709,9 @@ def run_review_phase(
 
 def _persist_state(state: TaskState, state_root: Path) -> None:
     save_state(state, state_root)
-    from cc_loop.summary import write_run_summary_if_terminal
+    from cc_loop.summary import finalize_terminal_task
 
-    write_run_summary_if_terminal(state, state_root)
+    finalize_terminal_task(state, state_root)
 
 
 def _run_finalize_phase(

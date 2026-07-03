@@ -27,9 +27,13 @@ class RunnerHeartbeat:
     iteration: int
     graph_node_id: str = ""
     running_provider: str = ""
+    provider_progress: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        if not payload.get("provider_progress"):
+            payload.pop("provider_progress", None)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict) -> RunnerHeartbeat:
@@ -43,6 +47,7 @@ class RunnerHeartbeat:
             iteration=int(data.get("iteration", 0)),
             graph_node_id=str(data.get("graph_node_id", "")),
             running_provider=str(data.get("running_provider", "")),
+            provider_progress=str(data.get("provider_progress", "")),
         )
 
 
@@ -102,6 +107,7 @@ def refresh_heartbeat(
     iteration: int,
     graph_node_id: str = "",
     running_provider: str = "",
+    provider_progress: str = "",
     started_at: str | None = None,
 ) -> RunnerHeartbeat:
     existing = read_heartbeat(state_root, task_id)
@@ -115,6 +121,7 @@ def refresh_heartbeat(
         iteration=iteration,
         graph_node_id=graph_node_id,
         running_provider=running_provider,
+        provider_progress=provider_progress,
     )
     write_heartbeat(state_root, hb)
     return hb

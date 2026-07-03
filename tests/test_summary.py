@@ -44,6 +44,7 @@ class SummaryCommandTests(unittest.TestCase):
             self.assertIn("latest_attempt", payload)
             self.assertIn("artifact_paths", payload)
             self.assertIn("schema_version", payload)
+            self.assertIn("execution_timeline", payload)
         finally:
             env.close()
 

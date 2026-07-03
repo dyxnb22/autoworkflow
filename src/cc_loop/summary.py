@@ -26,6 +26,10 @@ from cc_loop.state import (
     plan_artifact_paths,
     task_dir,
 )
+from cc_loop.execution_timeline import (
+    build_execution_timeline,
+    execution_timeline_path,
+)
 from cc_loop.trace import trace_file_path
 
 
@@ -146,6 +150,8 @@ def build_task_summary(state: TaskState, state_root: Path) -> dict[str, Any]:
         "task_dir": str(task_dir(state.task_id, state_root)),
         "events_path": report.get("events_path"),
         "log_path": report.get("log_path"),
+        "execution_timeline": build_execution_timeline(state, state_root),
+        "execution_timeline_path": str(execution_timeline_path(state_root, state.task_id)),
     }
 
 
@@ -220,3 +226,13 @@ def write_run_summary_if_terminal(state: TaskState, state_root: Path) -> Path | 
     path = task_dir(state.task_id, state_root) / RUN_SUMMARY_FILENAME
     path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def finalize_terminal_task(state: TaskState, state_root: Path) -> None:
+    """Emit terminal events and write terminal artifacts when appropriate."""
+    from cc_loop.events import emit_terminal_task_event
+    from cc_loop.execution_timeline import write_execution_timeline_if_terminal
+
+    emit_terminal_task_event(state_root, state)
+    write_run_summary_if_terminal(state, state_root)
+    write_execution_timeline_if_terminal(state, state_root)

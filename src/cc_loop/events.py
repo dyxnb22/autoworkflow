@@ -32,6 +32,7 @@ class EventType(StrEnum):
     MERGE_COMPLETED = "merge.completed"
     FAILURE_RECORDED = "failure.recorded"
     TASK_COMPLETED = "task.completed"
+    TASK_FAILED = "task.failed"
     TASK_CANCELLED = "task.cancelled"
     REPLAN_STARTED = "replan.started"
     REPLAN_COMPLETED = "replan.completed"
@@ -123,3 +124,56 @@ def read_events(state_root: Path, task_id: str, *, stream: str = "events") -> li
         except (json.JSONDecodeError, TypeError, ValueError):
             continue
     return events
+
+
+_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        EventType.TASK_COMPLETED.value,
+        EventType.TASK_FAILED.value,
+        EventType.TASK_CANCELLED.value,
+    }
+)
+
+
+def latest_terminal_event_type(state_root: Path, task_id: str) -> str | None:
+    for event in reversed(read_events(state_root, task_id)):
+        if event.type in _TERMINAL_EVENT_TYPES:
+            return event.type
+    return None
+
+
+def emit_terminal_task_event(state_root: Path, state: TaskState) -> TaskEvent | None:
+    """Emit a terminal task event once when the task reaches a terminal disposition."""
+    from cc_loop.summary import should_write_run_summary
+    from cc_loop.state import TaskStatus
+
+    if latest_terminal_event_type(state_root, state.task_id):
+        return None
+
+    if state.status == TaskStatus.DONE:
+        event_type = EventType.TASK_COMPLETED
+        message = "task completed"
+    elif state.status == TaskStatus.CANCELLED:
+        event_type = EventType.TASK_CANCELLED
+        message = "task cancelled"
+    elif state.status == TaskStatus.FAILED:
+        event_type = EventType.TASK_FAILED
+        message = "task failed"
+    elif state.status == TaskStatus.STOPPED and should_write_run_summary(state, state_root):
+        event_type = EventType.TASK_FAILED
+        message = "task stopped (terminal)"
+    else:
+        return None
+
+    attempt = state.history[-1] if state.history else None
+    return append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=event_type,
+        iteration=attempt.iteration if attempt else state.iteration,
+        retry=attempt.retry if attempt else 0,
+        graph_node_id=attempt.graph_node_id if attempt else "",
+        phase=attempt.phase.value if attempt is not None else "",
+        message=message,
+        details={"status": state.status.value},
+    )

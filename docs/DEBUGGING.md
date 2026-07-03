@@ -132,6 +132,13 @@ cc-loop summary --task-id ID --json
 
 After a terminal run, the same payload is also written to `~/.cc-loop/tasks/<task-id>/run.summary.json`.
 
+Timeline:
+
+```bash
+# Included in summary --json as execution_timeline
+cat ~/.cc-loop/tasks/<task-id>/execution.timeline.json
+```
+
 #### `command.argv.json` prompt redaction
 
 Diagnostic argv artifacts redact large prompt arguments as `<prompt:N chars sha256=...>` placeholders. Provider execution still uses the full prompt; only the recorded argv artifact is sanitized.

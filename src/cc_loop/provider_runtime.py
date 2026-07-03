@@ -17,6 +17,8 @@ from cc_loop.state import AttemptRecord, TaskState
 from cc_loop.subprocess_util import RunResult, kill_active_subprocess_group
 
 PROVIDER_WORKER_JOIN_SECONDS = 5.0
+CURSOR_OUTPUT_WARN_SECONDS = 30
+CURSOR_OUTPUT_POLL_SECONDS = 5.0
 
 
 def _heartbeat_interval_seconds(stale_seconds: int) -> float:
@@ -49,6 +51,38 @@ def run_provider_with_heartbeat(
     if timeout_seconds > 0:
         outer_limit = float(timeout_seconds + watchdog_grace)
 
+    progress_state = {"message": ""}
+    raw_output_path = provider_kwargs.get("raw_output_path")
+    is_cursor = provider.name == "cursor" or "cursor" in provider.name
+
+    refresh_heartbeat(
+        state_root,
+        task_id=state.task_id,
+        pid=pid,
+        status=state.status.value,
+        phase=attempt.phase.value,
+        iteration=state.iteration,
+        graph_node_id=attempt.graph_node_id,
+        running_provider=attempt.running_provider,
+    )
+
+    def _cursor_output_watcher() -> None:
+        if not is_cursor or raw_output_path is None:
+            return
+        path = Path(raw_output_path)
+        started = time.monotonic()
+        while not stop_event.is_set():
+            if stop_event.wait(CURSOR_OUTPUT_POLL_SECONDS):
+                return
+            if path.is_file() and path.stat().st_size > 0:
+                progress_state["message"] = ""
+                return
+            elapsed = int(time.monotonic() - started)
+            if elapsed >= CURSOR_OUTPUT_WARN_SECONDS:
+                progress_state["message"] = (
+                    f"cursor implementer: waiting for output ({elapsed}s elapsed)"
+                )
+
     def _refresh_loop() -> None:
         while not stop_event.wait(timeout=interval):
             refresh_heartbeat(
@@ -60,7 +94,17 @@ def run_provider_with_heartbeat(
                 iteration=state.iteration,
                 graph_node_id=attempt.graph_node_id,
                 running_provider=attempt.running_provider,
+                provider_progress=progress_state.get("message", ""),
             )
+
+    watcher: threading.Thread | None = None
+    if is_cursor and raw_output_path is not None:
+        watcher = threading.Thread(
+            target=_cursor_output_watcher,
+            name="cc-loop-cursor-progress",
+            daemon=True,
+        )
+        watcher.start()
 
     thread = threading.Thread(target=_refresh_loop, name="cc-loop-heartbeat", daemon=True)
     thread.start()
@@ -88,6 +132,8 @@ def run_provider_with_heartbeat(
 
     stop_event.set()
     thread.join(timeout=1.0)
+    if watcher is not None:
+        watcher.join(timeout=1.0)
     refresh_heartbeat(
         state_root,
         task_id=state.task_id,
@@ -97,6 +143,7 @@ def run_provider_with_heartbeat(
         iteration=state.iteration,
         graph_node_id=attempt.graph_node_id,
         running_provider=attempt.running_provider,
+        provider_progress="",
     )
 
     if errors:
