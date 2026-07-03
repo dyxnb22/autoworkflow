@@ -306,6 +306,7 @@ Each attempt artifact directory may include:
 | `plan.prompt.meta.json` | Planner prompt version/label/deployment metadata |
 | `implementer.prompt.meta.json` | Implementer prompt metadata |
 | `review.prompt.meta.json` | Reviewer prompt metadata |
+| `task.context.json` | Shared task/node context payload for implementer and reviewer (v0.10+ P1-3) |
 | `implementer.prompt.metrics.json` | Implementer cache-layout metrics (`stable_prefix_ratio`, `contract_prefix_ratio`, `task_context_ratio`, `cache_health`, token estimates) |
 | `review.prompt.metrics.json` | Reviewer cache-layout metrics (`stable_prefix_ratio`, `contract_prefix_ratio`, `cache_health`, `context_mode`, `omitted_patch_chars`, `estimated_avoidable_miss_tokens`, token estimates) |
 | `prompt.cache.json` | Per-attempt prompt cache budget across planner/implementer/reviewer phases with totals |

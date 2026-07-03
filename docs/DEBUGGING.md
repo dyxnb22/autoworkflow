@@ -46,6 +46,8 @@ If `plan.parsed.json` is missing or empty, planning failed before or during JSON
 | File | What it contains |
 |---|---|
 | `implementer.prompt.txt` | The exact prompt sent to the implementer |
+| `implementer.prompt.metrics.json` | Implementer prompt cache layout metrics |
+| `task.context.json` | Shared task/node context payload (when `task_context_mode` is `artifact_ref` or `auto` with file-capable providers) |
 | `implementer.provider.txt` | Which provider was invoked |
 | `implementer.raw.json` | Raw provider output |
 
@@ -77,7 +79,6 @@ git -C ~/.cc-loop/worktrees/<repo>/<task-id>/iter-NNN status
 | File | What it contains |
 |---|---|
 | `review.prompt.txt` | The exact prompt sent to the reviewer. In `artifact_refs` / large-patch `hybrid`, diff stat is summarized with paths instead of inlining the full stat; patches may also be artifact refs |
-| `implementer.prompt.metrics.json` | Implementer prompt cache layout metrics (`contract_prefix_ratio`, `task_context_ratio`, `stable_prefix_ratio`, token estimates) |
 | `review.prompt.metrics.json` | Reviewer prompt cache layout metrics (`contract_prefix_ratio`, `task_context_ratio`, `stable_prefix_ratio`, omitted patch/diff stat chars, avoidable miss tokens) |
 | `prompt.cache.json` | Per-attempt prompt cache budget across planner/implementer/reviewer phases |
 | `command.argv.json` | Executed argv per phase; large prompt arguments are redacted as `<prompt:N chars sha256=...>` placeholders |
@@ -106,6 +107,18 @@ Config keys: `review_context_mode` (`hybrid` default), `review_inline_patch_thre
 | `auto` | Fast review for low-risk passing changes; escalate to deep on risk signals or `escalate` decision |
 
 When patches or diff stat are omitted, check `review.prompt.metrics.json` for `omitted_patch_chars`, `omitted_diff_stat_chars`, and `estimated_avoidable_miss_tokens`, and `prompt.cache.json` for cross-phase totals. The reviewer prompt keeps stable contract/rubric/JSON **before** `## Task Review Context`, then per-attempt evidence after `## Dynamic Review Payload`. The implementer prompt uses the same three-section pattern: contract, `## Task Implementer Context`, then `## Dynamic Implementer Payload` (iteration/retry only).
+
+#### Task context mode (`task_context_mode`)
+
+Config: `task_context_mode` (`inline` default), set at init via `--task-context-mode inline|artifact_ref|auto`.
+
+| Mode | Behavior |
+|------|----------|
+| `inline` | Goal, node, and plan details inlined in implementer/reviewer prompts |
+| `artifact_ref` | Writes `task.context.json` once per attempt; prompts reference the file path |
+| `auto` | Uses `artifact_ref` for codex/claude-code; `inline` for cursor and other providers |
+
+Prompt fragments live under `src/cc_loop/prompts/`; override with global `--prompts-dir PATH` or init config `prompts_dir`.
 
 #### Direct planner mode (`planner_mode: direct` or auto heuristic)
 

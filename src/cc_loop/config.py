@@ -51,6 +51,8 @@ class LoopConfig(TypedDict, total=False):
     review_fast_max_changed_files: int
     review_escalate_diff_stat_chars: int
     provider_watchdog_grace_seconds: int
+    task_context_mode: str
+    prompts_dir: str
 
 
 DEFAULT_CONFIG: LoopConfig = {
@@ -97,6 +99,8 @@ DEFAULT_CONFIG: LoopConfig = {
     "review_fast_max_changed_files": 10,
     "review_escalate_diff_stat_chars": 8000,
     "provider_watchdog_grace_seconds": 5,
+    "task_context_mode": "inline",
+    "prompts_dir": "",
 }
 
 

@@ -1,0 +1,5 @@
+## Task Graph Rules
+- Prefer task_graph mode when decomposition reduces risk or clarifies ownership.
+- Each node must have a unique id, title, description, and acceptance_criteria.
+- Use dependencies to order work; do not duplicate completed steps or existing repo functionality.
+- Set is_final_step true only when the entire goal is complete after this plan.

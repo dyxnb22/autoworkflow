@@ -103,6 +103,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_STATE_ROOT,
         help=f"Root directory for task state (default: {DEFAULT_STATE_ROOT})",
     )
+    parser.add_argument(
+        "--prompts-dir",
+        type=Path,
+        default=None,
+        help="Override prompt fragment directory (default: packaged src/cc_loop/prompts)",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -149,6 +155,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["standard", "fast", "deep", "auto"],
         default=None,
         help="Reviewer depth: standard (default), fast artifact-only, deep full review, or auto two-stage",
+    )
+    init_parser.add_argument(
+        "--task-context-mode",
+        choices=["inline", "artifact_ref", "auto"],
+        default=None,
+        help="Task context in prompts: inline (default), artifact_ref file, or auto by provider",
     )
     init_parser.add_argument(
         "--provider-watchdog-grace-seconds",
@@ -335,6 +347,12 @@ def _read_goal(args: argparse.Namespace) -> str | None:
     return text
 
 
+def _apply_runtime_config_overrides(state, args: argparse.Namespace) -> None:
+    """Apply global CLI overrides to an in-memory task config."""
+    if getattr(args, "prompts_dir", None) is not None:
+        state.config["prompts_dir"] = str(args.prompts_dir.expanduser().resolve())
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     goal = _read_goal(args)
     if goal is None:
@@ -400,6 +418,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["review_depth"] = args.review_depth
     if args.review_inline_patch_threshold is not None:
         overrides["review_inline_patch_threshold"] = args.review_inline_patch_threshold
+    if args.task_context_mode is not None:
+        overrides["task_context_mode"] = args.task_context_mode
+    if args.prompts_dir is not None:
+        overrides["prompts_dir"] = str(args.prompts_dir.expanduser().resolve())
 
     config = merge_config(overrides)
     base_commit = resolve_base_commit_if_possible(repo, args.base_branch)
@@ -710,6 +732,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     state = load_state(task_id, args.state_root)
+    _apply_runtime_config_overrides(state, args)
     try:
         state, attempt, artifact_paths = execute_run(state, args.state_root)
     except RunError as exc:
@@ -770,6 +793,7 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
     state_root = args.state_root
     if args.max_iterations is not None:
         initial = load_state(task_id, state_root)
+        _apply_runtime_config_overrides(initial, args)
         initial.config["max_iterations"] = args.max_iterations
         save_state(initial, state_root)
 
@@ -783,6 +807,7 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
 
     while True:
         state = load_state(task_id, state_root)
+        _apply_runtime_config_overrides(state, args)
         if args.max_iterations is not None:
             state.config["max_iterations"] = args.max_iterations
 
@@ -985,6 +1010,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         return 1
 
     state = load_state(task_id, args.state_root)
+    _apply_runtime_config_overrides(state, args)
     try:
         state, attempt, artifact_paths = execute_resume(state, args.state_root)
     except ResumeError as exc:

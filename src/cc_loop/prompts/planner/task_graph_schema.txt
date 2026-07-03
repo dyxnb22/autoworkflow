@@ -1,0 +1,18 @@
+## Preferred Task Graph Shape
+{
+  "mode": "task_graph",
+  "summary": "Short summary of the implementation strategy",
+  "nodes": [
+    {
+      "id": "T1",
+      "title": "Set up project structure",
+      "description": "Create the package skeleton and baseline docs.",
+      "kind": "implementation",
+      "owner": "implementer",
+      "dependencies": [],
+      "acceptance_criteria": ["pyproject.toml exists"],
+      "files_scope": ["pyproject.toml", "src/"]
+    }
+  ],
+  "is_final_step": false
+}

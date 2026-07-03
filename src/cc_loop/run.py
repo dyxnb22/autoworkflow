@@ -31,6 +31,12 @@ from cc_loop.git import (
     merge_branch_into_base,
 )
 from cc_loop.preflight import PreflightResult, run_preflight
+from cc_loop.prompts import load_prompt_fragment
+from cc_loop.task_context import (
+    build_task_context_payload,
+    prepare_task_context,
+    render_inline_task_context,
+)
 from cc_loop.prompt_cache import (
     build_implementer_phase_cache,
     build_planner_phase_cache,
@@ -1196,11 +1202,28 @@ def run_implementer_phase(
     attempt.phase = AttemptPhase.EXECUTING
     save_state(state, state_root)
 
-    prompt = build_implementer_prompt(state, attempt.plan_json, attempt=attempt)
+    prepared_task_context = prepare_task_context(
+        state=state,
+        attempt=attempt,
+        role="implementer",
+        provider=provider_name,
+        config=config,
+        artifact_path=artifact_paths["task_context"],
+        marker=TASK_IMPLEMENTER_CONTEXT_MARKER,
+        plan_json=attempt.plan_json,
+    )
+    prompt = build_implementer_prompt(
+        state,
+        attempt.plan_json,
+        attempt=attempt,
+        task_context_section=prepared_task_context.prompt_section,
+        config=config,
+    )
     implementer_layout = resolve_implementer_layout(state, attempt)
     implementer_prompt_metrics = build_implementer_prompt_metrics(
         prompt=prompt,
         layout=implementer_layout,
+        task_context_mode=prepared_task_context.mode,
     )
 
     _write_implementer_artifacts_before(
@@ -1718,6 +1741,17 @@ def run_review_phase(
     review_prompt_metrics: dict[str, Any] = {}
     review_raw_paths: list[str] = []
     review_last_message_paths: list[str] = []
+    reviewer_provider = reviewer_chain[0]
+    prepared_task_context = prepare_task_context(
+        state=state,
+        attempt=attempt,
+        role="reviewer",
+        provider=reviewer_provider,
+        config=config,
+        artifact_path=artifact_paths["task_context"],
+        marker=TASK_REVIEW_CONTEXT_MARKER,
+        plan_json=attempt.plan_json,
+    )
 
     def _run_deep_stage(stage_label: str) -> dict[str, Any]:
         nonlocal review_prompt_metrics, review_raw_paths, review_last_message_paths, review_stage
@@ -1733,6 +1767,7 @@ def run_review_phase(
             patch_paths=patch_paths,
             inline_patch=inline_patch,
             context_mode=context_mode,
+            task_context_section=prepared_task_context.prompt_section,
         )
         review_prompt_metrics = build_reviewer_prompt_metrics(
             prompt=prompt,
@@ -1740,6 +1775,7 @@ def run_review_phase(
             patch_body=patch_body,
             inline_patch=inline_patch,
             context_mode=context_mode,
+            task_context_mode=prepared_task_context.mode,
         )
         _write_review_stage_artifacts(
             state=state,
@@ -1785,6 +1821,7 @@ def run_review_phase(
             artifact_paths=artifact_paths,
             patch_paths=patch_paths,
             patch_body_chars=len(patch_body),
+            task_context_section=prepared_task_context.prompt_section,
         )
         review_prompt_metrics = build_reviewer_prompt_metrics(
             prompt=prompt,
@@ -1793,6 +1830,7 @@ def run_review_phase(
             inline_patch=False,
             context_mode="artifact_refs",
             inline_diff_stat=False,
+            task_context_mode=prepared_task_context.mode,
         )
         _write_review_stage_artifacts(
             state=state,
@@ -2050,6 +2088,7 @@ def _run_finalize_phase(
 
 def build_planner_prompt(state: TaskState) -> str:
     """Construct the stdin prompt for the configured planner provider."""
+    config = state.config
     completed_steps = []
     graph = ensure_task_graph(state)
     if graph is not None:
@@ -2077,52 +2116,15 @@ def build_planner_prompt(state: TaskState) -> str:
 
     granularity = _planner_granularity_for_prompt(state)
     granularity_section = planner_granularity_prompt_section(granularity).strip()
-    dynamic_marker = "## Dynamic Planner Payload"
 
     stable_prefix = (
-        "You are the cc-loop planner. Analyze the task goal and repository checkout.\n"
-        "\n"
-        "## Output Format\n"
-        "Return raw JSON only. Do not wrap in markdown fences. Do not add commentary.\n"
-        "\n"
-        "## Preferred Task Graph Shape\n"
-        "{\n"
-        '  "mode": "task_graph",\n'
-        '  "summary": "Short summary of the implementation strategy",\n'
-        '  "nodes": [\n'
-        "    {\n"
-        '      "id": "T1",\n'
-        '      "title": "Set up project structure",\n'
-        '      "description": "Create the package skeleton and baseline docs.",\n'
-        '      "kind": "implementation",\n'
-        '      "owner": "implementer",\n'
-        '      "dependencies": [],\n'
-        '      "acceptance_criteria": ["pyproject.toml exists"],\n'
-        '      "files_scope": ["pyproject.toml", "src/"]\n'
-        "    }\n"
-        "  ],\n"
-        '  "is_final_step": false\n'
-        "}\n"
-        "\n"
-        "## Legacy Single-Step Shape\n"
-        "{\n"
-        '  "prompt": "Detailed implementation prompt for the implementer provider",\n'
-        '  "expected_changes": "Expected files or areas",\n'
-        '  "acceptance_criteria": "How this step will be judged",\n'
-        '  "is_final_step": false\n'
-        "}\n"
-        "\n"
-        "## Task Graph Rules\n"
-        "- Prefer task_graph mode when decomposition reduces risk or clarifies ownership.\n"
-        "- Each node must have a unique id, title, description, and acceptance_criteria.\n"
-        "- Use dependencies to order work; do not duplicate completed steps or existing repo functionality.\n"
-        "- Set is_final_step true only when the entire goal is complete after this plan.\n"
-        "\n"
-        "## Planner Granularity\n"
-        f"{granularity_section}\n"
-        "\n"
-        f"{dynamic_marker}\n"
-        "Everything below this line is task-specific. Use it as context for planning.\n"
+        load_prompt_fragment("planner/stable_prefix.txt", config=config)
+        + load_prompt_fragment("planner/task_graph_schema.txt", config=config)
+        + load_prompt_fragment("planner/legacy_schema.txt", config=config)
+        + load_prompt_fragment("planner/graph_rules.txt", config=config)
+        + "## Planner Granularity\n"
+        f"{granularity_section}\n\n"
+        + load_prompt_fragment("planner/dynamic_intro.txt", config=config)
     )
 
     dynamic_payload = (
@@ -2138,101 +2140,58 @@ def build_planner_prompt(state: TaskState) -> str:
     return stable_prefix + dynamic_payload
 
 
-_IMPLEMENTER_STABLE_CONTRACT = (
-    "You are the cc-loop implementer. Apply the planned changes in this worktree checkout.\n"
-    "\n"
-    "## Implementer Contract\n"
-    "- Keep changes scoped to the assigned work; do not expand scope.\n"
-    "- Do not perform unrelated refactors or drive-by edits.\n"
-    "- Do not undo user changes or completed dependency work.\n"
-    "- Add or update tests when the change warrants them.\n"
-    "- Do not weaken existing tests or documented contracts.\n"
-    "- Preserve existing code patterns and conventions in this repository.\n"
-)
-
 TASK_IMPLEMENTER_CONTEXT_MARKER = "## Task Implementer Context"
 DYNAMIC_IMPLEMENTER_MARKER = "## Dynamic Implementer Payload"
 
 
-def _build_task_implementer_context_section(
-    *,
+def build_implementer_prompt(
     state: TaskState,
     plan_json: dict[str, Any],
+    *,
     attempt: AttemptRecord | None = None,
+    task_context_section: str | None = None,
+    config: LoopConfig | None = None,
 ) -> str:
-    graph = ensure_task_graph(state)
-    if graph is not None and attempt is not None and attempt.graph_node_id:
-        node = get_node(graph, attempt.graph_node_id)
-        if node is not None:
-            return _build_node_implementer_task_context(state, graph, node)
+    """Construct the prompt for the configured implementer provider."""
+    config = config or state.config
+    if task_context_section is None:
+        attempt = attempt or AttemptRecord(
+            iteration=state.iteration,
+            retry=0,
+            created_at=utc_now_iso(),
+            base_commit=state.base_commit,
+        )
+        payload = build_task_context_payload(state=state, attempt=attempt, plan_json=plan_json)
+        task_context_section = render_inline_task_context(
+            role="implementer",
+            payload=payload,
+            config=config,
+            marker=TASK_IMPLEMENTER_CONTEXT_MARKER,
+        )
 
-    lines = [
-        TASK_IMPLEMENTER_CONTEXT_MARKER,
-        "Everything in this section is task-scoped and should remain stable across retries of the same step.",
-        f"Goal: {state.goal}",
-        "",
-        "Implementation prompt:",
-        str(plan_json.get("prompt", "")).strip(),
-    ]
-
-    expected_changes = str(plan_json.get("expected_changes", "")).strip()
-    if expected_changes:
-        lines.extend(["", "Expected changes:", expected_changes])
-
-    acceptance_criteria = str(plan_json.get("acceptance_criteria", "")).strip()
-    if acceptance_criteria:
-        lines.extend(["", "Acceptance criteria:", acceptance_criteria])
-
-    return "\n".join(lines).strip() + "\n\n"
-
-
-def _build_node_implementer_task_context(state: TaskState, graph, node) -> str:
-    dep_lines = completed_dependency_labels(graph, node.id)
-    criteria = node.acceptance_criteria or ["(none specified)"]
-    files_scope = node.files_scope or ["(not restricted)"]
-
-    lines = [
-        TASK_IMPLEMENTER_CONTEXT_MARKER,
-        "Everything in this section is task/node-scoped and should remain stable across retries of the same node.",
-        "You are implementing one node from a task graph.",
-        "",
-        f"Project goal: {state.goal}",
-        f"Graph summary: {graph.summary or '(none)'}",
-        "",
-        f"Current node: {node.id} — {node.title}",
-        f"Node description: {node.description or '(none)'}",
-        f"Node kind: {node.kind.value}",
-        f"Node owner: {node.owner}",
-        "",
-        "Acceptance criteria:",
-        *[f"- {item}" for item in criteria],
-        "",
-        "Files scope:",
-        *[f"- {item}" for item in files_scope],
-    ]
-
-    if dep_lines:
-        lines.extend(["", "Completed dependencies:", *[f"- {line}" for line in dep_lines]])
-
-    lines.extend(
-        [
-            "",
-            "Node instructions:",
-            "- Focus on this node.",
-            "- Implement only this node's scope unless a small adjacent change is necessary.",
-        ]
+    stable_contract = load_prompt_fragment("implementer/stable_contract.txt", config=config).strip()
+    dynamic_intro = load_prompt_fragment("implementer/dynamic_intro.txt", config=config).strip()
+    dynamic_payload = _build_implementer_dynamic_payload(
+        state=state,
+        attempt=attempt,
+        dynamic_intro=dynamic_intro,
+        config=config,
     )
-    return "\n".join(lines).strip() + "\n\n"
+    return (stable_contract + "\n\n" + task_context_section + dynamic_payload).strip() + "\n"
 
 
 def _build_implementer_dynamic_payload(
     *,
     state: TaskState,
     attempt: AttemptRecord | None = None,
+    dynamic_intro: str | None = None,
+    config: LoopConfig | None = None,
 ) -> str:
+    config = config or state.config
+    intro = dynamic_intro or load_prompt_fragment("implementer/dynamic_intro.txt", config=config).strip()
     lines = [
         DYNAMIC_IMPLEMENTER_MARKER,
-        "Everything below this line changes per attempt.",
+        intro,
         f"Task ID: {state.task_id}",
         f"Iteration: {state.iteration}",
     ]
@@ -2241,22 +2200,6 @@ def _build_implementer_dynamic_payload(
         if attempt.graph_node_id:
             lines.append(f"Graph node: {attempt.graph_node_id}")
     return "\n".join(lines).strip() + "\n"
-
-
-def build_implementer_prompt(
-    state: TaskState,
-    plan_json: dict[str, Any],
-    *,
-    attempt: AttemptRecord | None = None,
-) -> str:
-    """Construct the prompt for the configured implementer provider."""
-    task_context = _build_task_implementer_context_section(
-        state=state,
-        plan_json=plan_json,
-        attempt=attempt,
-    )
-    dynamic_payload = _build_implementer_dynamic_payload(state=state, attempt=attempt)
-    return (_IMPLEMENTER_STABLE_CONTRACT + "\n\n" + task_context + dynamic_payload).strip() + "\n"
 
 
 TASK_REVIEW_CONTEXT_MARKER = "## Task Review Context"
@@ -2313,48 +2256,17 @@ def _build_task_review_context_section(
     *,
     state: TaskState,
     attempt: AttemptRecord,
+    config: LoopConfig | None = None,
 ) -> str:
-    graph = ensure_task_graph(state)
-    lines = [
-        TASK_REVIEW_CONTEXT_MARKER,
-        "Everything in this section is task/node-scoped and should remain stable across retries of the same node.",
-        f"Task goal: {state.goal}",
-    ]
-    if graph is not None and attempt.graph_node_id:
-        node = get_node(graph, attempt.graph_node_id)
-        if node is not None:
-            criteria = node.acceptance_criteria or ["(none specified)"]
-            files_scope = node.files_scope or ["(none specified)"]
-            dep_lines = completed_dependency_labels(graph, attempt.graph_node_id)
-            lines.extend(
-                [
-                    f"Graph node: {node.id}",
-                    f"Node title: {node.title}",
-                    f"Node kind: {node.kind.value}",
-                    f"Node description: {node.description or '(none)'}",
-                    "Acceptance criteria:",
-                    *[f"- {item}" for item in criteria],
-                    "Files scope:",
-                    *[f"- {item}" for item in files_scope],
-                ]
-            )
-            if dep_lines:
-                lines.append("Completed dependencies:")
-                lines.extend(f"- {line}" for line in dep_lines)
-            lines.append(
-                "Review whether this graph node is complete — not whether the entire project is complete."
-            )
-        else:
-            lines.extend(
-                [
-                    f"Graph node: {attempt.graph_node_id}",
-                    "Node title: (unknown node)",
-                ]
-            )
-    else:
-        lines.append("Graph node: legacy single-step")
-
-    return "\n".join(lines) + "\n\n"
+    """Build inline reviewer task context (used by tests and inline mode)."""
+    config = config or state.config
+    payload = build_task_context_payload(state=state, attempt=attempt)
+    return render_inline_task_context(
+        role="reviewer",
+        payload=payload,
+        config=config,
+        marker=TASK_REVIEW_CONTEXT_MARKER,
+    )
 
 
 def _format_diff_stat_section(
@@ -2404,6 +2316,7 @@ def build_reviewer_prompt(
     patch_paths: list[Path] | None = None,
     inline_patch: bool | None = None,
     context_mode: str | None = None,
+    task_context_section: str | None = None,
 ) -> str:
     """Construct the reviewer prompt with bounded diff context.
 
@@ -2441,57 +2354,23 @@ def build_reviewer_prompt(
 
     allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
     contract_prefix = (
-        "You are the cc-loop reviewer.\n"
-        "\n"
-        "## Stable Review Contract\n"
-        "Review one implementation attempt and decide whether it is safe to merge.\n"
-        "Judge only the current graph node when a graph node is provided.\n"
-        "Prefer precise, actionable feedback over broad commentary.\n"
-        "Do not request unrelated refactors, style churn, or work outside the scoped node.\n"
-        "Treat generated caches, build artifacts, and unrelated file churn as review findings.\n"
-        "Before approving, you must inspect test status and diff/patch evidence.\n"
-        "When patch or diff stat content is not inlined, read the listed artifact paths or inspect the worktree git diff.\n"
-        "Do not approve solely because patch text is omitted from the prompt.\n"
-        f"Default to reject when tests failed or timed_out unless allow_merge_without_tests is enabled "
-        f"(currently {allow_merge_without_tests}).\n"
-        "\n"
-        "## Stable Review Rubric\n"
-        "- Verify the implementation satisfies the stated acceptance criteria.\n"
-        "- Verify tests passed, or explain why the attempt must not merge.\n"
-        "- Verify the changed files match the declared scope and do not undo completed dependency work.\n"
-        "- Verify the patch does not weaken existing behavior, tests, safety checks, or documented contracts.\n"
-        "- Reject if this node re-implements functionality already delivered by completed dependency nodes.\n"
-        "- Approve only when the attempt is complete, scoped, tested, and merge-ready.\n"
-        "- Reject when the attempt is fixable by another implementation pass.\n"
-        "- Stop only when the task is blocked by missing requirements or external input.\n"
-        "- Replan when the task graph or decomposition must change before implementation can continue.\n"
-        "\n"
-        "## Stable JSON Output Contract\n"
-        "Respond with JSON only using this exact shape:\n"
-        "{\n"
-        '  "decision": "approve",\n'
-        '  "reason": "Why this attempt is acceptable or not",\n'
-        '  "issues": [],\n'
-        '  "retry_prompt": "",\n'
-        '  "stop_reason": "",\n'
-        '  "inspected_artifacts": [],\n'
-        '  "inspected_files": [],\n'
-        '  "test_status_checked": true\n'
-        "}\n"
-        'Allowed decisions: "approve", "reject", "stop", "replan".\n'
-        'For "approve", keep issues empty and retry_prompt empty.\n'
-        'For "reject", include concise issues and a retry_prompt the implementer can execute.\n'
-        'For "stop", include stop_reason.\n'
-        'For "replan", include replan_reason and replan_prompt or suggested_changes.\n'
-        "Set inspected_artifacts to artifact paths you reviewed.\n"
-        "Set inspected_files to changed file paths you verified.\n"
-        "Set test_status_checked true only after reading test status/output evidence.\n"
-        "\n"
+        load_prompt_fragment(
+            "reviewer/stable_contract.txt",
+            config=config,
+            allow_merge_without_tests=allow_merge_without_tests,
+        )
+        + load_prompt_fragment("reviewer/review_rubric.txt", config=config)
+        + load_prompt_fragment("reviewer/json_output_contract.txt", config=config)
     )
-    task_context = _build_task_review_context_section(state=state, attempt=attempt)
+    task_context = task_context_section or _build_task_review_context_section(
+        state=state,
+        attempt=attempt,
+        config=config,
+    )
+    dynamic_intro = load_prompt_fragment("reviewer/dynamic_intro.txt", config=config).strip()
     dynamic_payload = (
         f"{DYNAMIC_REVIEW_MARKER}\n"
-        "Everything below this line may change on every attempt.\n"
+        f"{dynamic_intro}\n"
         "\n"
         "### Attempt metadata\n"
         f"- Task ID: {state.task_id}\n"
@@ -2553,6 +2432,7 @@ def build_fast_reviewer_prompt(
     artifact_paths: dict[str, Path] | None = None,
     patch_paths: list[Path] | None = None,
     patch_body_chars: int = 0,
+    task_context_section: str | None = None,
 ) -> str:
     """Construct a cache-friendly fast reviewer prompt using artifact refs only."""
     config = config or state.config
@@ -2577,35 +2457,18 @@ def build_fast_reviewer_prompt(
         selected_patch_paths = format_patch_path_list(list(patch_paths or []))
 
     contract_prefix = (
-        "You are the cc-loop fast reviewer.\n"
-        "\n"
-        "## Fast Review Contract\n"
-        "Perform a lightweight review using artifact references only.\n"
-        "Approve when tests passed, the diff summary looks scoped, and there are no obvious red flags.\n"
-        "Escalate to deep review when correctness, security, or scope needs inline patch inspection.\n"
-        "Reject when tests failed or the attempt is clearly not merge-ready.\n"
-        "Stop only when blocked by missing requirements.\n"
-        "\n"
-        "## Fast JSON Output Contract\n"
-        "Respond with JSON only:\n"
-        "{\n"
-        '  "decision": "approve",\n'
-        '  "reason": "Why this attempt is acceptable, needs escalation, or must not merge",\n'
-        '  "issues": [],\n'
-        '  "retry_prompt": "",\n'
-        '  "stop_reason": "",\n'
-        '  "inspected_artifacts": [],\n'
-        '  "test_status_checked": true\n'
-        "}\n"
-        'Allowed decisions: "approve", "escalate", "reject", "stop".\n'
-        'Use "escalate" when deep inline patch review is required.\n'
-        "\n"
+        load_prompt_fragment("reviewer/fast_contract.txt", config=config)
+        + load_prompt_fragment("reviewer/fast_json_contract.txt", config=config)
     )
-    task_context = _build_task_review_context_section(state=state, attempt=attempt)
+    task_context = task_context_section or _build_task_review_context_section(
+        state=state,
+        attempt=attempt,
+        config=config,
+    )
+    fast_dynamic_intro = load_prompt_fragment("reviewer/fast_dynamic_intro.txt", config=config).strip()
     dynamic_payload = (
         f"{DYNAMIC_REVIEW_MARKER}\n"
-        "Fast review evidence (artifact refs only).\n"
-        "\n"
+        f"{fast_dynamic_intro}\n"
         "### Attempt metadata\n"
         f"- Task ID: {state.task_id}\n"
         f"- Iteration: {attempt.iteration}\n"
@@ -2646,8 +2509,10 @@ def build_implementer_prompt_metrics(
     *,
     prompt: str,
     layout: str = "legacy-single-step-v1",
+    task_context_mode: str = "inline",
 ) -> dict[str, Any]:
     """Return cache/cost layout metrics for an implementer prompt artifact."""
+    inline_task_context = task_context_mode == "inline"
     task_context_index = prompt.find(TASK_IMPLEMENTER_CONTEXT_MARKER)
     dynamic_index = prompt.find(DYNAMIC_IMPLEMENTER_MARKER)
     contract_prefix_chars = (
@@ -2669,6 +2534,8 @@ def build_implementer_prompt_metrics(
         "implementer_layout": layout,
         "dynamic_payload_marker": DYNAMIC_IMPLEMENTER_MARKER,
         "task_implementer_context_marker": TASK_IMPLEMENTER_CONTEXT_MARKER,
+        "task_context_mode": task_context_mode,
+        "inline_task_context": inline_task_context,
         "prompt_chars": len(prompt),
         "contract_prefix_chars": contract_prefix_chars,
         "contract_prefix_ratio": contract_prefix_ratio,
@@ -2711,8 +2578,10 @@ def build_reviewer_prompt_metrics(
     inline_patch: bool = True,
     context_mode: str = "inline",
     inline_diff_stat: bool | None = None,
+    task_context_mode: str = "inline",
 ) -> dict[str, Any]:
     """Return cache/cost layout metrics for a reviewer prompt artifact."""
+    inline_task_context = task_context_mode == "inline"
     if inline_diff_stat is None:
         inline_diff_stat = _should_inline_diff_stat(context_mode=context_mode, inline_patch=inline_patch)
 
@@ -2752,6 +2621,8 @@ def build_reviewer_prompt_metrics(
         "inline_diff_stat": inline_diff_stat,
         "dynamic_payload_marker": DYNAMIC_REVIEW_MARKER,
         "task_review_context_marker": TASK_REVIEW_CONTEXT_MARKER,
+        "task_context_mode": task_context_mode,
+        "inline_task_context": inline_task_context,
         "prompt_chars": len(prompt),
         "contract_prefix_chars": contract_prefix_chars,
         "contract_prefix_ratio": contract_prefix_ratio,

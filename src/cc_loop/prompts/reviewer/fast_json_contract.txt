@@ -1,0 +1,13 @@
+## Fast JSON Output Contract
+Respond with JSON only:
+{
+  "decision": "approve",
+  "reason": "Why this attempt is acceptable, needs escalation, or must not merge",
+  "issues": [],
+  "retry_prompt": "",
+  "stop_reason": "",
+  "inspected_artifacts": [],
+  "test_status_checked": true
+}
+Allowed decisions: "approve", "escalate", "reject", "stop".
+Use "escalate" when deep inline patch review is required.

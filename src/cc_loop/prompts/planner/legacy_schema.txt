@@ -1,0 +1,7 @@
+## Legacy Single-Step Shape
+{
+  "prompt": "Detailed implementation prompt for the implementer provider",
+  "expected_changes": "Expected files or areas",
+  "acceptance_criteria": "How this step will be judged",
+  "is_final_step": false
+}

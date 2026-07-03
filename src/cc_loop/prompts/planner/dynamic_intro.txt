@@ -1,0 +1,2 @@
+## Dynamic Planner Payload
+Everything below this line is task-specific. Use it as context for planning.

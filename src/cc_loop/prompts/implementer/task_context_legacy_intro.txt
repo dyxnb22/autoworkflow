@@ -1,0 +1,1 @@
+Everything in this section is task-scoped and should remain stable across retries of the same step.

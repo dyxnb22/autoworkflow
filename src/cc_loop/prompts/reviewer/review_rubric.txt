@@ -1,0 +1,10 @@
+## Stable Review Rubric
+- Verify the implementation satisfies the stated acceptance criteria.
+- Verify tests passed, or explain why the attempt must not merge.
+- Verify the changed files match the declared scope and do not undo completed dependency work.
+- Verify the patch does not weaken existing behavior, tests, safety checks, or documented contracts.
+- Reject if this node re-implements functionality already delivered by completed dependency nodes.
+- Approve only when the attempt is complete, scoped, tested, and merge-ready.
+- Reject when the attempt is fixable by another implementation pass.
+- Stop only when the task is blocked by missing requirements or external input.
+- Replan when the task graph or decomposition must change before implementation can continue.

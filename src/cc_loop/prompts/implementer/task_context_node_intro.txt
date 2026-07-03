@@ -1,0 +1,2 @@
+Everything in this section is task/node-scoped and should remain stable across retries of the same node.
+You are implementing one node from a task graph.

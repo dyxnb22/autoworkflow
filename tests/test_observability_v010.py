@@ -91,6 +91,7 @@ class PromptMetadataTests(unittest.TestCase):
         )
         self.assertEqual(paths["review_prompt_meta"], Path("/tmp/artifacts/review.prompt.meta.json"))
         self.assertEqual(paths["attempt_trace"], Path("/tmp/artifacts/attempt.trace.json"))
+        self.assertEqual(paths["task_context"], Path("/tmp/artifacts/task.context.json"))
 
     def test_build_prompt_metadata_defaults(self) -> None:
         attempt = _attempt_record(graph_node_id="T1")
