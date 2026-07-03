@@ -632,11 +632,47 @@ class HeartbeatStatusEnrichmentTests(unittest.TestCase):
                 iteration=1,
                 running_provider="cursor",
             )
-            snapshot = build_status_snapshot(load_state("hb-enrich", env.state_root()), env.state_root())
+            with mock.patch("cc_loop.inspect.is_runner_alive", return_value=(True, 4242)):
+                snapshot = build_status_snapshot(load_state("hb-enrich", env.state_root()), env.state_root())
             self.assertEqual(snapshot["attempt"]["phase"], "executing")
             self.assertEqual(snapshot["attempt"]["running_provider"], "cursor")
             self.assertEqual(snapshot["current_message"], "Implementer running (cursor)")
             self.assertIn("heartbeat", snapshot)
+        finally:
+            env.close()
+
+    def test_fresh_heartbeat_does_not_override_state_when_runner_inactive(self) -> None:
+        env = TempEnv()
+        try:
+            make_task(repo=env.repo(), state_root=env.state_root(), task_id="hb-inactive")
+            state = load_state("hb-inactive", env.state_root())
+            state.status = TaskStatus.STOPPED
+            state.history = [
+                AttemptRecord(
+                    iteration=1,
+                    retry=0,
+                    created_at=utc_now_iso(),
+                    base_commit=state.base_commit,
+                    phase=AttemptPhase.WORKTREE_CREATED,
+                    running_provider="",
+                )
+            ]
+            save_state(state, env.state_root())
+            refresh_heartbeat(
+                env.state_root(),
+                task_id="hb-inactive",
+                pid=4242,
+                status="running",
+                phase="executing",
+                iteration=1,
+                running_provider="cursor",
+            )
+            with mock.patch("cc_loop.inspect.is_runner_alive", return_value=(False, 4242)):
+                snapshot = build_status_snapshot(load_state("hb-inactive", env.state_root()), env.state_root())
+            self.assertFalse(snapshot["running"])
+            self.assertEqual(snapshot["attempt"]["phase"], "worktree_created")
+            self.assertEqual(snapshot["attempt"]["running_provider"], "")
+            self.assertNotEqual(snapshot["current_message"], "Implementer running (cursor)")
         finally:
             env.close()
 

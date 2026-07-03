@@ -121,8 +121,8 @@ def _observability_section(
             "layout": metrics.get("layout"),
             "stable_prefix_ratio": metrics.get("stable_prefix_ratio"),
             "cache_health": metrics.get("cache_health"),
-        "total_prompt_cache_health": metrics.get("total_prompt_cache_health"),
-        "contract_prefix_ratio": metrics.get("contract_prefix_ratio"),
+            "total_prompt_cache_health": metrics.get("total_prompt_cache_health"),
+            "contract_prefix_ratio": metrics.get("contract_prefix_ratio"),
             "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
         }
 

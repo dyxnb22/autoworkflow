@@ -81,7 +81,12 @@ def _resolve_live_attempt_fields(
         return "", ""
     phase = attempt.phase.value
     running_provider = attempt.running_provider or ""
-    if hb is None or is_heartbeat_stale(hb, stale_seconds=stale_seconds):
+    if (
+        not running
+        or hb is None
+        or hb.status not in {"running", "replanning"}
+        or is_heartbeat_stale(hb, stale_seconds=stale_seconds)
+    ):
         return phase, running_provider
     if hb.running_provider:
         running_provider = hb.running_provider
