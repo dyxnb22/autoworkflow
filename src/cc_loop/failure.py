@@ -25,6 +25,8 @@ class FailureType(StrEnum):
     MERGE_PERMISSION = "merge_permission"
     MERGE_UNKNOWN = "merge_unknown"
     PROVIDER_TIMEOUT = "provider_timeout"
+    PROVIDER_INTERRUPTED = "provider_interrupted"
+    PROVIDER_HUNG = "provider_hung"
     PROVIDER_EXIT_ERROR = "provider_exit_error"
     PROVIDER_PARSE_ERROR = "provider_parse_error"
     TEST_IMPLEMENTATION = "test_implementation"
@@ -207,6 +209,8 @@ def classify_provider_failure(
     provider: str,
     exit_code: int | None = None,
     timed_out: bool = False,
+    interrupted: bool = False,
+    hung: bool = False,
     parse_error: str = "",
 ) -> FailureReport:
     if parse_error:
@@ -216,6 +220,22 @@ def classify_provider_failure(
             message=parse_error,
             details={"phase": phase, "provider": provider},
             suggested_actions=["Inspect provider raw artifacts and fix prompt/output contract"],
+        )
+    if interrupted:
+        return FailureReport(
+            failure_type=FailureType.PROVIDER_INTERRUPTED,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message=f"{provider} interrupted during {phase}",
+            details={"phase": phase, "provider": provider, "exit_code": exit_code},
+            suggested_actions=["Resume the task after verifying no duplicate provider is running"],
+        )
+    if hung:
+        return FailureReport(
+            failure_type=FailureType.PROVIDER_HUNG,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message=f"{provider} hung during {phase} and was force-killed",
+            details={"phase": phase, "provider": provider, "exit_code": exit_code},
+            suggested_actions=["Inspect runner.log and subprocess.result.json", "Resume or cancel before retrying"],
         )
     if timed_out:
         return FailureReport(

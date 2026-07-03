@@ -51,6 +51,14 @@ from cc_loop.state import (
     worktree_path,
 )
 from cc_loop.subprocess_util import run_with_timeout
+from cc_loop.planner_granularity import planner_granularity_prompt_section, resolve_planner_granularity
+from cc_loop.provider_runtime import (
+    provider_argv_from_result,
+    run_provider_with_heartbeat,
+    write_command_argv_artifact,
+    write_subprocess_result_artifact,
+)
+from cc_loop.runner_heartbeat import mark_heartbeat_terminal
 from cc_loop.trace import estimate_tokens_from_path, update_trace_phase
 from cc_loop.task_graph import (
     completed_dependency_labels,
@@ -125,6 +133,7 @@ def execute_resume(state: TaskState, state_root: Path) -> tuple[TaskState, Attem
         raise ResumeError(f"task {state.task_id} has no attempt history to resume")
 
     attempt = _current_attempt(state)
+    _ensure_safe_stale_resume(state, state_root, attempt)
     if attempt.phase == AttemptPhase.REJECTED:
         if _retry_remaining(state, attempt):
             state, attempt, artifact_paths = _begin_retry_attempt(state, state_root, attempt)
@@ -148,6 +157,113 @@ def execute_resume(state: TaskState, state_root: Path) -> tuple[TaskState, Attem
     state.status = TaskStatus.RUNNING
     save_state(state, state_root)
     return _run_from_phase(state, state_root, attempt, artifact_paths, start_phase=attempt.phase)
+
+
+def _ensure_safe_stale_resume(state: TaskState, state_root: Path, attempt: AttemptRecord) -> None:
+    from cc_loop.inspect import is_runner_alive
+    from cc_loop.runner_control import runner_state_label
+
+    stale_seconds = int(state.config.get("stale_heartbeat_seconds", 120) or 120)
+    runner_state = runner_state_label(state_root, state.task_id, stale_heartbeat_seconds=stale_seconds)
+    if runner_state != "stale_heartbeat":
+        return
+    if attempt.phase not in {
+        AttemptPhase.EXECUTING,
+        AttemptPhase.PLANNING,
+        AttemptPhase.REVIEWING,
+        AttemptPhase.TESTING,
+    }:
+        return
+
+    running, pid = is_runner_alive(state_root, state.task_id)
+    if running and pid is not None:
+        raise ResumeError(
+            f"stale heartbeat while runner pid {pid} is still alive at phase {attempt.phase.value}; "
+            "run `cc-loop cancel` or `cc-loop stop` before resuming to avoid duplicate providers"
+        )
+
+    append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=EventType.FAILURE_RECORDED,
+        iteration=attempt.iteration,
+        retry=attempt.retry,
+        graph_node_id=attempt.graph_node_id,
+        message="stale heartbeat recovery: no live runner detected; resume allowed",
+    )
+
+
+def _invoke_provider(
+    *,
+    provider,
+    provider_name: str,
+    phase_key: str,
+    state: TaskState,
+    state_root: Path,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    worktree: Path,
+    prompt: str,
+    output_path: Path,
+    config: LoopConfig,
+    timeout_seconds: int,
+    raw_output_path: Path | None = None,
+    print_only: bool = False,
+) -> ProviderRunResult:
+    argv = provider_argv_from_result(
+        provider,
+        worktree_path=worktree,
+        prompt=prompt,
+        output_path=output_path,
+        config=config,
+    )
+    artifact_root = artifact_paths["plan_prompt"].parent
+    write_command_argv_artifact(artifact_root, phase=phase_key, argv=argv)
+    run_result = run_provider_with_heartbeat(
+        provider,
+        state_root=state_root,
+        state=state,
+        attempt=attempt,
+        worktree_path=worktree,
+        prompt=prompt,
+        output_path=output_path,
+        config=config,
+        timeout_seconds=timeout_seconds,
+        raw_output_path=raw_output_path,
+        print_only=print_only,
+    )
+    write_subprocess_result_artifact(
+        artifact_root,
+        phase=phase_key,
+        result=run_result,
+        stdout_path=str(run_result.raw_artifact_path),
+    )
+    return run_result
+
+
+def _provider_failure_report(
+    *,
+    provider_name: str,
+    phase: str,
+    run_result: ProviderRunResult,
+) -> FailureReport:
+    hung = bool(
+        getattr(run_result, "hung", False)
+        or (
+            run_result.killed
+            and not run_result.timed_out
+            and not run_result.interrupted
+            and run_result.exit_code != 0
+        )
+    )
+    return classify_provider_failure(
+        phase=phase,
+        provider=provider_name,
+        exit_code=run_result.exit_code,
+        timed_out=run_result.timed_out,
+        interrupted=run_result.interrupted,
+        hung=hung,
+    )
 
 
 def execute_replan(
@@ -184,8 +300,15 @@ def execute_replan(
     provider = get_provider(provider_name)
     timeout_seconds = _planner_timeout_seconds(config, provider_name)
     print_only = provider_name == "claude-code"
-    run_result = provider.run(
-        worktree_path=worktree,
+    run_result = _invoke_provider(
+        provider=provider,
+        provider_name=provider_name,
+        phase_key="planner",
+        state=state,
+        state_root=state_root,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        worktree=worktree,
         prompt=prompt,
         output_path=artifact_paths["plan_last_message"],
         config=config,
@@ -522,8 +645,15 @@ def run_planning_phase(
     timeout_seconds = _planner_timeout_seconds(config, provider_name)
     print_only = provider_name == "claude-code"
     try:
-        run_result = provider.run(
-            worktree_path=worktree,
+        run_result = _invoke_provider(
+            provider=provider,
+            provider_name=provider_name,
+            phase_key="planner",
+            state=state,
+            state_root=state_root,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            worktree=worktree,
             prompt=prompt,
             output_path=artifact_paths["plan_last_message"],
             config=config,
@@ -537,11 +667,21 @@ def run_planning_phase(
 
     _write_planning_artifacts_after(artifact_paths=artifact_paths, run_result=run_result)
 
-    if run_result.timed_out:
-        _mark_planning_failed(state, state_root)
-        raise PlanningError(f"{provider_name} planner timed out")
-
-    if run_result.exit_code != 0:
+    if run_result.timed_out or run_result.interrupted or run_result.exit_code != 0:
+        report = _provider_failure_report(
+            provider_name=provider_name,
+            phase=AttemptPhase.PLANNING.value,
+            run_result=run_result,
+        )
+        persist_failure_state(state, attempt, report, artifact_paths)
+        mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+        save_state(state, state_root)
+        if run_result.timed_out:
+            _mark_planning_failed(state, state_root)
+            raise PlanningError(f"{provider_name} planner timed out")
+        if run_result.interrupted:
+            _mark_planning_failed(state, state_root)
+            raise PlanningError(f"{provider_name} planner interrupted")
         _mark_planning_failed(state, state_root)
         raise PlanningError(f"{provider_name} planner exited with code {run_result.exit_code}")
 
@@ -785,8 +925,15 @@ def run_implementer_phase(
 
     timeout_seconds = _implementer_timeout_seconds(config, provider_name)
     try:
-        run_result = provider.run(
-            worktree_path=worktree,
+        run_result = _invoke_provider(
+            provider=provider,
+            provider_name=provider_name,
+            phase_key="implementer",
+            state=state,
+            state_root=state_root,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            worktree=worktree,
             prompt=prompt,
             output_path=artifact_paths["implementer_raw"],
             config=config,
@@ -826,6 +973,14 @@ def run_implementer_phase(
     save_state(state, state_root)
 
     if run_result.timed_out:
+        report = _provider_failure_report(
+            provider_name=provider_name,
+            phase=AttemptPhase.EXECUTING.value,
+            run_result=run_result,
+        )
+        persist_failure_state(state, attempt, report, artifact_paths)
+        mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+        save_state(state, state_root)
         _update_implementer_trace(
             state=state,
             attempt=attempt,
@@ -837,6 +992,18 @@ def run_implementer_phase(
         )
         _mark_implementer_failed(state, state_root)
         raise ImplementingError(f"{provider_name} implementer timed out")
+
+    if run_result.interrupted:
+        report = _provider_failure_report(
+            provider_name=provider_name,
+            phase=AttemptPhase.EXECUTING.value,
+            run_result=run_result,
+        )
+        persist_failure_state(state, attempt, report, artifact_paths)
+        mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+        save_state(state, state_root)
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(f"{provider_name} implementer interrupted")
 
     if run_result.exit_code != 0:
         _update_implementer_trace(
@@ -915,11 +1082,20 @@ def run_test_phase(
         return state
 
     timeout_seconds = config["test_timeout_seconds"]
+    artifact_root = artifact_paths["plan_prompt"].parent
+    write_command_argv_artifact(artifact_root, phase="test", argv=test_command)
     result = run_with_timeout(
         test_command,
         cwd=str(worktree),
         timeout_seconds=timeout_seconds,
         capture_output=True,
+    )
+    test_stdout_path = str(artifact_paths["test_output"])
+    write_subprocess_result_artifact(
+        artifact_root,
+        phase="test",
+        result=result,
+        stdout_path=test_stdout_path,
     )
     output_lines = [
         f"command: {' '.join(test_command)}",
@@ -1060,8 +1236,15 @@ def run_review_phase(
         timeout_seconds = _reviewer_timeout_seconds(config, provider_name)
         print_only = provider_name == "claude-code"
         try:
-            run_result = provider.run(
-                worktree_path=worktree,
+            run_result = _invoke_provider(
+                provider=provider,
+                provider_name=provider_name,
+                phase_key="reviewer",
+                state=state,
+                state_root=state_root,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                worktree=worktree,
                 prompt=prompt,
                 output_path=last_message_path,
                 config=config,
@@ -1368,6 +1551,9 @@ def build_planner_prompt(state: TaskState) -> str:
                 retry_feedback = f"\n\nPrior attempt was rejected. Reviewer's required changes:\n{rp}"
             break
 
+    granularity = resolve_planner_granularity(state.goal, state.config)
+    granularity_section = planner_granularity_prompt_section(granularity)
+
     return (
         "You are the cc-loop planner. Analyze the task goal and repository checkout.\n"
         "Respond with JSON only. Prefer task graph mode using this shape:\n"
@@ -1402,6 +1588,7 @@ def build_planner_prompt(state: TaskState) -> str:
         f"Base commit: {state.base_commit}\n"
         f"{retry_feedback}"
         f"Iteration: {state.iteration}\n"
+        f"{granularity_section}"
         f"{completed_section}"
     )
 
@@ -1540,6 +1727,7 @@ def build_reviewer_prompt(
         "- Verify tests passed, or explain why the attempt must not merge.\n"
         "- Verify the changed files match the declared scope and do not undo completed dependency work.\n"
         "- Verify the patch does not weaken existing behavior, tests, safety checks, or documented contracts.\n"
+        "- Reject if this node re-implements functionality already delivered by completed dependency nodes.\n"
         "- Approve only when the attempt is complete, scoped, tested, and merge-ready.\n"
         "- Reject when the attempt is fixable by another implementation pass.\n"
         "- Stop only when the task is blocked by missing requirements or external input.\n"
@@ -1786,8 +1974,15 @@ def _run_implementer_with_prompt(
 
     provider = get_provider(provider_name)
     timeout_seconds = _implementer_timeout_seconds(config, provider_name)
-    run_result = provider.run(
-        worktree_path=worktree,
+    run_result = _invoke_provider(
+        provider=provider,
+        provider_name=provider_name,
+        phase_key="implementer",
+        state=state,
+        state_root=state_root,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        worktree=worktree,
         prompt=prompt,
         output_path=artifact_paths["implementer_raw"],
         config=config,
@@ -1833,13 +2028,18 @@ def classify_provider_exception(
     provider: str,
 ) -> FailureReport:
     message = str(exc)
-    timed_out = "timed out" in message.lower()
+    lower = message.lower()
+    timed_out = "timed out" in lower
+    interrupted = "interrupted" in lower
+    hung = "hung" in lower
     return classify_provider_failure(
         phase=phase,
         provider=provider,
         exit_code=None,
         timed_out=timed_out,
-        parse_error=message if "parse failed" in message.lower() else "",
+        interrupted=interrupted,
+        hung=hung,
+        parse_error=message if "parse failed" in lower else "",
     )
 
 

@@ -52,6 +52,8 @@ def recovery_budget_remaining(attempt: AttemptRecord, config: LoopConfig, report
         FailureType.PATCH_NOT_CAPTURED,
         FailureType.PROVIDER_EXIT_ERROR,
         FailureType.PROVIDER_TIMEOUT,
+        FailureType.PROVIDER_INTERRUPTED,
+        FailureType.PROVIDER_HUNG,
         FailureType.REVIEWER_STOP_FIXABLE,
     }:
         if report.failure_type in {
@@ -61,7 +63,12 @@ def recovery_budget_remaining(attempt: AttemptRecord, config: LoopConfig, report
         }:
             if not _config_bool(config, "auto_recover_tests", True):
                 return False
-        if report.failure_type in {FailureType.PROVIDER_EXIT_ERROR, FailureType.PROVIDER_TIMEOUT}:
+        if report.failure_type in {
+            FailureType.PROVIDER_EXIT_ERROR,
+            FailureType.PROVIDER_TIMEOUT,
+            FailureType.PROVIDER_INTERRUPTED,
+            FailureType.PROVIDER_HUNG,
+        }:
             if not _config_bool(config, "auto_recover_provider_errors", True):
                 return False
         return attempt.recovery_retry_count < int(config.get("max_recovery_attempts_per_iteration", 3))

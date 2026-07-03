@@ -114,3 +114,20 @@ def refresh_heartbeat(
     )
     write_heartbeat(state_root, hb)
     return hb
+
+
+def mark_heartbeat_terminal(
+    state_root: Path,
+    task_id: str,
+    *,
+    status: str = "stopped",
+    phase: str = "",
+) -> None:
+    existing = read_heartbeat(state_root, task_id)
+    if existing is None:
+        return
+    existing.updated_at = utc_now_iso()
+    existing.status = status
+    if phase:
+        existing.phase = phase
+    write_heartbeat(state_root, existing)

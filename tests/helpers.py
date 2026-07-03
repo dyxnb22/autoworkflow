@@ -11,18 +11,48 @@ from cc_loop.config import merge_config
 from cc_loop.state import create_initial_state, save_state
 
 
+def _git_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+    }
+
+
 def init_git_repo(path: Path) -> None:
-    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True, text=True)
-    readme = path / "README.md"
-    readme.write_text("initial\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True, text=True)
+    path.mkdir(parents=True, exist_ok=True)
+    if (path / ".git").is_dir():
+        return
+    env = _git_env()
     subprocess.run(
-        ["git", "commit", "-m", "initial"],
+        ["git", "init", "-b", "main"],
         cwd=path,
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@example.com"},
+        env=env,
+    )
+    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True, capture_output=True, text=True, env=env)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    readme = path / "README.md"
+    readme.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True, text=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-m", "initial", "--no-gpg-sign"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
     )
 
 
@@ -50,6 +80,7 @@ def make_task(
         check=True,
         capture_output=True,
         text=True,
+        env=_git_env(),
     ).stdout.strip()
     state = create_initial_state(
         task_id=task_id,
@@ -72,16 +103,16 @@ class TempEnv:
 
     def repo(self) -> Path:
         path = self.root / "repo"
-        path.mkdir()
+        path.mkdir(parents=True, exist_ok=True)
         init_git_repo(path)
         return path
 
     def state_root(self) -> Path:
         path = self.root / "state"
-        path.mkdir()
+        path.mkdir(parents=True, exist_ok=True)
         return path
 
     def worktree_root(self) -> Path:
         path = self.root / "worktrees"
-        path.mkdir()
+        path.mkdir(parents=True, exist_ok=True)
         return path

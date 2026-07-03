@@ -71,7 +71,7 @@ cc-loop init \
   --goal "Implement the requested workflow" \
   --repo /path/to/repo \
   --task-id my-task \
-  --test-command pytest tests/ \
+  --test-command -- python -m pytest tests/ -q \
   --planner claude-code \
   --reviewer claude-code \
   --implementer claude-code \

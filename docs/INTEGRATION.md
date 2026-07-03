@@ -24,7 +24,7 @@ These commands and flags are the integration contract. Other commands exist for 
 | `cc-loop list [--repo PATH] [--json]` | Enumerate tasks |
 | `cc-loop status [--task-id ID] [--json]` | Poll task state |
 | `cc-loop graph [--task-id ID] [--json] [--history]` | Inspect task graph progress (v0.4+); `--history` shows graph mutations (v0.7) |
-| `cc-loop report [--task-id ID] [--json]` | Task report with graph progress, failures, artifacts (v0.6) |
+| `cc-loop report [--task-id ID] [--json] [--format json\|human]` | Task report with graph progress, failures, artifacts (v0.6) |
 | `cc-loop eval --task-id ID --suite PATH [--json]` | Run local eval suite against latest attempt artifacts (v0.10) |
 | `cc-loop export --task-id ID --format jsonl --output PATH` | Export analytics-compatible JSONL rows (v0.10) |
 | `cc-loop stop --task-id ID [--json]` | Stop detached runner (v0.5) |
@@ -47,11 +47,11 @@ Environment:
 ```bash
 cc-loop doctor --repo "$PROJECT_PATH" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --test-command python -m pytest tests/ -q
+  --test-command -- python -m pytest tests/ -q
 
 cc-loop init --goal "..." --repo "$PROJECT_PATH" --task-id "$TASK_ID" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --test-command python -m pytest tests/ -q
+  --test-command -- python -m pytest tests/ -q
 
 cc-loop auto --detach --task-id "$TASK_ID"
 
@@ -266,6 +266,9 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 
 In addition to goal/repo/providers/test-command:
 
+- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. Additional `init`/`doctor` flags may follow the test command. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
+- `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`)
+- `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (config key `provider_watchdog_grace_seconds`, default `5`)
 - `--task-id ID` — explicit task id (recommended for integrations)
 - `--codex-model`, `--cursor-model`, `--claude-code-model`
 - `--cursor-force`, `--cursor-sandbox`
@@ -292,6 +295,8 @@ Each attempt artifact directory may include:
 | `review.prompt.meta.json` | Reviewer prompt metadata |
 | `review.prompt.metrics.json` | Reviewer cache-layout metrics (stable prefix ratio, token estimates) |
 | `attempt.trace.json` | Normalized per-attempt trace with phase status and artifact paths |
+| `command.argv.json` | Executed argv per phase (`planner`, `implementer`, `reviewer`, `test`) |
+| `subprocess.result.json` | Subprocess exit metadata per phase (`exit_code`, `timed_out`, `hung`, `duration_seconds`, `killed`, stdout/stderr paths) |
 
 ### Prompt metadata contract (`schema_version` 1)
 

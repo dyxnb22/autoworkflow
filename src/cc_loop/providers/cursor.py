@@ -76,6 +76,10 @@ class CursorAdapter(ProviderAdapter):
             exit_code=result.returncode,
             raw_artifact_path=output_path,
             timed_out=result.timed_out,
+            interrupted=result.interrupted,
+            killed=result.killed,
+            hung=result.hung,
+            duration_seconds=result.duration_seconds,
         )
 
     def preflight_check_argv(self) -> list[str]:

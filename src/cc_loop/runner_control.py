@@ -145,6 +145,14 @@ def stop_runner(
 def cancel_task(state_root: Path, task_id: str) -> RunnerControlResult:
     stop_result = stop_runner(state_root, task_id)
     state = load_state(task_id, state_root)
+    from cc_loop.task_graph import GraphNodeStatus, ensure_task_graph
+
+    graph = ensure_task_graph(state)
+    if graph is not None:
+        for node in graph.nodes:
+            if node.status == GraphNodeStatus.RUNNING:
+                node.status = GraphNodeStatus.SKIPPED
+                node.notes = (node.notes + "; " if node.notes else "") + "cancelled by user"
     state.status = TaskStatus.CANCELLED
     save_state(state, state_root)
 
@@ -261,11 +269,11 @@ def runner_state_label(
     running, pid = is_runner_alive(state_root, task_id)
     if running:
         return "running"
-    if pid is not None:
-        return "stale_pid"
     hb = read_heartbeat(state_root, task_id)
     if hb is not None and is_heartbeat_stale(hb, stale_seconds=stale_heartbeat_seconds):
         return "stale_heartbeat"
+    if pid is not None:
+        return "stale_pid"
     if hb is not None:
         return "stopped"
     if runner_log_path(state_root, task_id).is_file():
