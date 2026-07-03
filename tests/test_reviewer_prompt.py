@@ -150,11 +150,12 @@ def test_artifact_refs_reviewer_omits_full_diff_stat() -> None:
         context_mode="artifact_refs",
     )
 
-    assert "### Diff stat summary" in prompt
+    assert "### Diff stat artifact" in prompt
     assert "Full diff stat:" in prompt
     assert str(paths["diff_stat"]) in prompt
     assert str(paths["diff_files"]) in prompt
     assert "Changed files: 30" in prompt
+    assert "Preview:" not in prompt
     assert "file-29.py" not in prompt
     assert "30 files changed" not in prompt
 

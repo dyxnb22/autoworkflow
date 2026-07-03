@@ -2370,21 +2370,23 @@ _IMPLEMENTER_STABLE_CONTRACT = (
     "- Do not leave generated fixtures, lockfiles, caches, or bytecode untracked.\n"
     "- Prefer one cohesive implementation commit for the assigned node.\n"
     "\n"
-    "## Dynamic Implementer Payload\n"
-    "Everything below this line is task-specific context for this attempt.\n"
+    "## Stable Implementer Task Context\n"
+    "Everything below this line describes the assigned task or node and should remain stable across retries.\n"
+)
+
+_IMPLEMENTER_DYNAMIC_HEADER = (
+    "\n## Dynamic Implementer Payload\n"
+    "Everything below this line may change on every attempt.\n"
 )
 
 
-def _implementer_dynamic_payload(
+def _implementer_attempt_payload(
     state: TaskState,
     *,
     attempt: AttemptRecord | None = None,
-    plan_json: dict[str, Any] | None = None,
-    node_sections: list[str] | None = None,
 ) -> str:
     sections: list[str] = [
         f"Task ID: {state.task_id}",
-        f"Goal: {state.goal}",
         f"Target repo: {state.target_repo}",
         f"Base branch: {state.base_branch}",
         f"Iteration: {state.iteration}",
@@ -2407,23 +2409,30 @@ def _implementer_dynamic_payload(
     if retry_feedback:
         sections.extend(["", retry_feedback.strip()])
 
+    return "\n".join(sections).strip() + "\n"
+
+
+def _implementer_task_context_payload(
+    state: TaskState,
+    *,
+    plan_json: dict[str, Any] | None = None,
+    node_sections: list[str] | None = None,
+) -> str:
+    sections: list[str] = [
+        f"Goal: {state.goal}",
+    ]
     if node_sections:
         sections.extend(node_sections)
     elif plan_json is not None:
-        sections.extend(
-            [
-                "",
-                "Implementation prompt:",
-                str(plan_json.get("prompt", "")).strip(),
-            ]
-        )
+        implementation_prompt = str(plan_json.get("prompt", "")).strip()
+        if implementation_prompt:
+            sections.extend(["", "Implementation prompt:", implementation_prompt])
         expected_changes = str(plan_json.get("expected_changes", "")).strip()
         if expected_changes:
             sections.extend(["", "Expected changes:", expected_changes])
         acceptance_criteria = str(plan_json.get("acceptance_criteria", "")).strip()
         if acceptance_criteria:
             sections.extend(["", "Acceptance criteria:", acceptance_criteria])
-
     return "\n".join(sections).strip() + "\n"
 
 
@@ -2442,7 +2451,9 @@ def build_implementer_prompt(
 
     sections = [
         _IMPLEMENTER_STABLE_CONTRACT,
-        _implementer_dynamic_payload(state, attempt=attempt, plan_json=plan_json),
+        _implementer_task_context_payload(state, plan_json=plan_json),
+        _IMPLEMENTER_DYNAMIC_HEADER,
+        _implementer_attempt_payload(state, attempt=attempt),
     ]
     return "\n".join(section for section in sections if section).strip() + "\n"
 
@@ -2497,7 +2508,9 @@ def _build_node_implementer_prompt(
 
     return (
         _IMPLEMENTER_STABLE_CONTRACT
-        + _implementer_dynamic_payload(state, attempt=attempt, node_sections=node_sections)
+        + _implementer_task_context_payload(state, node_sections=node_sections)
+        + _IMPLEMENTER_DYNAMIC_HEADER
+        + _implementer_attempt_payload(state, attempt=attempt)
     )
 
 
@@ -2605,11 +2618,30 @@ def _format_diff_stat_section(
     inline_diff_stat: bool,
     diff_stat_path: str,
     diff_files_path: str,
+    compact: bool = False,
 ) -> str:
     if inline_diff_stat:
         return f"### Diff stat\n{diff_stat}\n\n"
 
     summary = summarize_diff_stat(diff_stat)
+    if compact:
+        lines = [
+            "### Diff stat artifact",
+            f"Changed files: {summary['changed_file_count']}",
+        ]
+        if summary["inserted_lines"] is not None:
+            lines.append(f"Insertions: {summary['inserted_lines']}")
+        if summary["deleted_lines"] is not None:
+            lines.append(f"Deletions: {summary['deleted_lines']}")
+        lines.extend(
+            [
+                f"Full diff stat: {diff_stat_path or '(unknown)'}",
+                f"Changed files list: {diff_files_path or '(unknown)'}",
+                "",
+            ]
+        )
+        return "\n".join(lines) + "\n"
+
     preview = "\n".join(summary["preview_lines"]) or "(empty)"
     if summary["truncated"]:
         preview += "\n...(truncated)"
@@ -2667,6 +2699,7 @@ def build_reviewer_prompt(
     test_output_path = ""
     patches_dir = ""
     selected_patch_paths = ""
+    selected_patch_count = 0
     omitted_patch_chars = 0 if inline_patch else patch_body_chars
     omitted_diff_stat_chars = 0 if inline_diff_stat else len(diff_stat)
     estimated_avoided_tokens = _estimated_tokens_from_chars(
@@ -2679,7 +2712,9 @@ def build_reviewer_prompt(
         diff_files_path = str(artifact_paths["diff_files"])
         test_output_path = str(artifact_paths["test_output"])
         patches_dir = str(artifact_paths["patches_dir"])
-        selected_patch_paths = format_patch_path_list(list(patch_paths or []))
+        selected_patch_count = len(list(patch_paths or []))
+        if context_mode == "inline":
+            selected_patch_paths = format_patch_path_list(list(patch_paths or []))
 
     allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
     contract_prefix = (
@@ -2731,43 +2766,56 @@ def build_reviewer_prompt(
         "\n"
     )
     task_context = _build_task_review_context_section(state=state, attempt=attempt)
-    dynamic_payload = (
-        f"{DYNAMIC_REVIEW_MARKER}\n"
-        "Everything below this line may change on every attempt.\n"
-        "\n"
-        "### Attempt metadata\n"
-        f"- Task ID: {state.task_id}\n"
-        f"- Iteration: {attempt.iteration}\n"
-        f"- Retry: {attempt.retry}\n"
-        f"- Implementer exit code: {attempt.implementer_exit_code}\n"
-        f"- Test status: {test_status}\n"
-        f"- Base commit: {attempt.base_commit}\n"
-        f"- Head commit: {attempt.head_commit}\n"
-        f"- Graph node: {attempt.graph_node_id or '(legacy single-step)'}\n"
-        "\n"
-        "### Review context\n"
-        f"- Context mode: {context_mode}\n"
-        f"- Inline patch: {inline_patch}\n"
-        f"- Inline diff stat: {inline_diff_stat}\n"
-        f"- Artifact root: {artifact_root or '(unknown)'}\n"
-        f"- diff.stat.txt: {diff_stat_path or '(unknown)'}\n"
-        f"- diff.files.txt: {diff_files_path or '(unknown)'}\n"
-        f"- test.output.txt: {test_output_path or '(unknown)'}\n"
-        f"- Patches directory: {patches_dir or '(unknown)'}\n"
-        f"- Selected patch paths:\n{selected_patch_paths or '(unknown)'}\n"
-        f"- Omitted patch chars: {omitted_patch_chars}\n"
-        f"- Omitted diff stat chars: {omitted_diff_stat_chars}\n"
-        f"- Estimated avoided cache-miss tokens: {estimated_avoided_tokens}\n"
-        "\n"
-        "### Test result\n"
-        f"Status: {test_status}\n"
-        f"Output path: {test_output_path or '(unknown)'}\n\n"
+    dynamic_lines = [
+        DYNAMIC_REVIEW_MARKER,
+        "Everything below this line may change on every attempt.",
+        "",
+        "### Attempt metadata",
+        f"- Task ID: {state.task_id}",
+        f"- Iteration: {attempt.iteration}",
+        f"- Retry: {attempt.retry}",
+        f"- Implementer exit code: {attempt.implementer_exit_code}",
+        f"- Test status: {test_status}",
+        f"- Base commit: {attempt.base_commit}",
+        f"- Head commit: {attempt.head_commit}",
+        f"- Graph node: {attempt.graph_node_id or '(legacy single-step)'}",
+        "",
+        "### Review artifacts",
+        f"- Context mode: {context_mode}",
+        f"- Inline patch: {inline_patch}",
+        f"- Artifact root: {artifact_root or '(unknown)'}",
+        f"- diff.stat.txt: {diff_stat_path or '(unknown)'}",
+        f"- diff.files.txt: {diff_files_path or '(unknown)'}",
+        f"- test.output.txt: {test_output_path or '(unknown)'}",
+        f"- Patches directory: {patches_dir or '(unknown)'}",
+        f"- Patch file count: {selected_patch_count}",
+    ]
+    if selected_patch_paths:
+        dynamic_lines.extend(["- Selected patch paths:", selected_patch_paths])
+    dynamic_lines.extend(
+        [
+            f"- Omitted patch chars: {omitted_patch_chars}",
+            f"- Omitted diff stat chars: {omitted_diff_stat_chars}",
+        ]
     )
+    if context_mode != "artifact_refs":
+        dynamic_lines.append(f"- Estimated avoided cache-miss tokens: {estimated_avoided_tokens}")
+    dynamic_lines.extend(
+        [
+            "",
+            "### Test result",
+            f"Status: {test_status}",
+            f"Output path: {test_output_path or '(unknown)'}",
+            "",
+        ]
+    )
+    dynamic_payload = "\n".join(dynamic_lines) + "\n"
     dynamic_payload += _format_diff_stat_section(
         diff_stat=diff_stat,
         inline_diff_stat=inline_diff_stat,
         diff_stat_path=diff_stat_path,
         diff_files_path=diff_files_path,
+        compact=context_mode == "artifact_refs",
     )
 
     if inline_patch:
@@ -2778,8 +2826,7 @@ def build_reviewer_prompt(
     else:
         dynamic_payload += (
             "### Patch artifact references\n"
-            "Patch content is not inlined. Inspect the selected patch paths above, diff.files.txt, "
-            "or run `git diff` in the worktree before approving.\n"
+            "Patch content is not inlined. Inspect patches_dir, diff.files.txt, or worktree git diff before approving.\n"
         )
 
     return (contract_prefix + task_context + dynamic_payload).strip() + "\n"

@@ -79,7 +79,7 @@ class ReviewContextModeTests(unittest.TestCase):
         )
         self.assertNotIn("diff --git", prompt)
         self.assertIn("Inline patch: False", prompt)
-        self.assertIn("### Diff stat summary", prompt)
+        self.assertIn("### Diff stat artifact", prompt)
 
     def test_artifact_refs_mode_omits_large_inline_diff_stat(self) -> None:
         diff_stat = "\n".join(f" file-{i}.py | {i} +" for i in range(25))
@@ -100,7 +100,7 @@ class ReviewContextModeTests(unittest.TestCase):
         self.assertNotIn("file-24.py", prompt)
         self.assertIn(str(paths["diff_stat"]), prompt)
         self.assertIn(str(paths["diff_files"]), prompt)
-        self.assertIn("### Diff stat summary", prompt)
+        self.assertIn("### Diff stat artifact", prompt)
 
     def test_inline_mode_keeps_full_diff_stat(self) -> None:
         diff_stat = " README.md | 1 +\n 1 file changed, 1 insertion(+)"

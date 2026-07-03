@@ -88,8 +88,9 @@ class ImplementerPromptLayoutTests(unittest.TestCase):
         marker = "## Dynamic Implementer Payload"
 
         assert "Do not perform unrelated refactors" in prompt
-        assert prompt.index(marker) < prompt.index("Unique implementer goal")
-        assert prompt.index(marker) < prompt.index("Create widget module")
+        assert prompt.index("Unique implementer goal") < prompt.index(marker)
+        assert prompt.index("Create widget module") < prompt.index(marker)
+        assert prompt.index(marker) < prompt.index("Task ID: impl-layout")
 
     def test_node_implementer_prompt_keeps_stable_prefix_across_nodes(self) -> None:
         graph = graph_from_planner_json(
@@ -148,10 +149,14 @@ class ImplementerPromptLayoutTests(unittest.TestCase):
         prompt_a = build_implementer_prompt(state, attempt_a.plan_json, attempt=attempt_a)
         state.goal = "Graph goal beta"
         prompt_b = build_implementer_prompt(state, attempt_b.plan_json, attempt=attempt_b)
+        context_marker = "## Stable Implementer Task Context"
         marker = "## Dynamic Implementer Payload"
-        prefix_a = prompt_a[: prompt_a.index(marker)]
-        prefix_b = prompt_b[: prompt_b.index(marker)]
+        prefix_a = prompt_a[: prompt_a.index(context_marker)]
+        prefix_b = prompt_b[: prompt_b.index(context_marker)]
         self.assertEqual(prefix_a, prefix_b)
+        self.assertIn("first node", prompt_a[: prompt_a.index(marker)])
+        self.assertIn("second node", prompt_b[: prompt_b.index(marker)])
+        self.assertNotIn("first node", prompt_a[prompt_a.index(marker) :])
 
 
 class ReviewerPromptMetricsTests(unittest.TestCase):

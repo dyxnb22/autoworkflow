@@ -288,8 +288,9 @@ class PatchCaptureRecoveryTests(unittest.TestCase):
         self.assertIn("git add", prompt[:marker_index])
         self.assertIn("git commit", prompt[:marker_index])
         self.assertGreater(len(prompt[:marker_index]), 800)
-        self.assertLess(marker_index, prompt.index("Unique implementer goal"))
-        self.assertLess(marker_index, prompt.index("Create widget module"))
+        self.assertLess(prompt.index("Unique implementer goal"), marker_index)
+        self.assertLess(prompt.index("Create widget module"), marker_index)
+        self.assertLess(marker_index, prompt.index("Task ID: impl-metrics"))
 
         metrics = build_implementer_phase_cache(prompt=prompt)
         self.assertGreaterEqual(metrics["stable_prefix_ratio"], 0.45)
