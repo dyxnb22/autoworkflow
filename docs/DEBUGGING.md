@@ -76,8 +76,8 @@ git -C ~/.cc-loop/worktrees/<repo>/<task-id>/iter-NNN status
 
 | File | What it contains |
 |---|---|
-| `review.prompt.txt` | The exact prompt sent to the reviewer (diff stat; patches inline or artifact refs per `review_context_mode`) |
-| `review.prompt.metrics.json` | Reviewer prompt cache layout metrics (stable prefix ratio, omitted patch chars, avoidable miss tokens) |
+| `review.prompt.txt` | The exact prompt sent to the reviewer. In `artifact_refs` / large-patch `hybrid`, diff stat is summarized with paths instead of inlining the full stat; patches may also be artifact refs |
+| `review.prompt.metrics.json` | Reviewer prompt cache layout metrics (`contract_prefix_ratio`, `task_context_ratio`, `stable_prefix_ratio`, omitted patch/diff stat chars, avoidable miss tokens) |
 | `prompt.cache.json` | Per-attempt prompt cache budget across planner/implementer/reviewer phases |
 | `command.argv.json` | Executed argv per phase; large prompt arguments are redacted as `<prompt:N chars sha256=...>` placeholders |
 | `review.provider.txt` | Which provider was invoked |
@@ -92,14 +92,16 @@ Config keys: `review_context_mode` (`hybrid` default), `review_inline_patch_thre
 | Mode | Behavior |
 |------|----------|
 | `inline` | Embeds selected patch text in `review.prompt.txt` (legacy behavior) |
-| `artifact_refs` | Omits patch body; prompt lists artifact paths (`diff.stat.txt`, `diff.files.txt`, `test.output.txt`, `patches/`) |
-| `hybrid` | Inlines patches when `patch_body` chars ≤ threshold; otherwise uses artifact refs |
+| `artifact_refs` | Omits patch body and full diff stat; prompt lists artifact paths (`diff.stat.txt`, `diff.files.txt`, `test.output.txt`, `patches/`) plus a short diff stat summary |
+| `hybrid` | Inlines patches when `patch_body` chars ≤ threshold; otherwise uses artifact refs. Inlines full diff stat only when the patch is inlined; otherwise summarizes diff stat with paths |
 
-When patches are omitted, check `review.prompt.metrics.json` for `omitted_patch_chars` and `estimated_avoidable_miss_tokens`, and `prompt.cache.json` for cross-phase totals. The reviewer prompt still keeps the stable contract/rubric/JSON shape **before** `## Dynamic Review Payload`.
+When patches or diff stat are omitted, check `review.prompt.metrics.json` for `omitted_patch_chars`, `omitted_diff_stat_chars`, and `estimated_avoidable_miss_tokens`, and `prompt.cache.json` for cross-phase totals. The reviewer prompt keeps stable contract/rubric/JSON **before** `## Task Review Context`, then per-attempt evidence after `## Dynamic Review Payload`.
 
-#### Direct planner mode (`planner_mode: direct`)
+#### Direct planner mode (`planner_mode: direct` or auto heuristic)
 
-Skips the planner provider and writes a single-node task graph derived from the goal. Artifacts still include `plan.prompt.txt`, `plan.prompt.meta.json`, `plan.parsed.json`, and `attempt.trace.json`. `plan.provider.txt` is `(direct)` and `command.argv.json` records `["(planner-skipped-direct)"]` for the planner phase instead of provider argv.
+Skips the planner provider and writes a single-node task graph derived from the goal. With `planner_mode: auto` (default), cc-loop may auto-select direct mode for short simple goals when `auto_direct_planner` is enabled (see `auto_direct_max_goal_chars` in config).
+
+Artifacts still include `plan.prompt.txt`, `plan.prompt.meta.json`, `plan.parsed.json`, and `attempt.trace.json`. `plan.provider.txt` is `(direct)` and `command.argv.json` records `["(planner-skipped-direct)"]` for the planner phase instead of provider argv. `prompt.cache.json` planner phase includes `planner_mode_resolved`, `planner_direct_reason`, and `provider_skipped`.
 
 Init example:
 
@@ -119,6 +121,23 @@ Per-attempt artifact summarizing planner/implementer/reviewer prompt layout metr
 `estimated_prompt_tokens` counts persisted prompt artifacts. `estimated_provider_prompt_tokens` counts prompt tokens actually sent to a provider; skipped phases such as `planner_mode: direct` report provider tokens as `0`.
 
 Also exposed in `status --json` as optional `prompt_cache` and in `report --json` observability.
+
+#### Task summary (`cc-loop summary --json`)
+
+Single JSON endpoint for Luma and other thin integrations. Prefer this over parsing many artifact files individually:
+
+```bash
+cc-loop summary --task-id ID --json
+```
+
+After a terminal run, the same payload is also written to `~/.cc-loop/tasks/<task-id>/run.summary.json`.
+
+Timeline:
+
+```bash
+# Included in summary --json as execution_timeline
+cat ~/.cc-loop/tasks/<task-id>/execution.timeline.json
+```
 
 #### `command.argv.json` prompt redaction
 

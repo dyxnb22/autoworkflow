@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -650,6 +651,75 @@ def _planner_granularity_for_prompt(state: TaskState) -> str:
     return resolve_planner_granularity(state.goal, state.config)
 
 
+_AUTO_DIRECT_SIMPLE_KEYWORDS = (
+    "fix",
+    "bug",
+    "cli",
+    "docs",
+    "documentation",
+    "typo",
+    "test",
+    "failing test",
+    "small",
+    "narrow",
+    "single file",
+)
+_AUTO_DIRECT_SIMPLE_PHRASES = ("do not refactor", "minimal change")
+_AUTO_DIRECT_COMPLEX_KEYWORDS = (
+    "architecture",
+    "redesign",
+    "migration",
+    "multi-service",
+    "distributed",
+    "database schema",
+    "security review",
+    "benchmark suite",
+    "framework",
+    "roadmap",
+)
+
+
+def should_use_direct_planner(state: TaskState) -> tuple[bool, str]:
+    """Return whether the planner provider should be skipped for this task."""
+    config = state.config
+    mode = _planner_mode(config)
+    if mode == "direct":
+        return True, "planner_mode=direct"
+    if mode != "auto":
+        return False, f"planner_mode={mode}"
+
+    if not bool(config.get("auto_direct_planner", True)):
+        return False, "auto_direct_planner disabled"
+
+    goal = state.goal.strip()
+    goal_lower = goal.lower()
+    max_chars = int(config.get("auto_direct_max_goal_chars", 500) or 500)
+    if len(goal) > max_chars:
+        return False, f"goal length {len(goal)} exceeds auto_direct_max_goal_chars={max_chars}"
+
+    for keyword in _AUTO_DIRECT_COMPLEX_KEYWORDS:
+        if keyword in goal_lower:
+            return False, f"complex keyword: {keyword}"
+
+    for phrase in _AUTO_DIRECT_SIMPLE_PHRASES:
+        if phrase in goal_lower:
+            return True, f"minimal-change phrase: {phrase}"
+
+    for keyword in _AUTO_DIRECT_SIMPLE_KEYWORDS:
+        if keyword in goal_lower:
+            return True, f"simple keyword: {keyword}"
+
+    return False, "no auto-direct heuristic match"
+
+
+def _resolved_planner_mode(state: TaskState) -> tuple[str, str, bool]:
+    """Return (resolved_mode, reason, use_direct)."""
+    use_direct, reason = should_use_direct_planner(state)
+    if use_direct:
+        return "direct", reason, True
+    return "provider", reason, False
+
+
 def build_direct_plan_json(goal: str) -> dict[str, Any]:
     """Build a single-node task graph plan from the task goal without a planner provider."""
     title = goal.strip()
@@ -686,6 +756,7 @@ def _run_direct_planning(
     config: LoopConfig,
     max_retries: int,
     prompt: str,
+    planner_direct_reason: str = "planner_mode=direct",
 ) -> TaskState:
     """Skip planner provider and synthesize a single-node plan from the task goal."""
     plan_json = build_direct_plan_json(state.goal)
@@ -761,6 +832,8 @@ def _run_direct_planning(
         raw_path=str(artifact_paths["plan_raw"]),
         estimated_prompt_tokens=estimate_tokens_from_path(artifact_paths["plan_prompt"]),
         planner_mode="direct",
+        planner_mode_resolved="direct",
+        planner_direct_reason=planner_direct_reason,
         provider_skipped=True,
     )
     return state
@@ -810,12 +883,16 @@ def run_planning_phase(
         artifact_paths=artifact_paths,
         provider_name=provider_name,
     )
+    planner_mode_resolved, planner_direct_reason, use_direct_planner = _resolved_planner_mode(state)
     update_prompt_cache_artifact(
         artifact_paths["prompt_cache"],
         phase="planner",
         phase_data=build_planner_phase_cache(
             prompt=prompt,
-            skipped=_planner_mode(config) == "direct",
+            skipped=use_direct_planner,
+            planner_mode_resolved=planner_mode_resolved,
+            planner_direct_reason=planner_direct_reason,
+            provider_skipped=use_direct_planner,
         ),
     )
 
@@ -831,7 +908,7 @@ def run_planning_phase(
             _mark_planning_failed(state, state_root)
             raise PlanningError(str(exc)) from exc
 
-    if _planner_mode(config) == "direct":
+    if use_direct_planner:
         return _run_direct_planning(
             state=state,
             state_root=state_root,
@@ -840,6 +917,7 @@ def run_planning_phase(
             config=config,
             max_retries=max_retries,
             prompt=prompt,
+            planner_direct_reason=planner_direct_reason,
         )
 
     try:
@@ -1629,6 +1707,13 @@ def run_review_phase(
     return state
 
 
+def _persist_state(state: TaskState, state_root: Path) -> None:
+    save_state(state, state_root)
+    from cc_loop.summary import finalize_terminal_task
+
+    finalize_terminal_task(state, state_root)
+
+
 def _run_finalize_phase(
     state: TaskState,
     state_root: Path,
@@ -1639,12 +1724,12 @@ def _run_finalize_phase(
 
     if attempt.decision == "stop":
         state.status = TaskStatus.STOPPED
-        save_state(state, state_root)
+        _persist_state(state, state_root)
         return state, attempt, artifact_paths
 
     if attempt.decision == "replan":
         state.status = TaskStatus.STOPPED
-        save_state(state, state_root)
+        _persist_state(state, state_root)
         return state, attempt, artifact_paths
 
     if attempt.decision == "reject":
@@ -1656,15 +1741,15 @@ def _run_finalize_phase(
             mark_node_rejected(graph, attempt.graph_node_id, reason)
         if _retry_remaining(state, attempt):
             state.status = TaskStatus.STOPPED
-            save_state(state, state_root)
+            _persist_state(state, state_root)
             return state, attempt, artifact_paths
         state.status = TaskStatus.STOPPED
-        save_state(state, state_root)
+        _persist_state(state, state_root)
         return state, attempt, artifact_paths
 
     if not _can_auto_merge(attempt, config, state=state):
         state.status = TaskStatus.STOPPED
-        save_state(state, state_root)
+        _persist_state(state, state_root)
         return state, attempt, artifact_paths
 
     worktree = Path(attempt.worktree_path)
@@ -1713,7 +1798,7 @@ def _run_finalize_phase(
             error=attempt.merge_error,
         )
         state.status = TaskStatus.STOPPED
-        save_state(state, state_root)
+        _persist_state(state, state_root)
         return state, attempt, artifact_paths
     except GitError as exc:
         report = classify_merge_failure(exc)
@@ -1732,7 +1817,7 @@ def _run_finalize_phase(
             error=attempt.merge_error,
         )
         state.status = TaskStatus.STOPPED
-        save_state(state, state_root)
+        _persist_state(state, state_root)
         return state, attempt, artifact_paths
 
     attempt.phase = AttemptPhase.MERGED
@@ -1768,7 +1853,7 @@ def _run_finalize_phase(
         state.status = TaskStatus.STOPPED
     else:
         state.status = TaskStatus.DONE
-    save_state(state, state_root)
+    _persist_state(state, state_root)
     return state, attempt, artifact_paths
 
 
@@ -1958,6 +2043,139 @@ def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
     return "\n".join(sections).strip() + "\n"
 
 
+TASK_REVIEW_CONTEXT_MARKER = "## Task Review Context"
+DYNAMIC_REVIEW_MARKER = "## Dynamic Review Payload"
+
+
+def summarize_diff_stat(diff_stat: str, *, max_lines: int = 20) -> dict[str, Any]:
+    """Summarize a git diff --stat block for artifact-ref reviewer prompts."""
+    lines = [line for line in diff_stat.splitlines() if line.strip()]
+    preview_lines = lines[:max_lines]
+    truncated = len(lines) > max_lines
+
+    changed_file_count = 0
+    inserted_lines: int | None = None
+    deleted_lines: int | None = None
+
+    for line in lines:
+        if "|" in line and "changed" not in line.lower():
+            changed_file_count += 1
+
+    for line in reversed(lines):
+        lower = line.lower()
+        if "changed" not in lower:
+            continue
+        files_match = re.search(r"(\d+)\s+files?\s+changed", line)
+        if files_match:
+            changed_file_count = int(files_match.group(1))
+        insert_match = re.search(r"(\d+)\s+insertions?\(\+\)", line)
+        if insert_match:
+            inserted_lines = int(insert_match.group(1))
+        delete_match = re.search(r"(\d+)\s+deletions?\(-\)", line)
+        if delete_match:
+            deleted_lines = int(delete_match.group(1))
+        break
+
+    return {
+        "changed_file_count": changed_file_count,
+        "inserted_lines": inserted_lines,
+        "deleted_lines": deleted_lines,
+        "preview_lines": preview_lines,
+        "truncated": truncated,
+    }
+
+
+def _should_inline_diff_stat(*, context_mode: str, inline_patch: bool) -> bool:
+    if context_mode == "inline":
+        return True
+    if context_mode == "artifact_refs":
+        return False
+    return inline_patch
+
+
+def _build_task_review_context_section(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord,
+) -> str:
+    graph = ensure_task_graph(state)
+    lines = [
+        TASK_REVIEW_CONTEXT_MARKER,
+        "Everything in this section is task/node-scoped and should remain stable across retries of the same node.",
+        f"Task goal: {state.goal}",
+    ]
+    if graph is not None and attempt.graph_node_id:
+        node = get_node(graph, attempt.graph_node_id)
+        if node is not None:
+            criteria = node.acceptance_criteria or ["(none specified)"]
+            files_scope = node.files_scope or ["(none specified)"]
+            dep_lines = completed_dependency_labels(graph, attempt.graph_node_id)
+            lines.extend(
+                [
+                    f"Graph node: {node.id}",
+                    f"Node title: {node.title}",
+                    f"Node kind: {node.kind.value}",
+                    f"Node description: {node.description or '(none)'}",
+                    "Acceptance criteria:",
+                    *[f"- {item}" for item in criteria],
+                    "Files scope:",
+                    *[f"- {item}" for item in files_scope],
+                ]
+            )
+            if dep_lines:
+                lines.append("Completed dependencies:")
+                lines.extend(f"- {line}" for line in dep_lines)
+            lines.append(
+                "Review whether this graph node is complete — not whether the entire project is complete."
+            )
+        else:
+            lines.extend(
+                [
+                    f"Graph node: {attempt.graph_node_id}",
+                    "Node title: (unknown node)",
+                ]
+            )
+    else:
+        lines.append("Graph node: legacy single-step")
+
+    return "\n".join(lines) + "\n\n"
+
+
+def _format_diff_stat_section(
+    *,
+    diff_stat: str,
+    inline_diff_stat: bool,
+    diff_stat_path: str,
+    diff_files_path: str,
+) -> str:
+    if inline_diff_stat:
+        return f"### Diff stat\n{diff_stat}\n\n"
+
+    summary = summarize_diff_stat(diff_stat)
+    preview = "\n".join(summary["preview_lines"]) or "(empty)"
+    if summary["truncated"]:
+        preview += "\n...(truncated)"
+
+    lines = [
+        "### Diff stat summary",
+        f"Changed files: {summary['changed_file_count']}",
+    ]
+    if summary["inserted_lines"] is not None:
+        lines.append(f"Insertions: {summary['inserted_lines']}")
+    if summary["deleted_lines"] is not None:
+        lines.append(f"Deletions: {summary['deleted_lines']}")
+    lines.extend(
+        [
+            "Preview:",
+            preview,
+            f"Full diff stat: {diff_stat_path or '(unknown)'}",
+            f"Changed files list: {diff_files_path or '(unknown)'}",
+            "",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def build_reviewer_prompt(
     *,
     state: TaskState,
@@ -1973,8 +2191,9 @@ def build_reviewer_prompt(
 ) -> str:
     """Construct the reviewer prompt with bounded diff context.
 
-    Keep stable reviewer rules before dynamic task/diff payload so provider
-    prefix caches can reuse the rubric and JSON contract across iterations.
+    Stable contract and task context precede the dynamic payload marker so
+    provider prefix caches can reuse rubric, JSON contract, and node-scoped
+    context across retries of the same node.
     """
     config = config or state.config
     patch_body_chars = len(patch_body)
@@ -1983,29 +2202,7 @@ def build_reviewer_prompt(
         context_mode = context_mode or resolved_mode
         inline_patch = resolved_inline if inline_patch is None else inline_patch
 
-    graph = ensure_task_graph(state)
-    node_section = ""
-    if graph is not None and attempt.graph_node_id:
-        node = get_node(graph, attempt.graph_node_id)
-        if node is not None:
-            criteria = node.acceptance_criteria or ["(none specified)"]
-            dep_lines = completed_dependency_labels(graph, attempt.graph_node_id)
-            node_section = (
-                "\n### Current graph node\n"
-                f"Node: {node.id} — {node.title}\n"
-                f"Kind: {node.kind.value}\n"
-                f"Description: {node.description or '(none)'}\n"
-                "Acceptance criteria:\n"
-                + "\n".join(f"- {item}" for item in criteria)
-                + "\n"
-            )
-            if dep_lines:
-                node_section += "Completed dependencies:\n" + "\n".join(f"- {line}" for line in dep_lines) + "\n"
-            node_section += (
-                "\nReview whether this graph node is complete — not whether the entire project is complete.\n"
-            )
-
-    allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
+    inline_diff_stat = _should_inline_diff_stat(context_mode=context_mode, inline_patch=inline_patch)
     artifact_root = ""
     diff_stat_path = ""
     diff_files_path = ""
@@ -2013,7 +2210,10 @@ def build_reviewer_prompt(
     patches_dir = ""
     selected_patch_paths = ""
     omitted_patch_chars = 0 if inline_patch else patch_body_chars
-    estimated_avoided_tokens = _estimated_tokens_from_chars(omitted_patch_chars)
+    omitted_diff_stat_chars = 0 if inline_diff_stat else len(diff_stat)
+    estimated_avoided_tokens = _estimated_tokens_from_chars(
+        omitted_patch_chars + omitted_diff_stat_chars
+    )
 
     if artifact_paths is not None:
         artifact_root = str(artifact_paths["plan_prompt"].parent)
@@ -2023,7 +2223,8 @@ def build_reviewer_prompt(
         patches_dir = str(artifact_paths["patches_dir"])
         selected_patch_paths = format_patch_path_list(list(patch_paths or []))
 
-    stable_prefix = (
+    allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
+    contract_prefix = (
         "You are the cc-loop reviewer.\n"
         "\n"
         "## Stable Review Contract\n"
@@ -2033,7 +2234,7 @@ def build_reviewer_prompt(
         "Do not request unrelated refactors, style churn, or work outside the scoped node.\n"
         "Treat generated caches, build artifacts, and unrelated file churn as review findings.\n"
         "Before approving, you must inspect test status and diff/patch evidence.\n"
-        "When patch content is not inlined, read the listed artifact paths or inspect the worktree git diff.\n"
+        "When patch or diff stat content is not inlined, read the listed artifact paths or inspect the worktree git diff.\n"
         "Do not approve solely because patch text is omitted from the prompt.\n"
         f"Default to reject when tests failed or timed_out unless allow_merge_without_tests is enabled "
         f"(currently {allow_merge_without_tests}).\n"
@@ -2070,52 +2271,60 @@ def build_reviewer_prompt(
         "Set inspected_files to changed file paths you verified.\n"
         "Set test_status_checked true only after reading test status/output evidence.\n"
         "\n"
-        "## Dynamic Review Payload\n"
-        "Everything below this line may change on every attempt. Use it as evidence, but keep the stable contract above authoritative.\n"
+    )
+    task_context = _build_task_review_context_section(state=state, attempt=attempt)
+    dynamic_payload = (
+        f"{DYNAMIC_REVIEW_MARKER}\n"
+        "Everything below this line may change on every attempt.\n"
         "\n"
         "### Attempt metadata\n"
-        f"Task ID: {state.task_id}\n"
-        f"Goal: {state.goal}\n"
-        f"Iteration: {attempt.iteration}\n"
-        f"Retry: {attempt.retry}\n"
-        f"Graph node: {attempt.graph_node_id or '(legacy single-step)'}\n"
-        f"Implementer exit code: {attempt.implementer_exit_code}\n"
-        f"Test status: {test_status}\n"
-        f"Base commit: {attempt.base_commit}\n"
-        f"Head commit: {attempt.head_commit}\n"
-        f"{node_section}\n"
+        f"- Task ID: {state.task_id}\n"
+        f"- Iteration: {attempt.iteration}\n"
+        f"- Retry: {attempt.retry}\n"
+        f"- Implementer exit code: {attempt.implementer_exit_code}\n"
+        f"- Test status: {test_status}\n"
+        f"- Base commit: {attempt.base_commit}\n"
+        f"- Head commit: {attempt.head_commit}\n"
+        f"- Graph node: {attempt.graph_node_id or '(legacy single-step)'}\n"
+        "\n"
         "### Review context\n"
-        f"Context mode: {context_mode}\n"
-        f"Inline patch: {inline_patch}\n"
-        f"Artifact root: {artifact_root or '(unknown)'}\n"
-        f"diff.stat.txt: {diff_stat_path or '(unknown)'}\n"
-        f"diff.files.txt: {diff_files_path or '(unknown)'}\n"
-        f"test.output.txt: {test_output_path or '(unknown)'}\n"
-        f"Patches directory: {patches_dir or '(unknown)'}\n"
-        f"Selected patch paths:\n{selected_patch_paths or '(unknown)'}\n"
-        f"Omitted patch chars: {omitted_patch_chars}\n"
-        f"Estimated avoided cache-miss tokens: {estimated_avoided_tokens}\n"
+        f"- Context mode: {context_mode}\n"
+        f"- Inline patch: {inline_patch}\n"
+        f"- Inline diff stat: {inline_diff_stat}\n"
+        f"- Artifact root: {artifact_root or '(unknown)'}\n"
+        f"- diff.stat.txt: {diff_stat_path or '(unknown)'}\n"
+        f"- diff.files.txt: {diff_files_path or '(unknown)'}\n"
+        f"- test.output.txt: {test_output_path or '(unknown)'}\n"
+        f"- Patches directory: {patches_dir or '(unknown)'}\n"
+        f"- Selected patch paths:\n{selected_patch_paths or '(unknown)'}\n"
+        f"- Omitted patch chars: {omitted_patch_chars}\n"
+        f"- Omitted diff stat chars: {omitted_diff_stat_chars}\n"
+        f"- Estimated avoided cache-miss tokens: {estimated_avoided_tokens}\n"
         "\n"
         "### Test result\n"
         f"Status: {test_status}\n"
         f"Output path: {test_output_path or '(unknown)'}\n\n"
-        "### Diff stat\n"
-        f"{diff_stat}\n\n"
+    )
+    dynamic_payload += _format_diff_stat_section(
+        diff_stat=diff_stat,
+        inline_diff_stat=inline_diff_stat,
+        diff_stat_path=diff_stat_path,
+        diff_files_path=diff_files_path,
     )
 
     if inline_patch:
-        stable_prefix += (
+        dynamic_payload += (
             "### Selected patches\n"
             f"{patch_body or '(no patch content selected)'}\n"
         )
     else:
-        stable_prefix += (
+        dynamic_payload += (
             "### Patch artifact references\n"
             "Patch content is not inlined. Inspect the selected patch paths above, diff.files.txt, "
             "or run `git diff` in the worktree before approving.\n"
         )
 
-    return stable_prefix.strip() + "\n"
+    return (contract_prefix + task_context + dynamic_payload).strip() + "\n"
 
 
 def _estimated_tokens_from_chars(char_count: int) -> int:
@@ -2139,41 +2348,63 @@ def build_reviewer_prompt_metrics(
     patch_body: str,
     inline_patch: bool = True,
     context_mode: str = "inline",
+    inline_diff_stat: bool | None = None,
 ) -> dict[str, Any]:
     """Return cache/cost layout metrics for a reviewer prompt artifact."""
-    marker = "## Dynamic Review Payload"
-    marker_index = prompt.find(marker)
-    stable_prefix_chars = marker_index if marker_index >= 0 else len(prompt)
+    if inline_diff_stat is None:
+        inline_diff_stat = _should_inline_diff_stat(context_mode=context_mode, inline_patch=inline_patch)
+
+    task_context_index = prompt.find(TASK_REVIEW_CONTEXT_MARKER)
+    dynamic_index = prompt.find(DYNAMIC_REVIEW_MARKER)
+    contract_prefix_chars = (
+        task_context_index if task_context_index >= 0 else (dynamic_index if dynamic_index >= 0 else len(prompt))
+    )
+    stable_prefix_chars = dynamic_index if dynamic_index >= 0 else len(prompt)
+    task_context_chars = max(0, stable_prefix_chars - contract_prefix_chars)
     dynamic_payload_chars = len(prompt) - stable_prefix_chars
     patch_chars = len(patch_body)
     inline_patch_chars = patch_chars if inline_patch else 0
     omitted_patch_chars = 0 if inline_patch else patch_chars
     diff_stat_chars = len(diff_stat)
-    evidence_payload_chars = inline_patch_chars + diff_stat_chars
+    inline_diff_stat_chars = diff_stat_chars if inline_diff_stat else 0
+    omitted_diff_stat_chars = 0 if inline_diff_stat else diff_stat_chars
+    evidence_payload_chars = inline_patch_chars + inline_diff_stat_chars
     contract_dynamic_chars = max(0, dynamic_payload_chars - evidence_payload_chars)
-    contract_denominator = stable_prefix_chars + contract_dynamic_chars
+    contract_denominator = contract_prefix_chars + contract_dynamic_chars
     stable_prefix_ratio = round(stable_prefix_chars / len(prompt), 6) if prompt else 0.0
     dynamic_payload_ratio = round(dynamic_payload_chars / len(prompt), 6) if prompt else 0.0
     contract_prefix_ratio = (
-        round(stable_prefix_chars / contract_denominator, 6) if contract_denominator > 0 else 0.0
+        round(contract_prefix_chars / contract_denominator, 6) if contract_denominator > 0 else 0.0
     )
+    task_context_ratio = round(task_context_chars / len(prompt), 6) if prompt else 0.0
     estimated_omitted_patch_tokens = _estimated_tokens_from_chars(omitted_patch_chars)
+    estimated_omitted_diff_stat_tokens = _estimated_tokens_from_chars(omitted_diff_stat_chars)
+    estimated_avoidable_miss_tokens = _estimated_tokens_from_chars(
+        omitted_patch_chars + omitted_diff_stat_chars
+    )
     return {
         "schema_version": 1,
         "layout": "stable-prefix-v1",
         "context_mode": context_mode,
         "inline_patch": inline_patch,
-        "dynamic_payload_marker": marker,
+        "inline_diff_stat": inline_diff_stat,
+        "dynamic_payload_marker": DYNAMIC_REVIEW_MARKER,
+        "task_review_context_marker": TASK_REVIEW_CONTEXT_MARKER,
         "prompt_chars": len(prompt),
+        "contract_prefix_chars": contract_prefix_chars,
+        "contract_prefix_ratio": contract_prefix_ratio,
+        "task_context_chars": task_context_chars,
+        "task_context_ratio": task_context_ratio,
         "stable_prefix_chars": stable_prefix_chars,
         "dynamic_payload_chars": dynamic_payload_chars,
         "stable_prefix_ratio": stable_prefix_ratio,
         "dynamic_payload_ratio": dynamic_payload_ratio,
-        "contract_prefix_ratio": contract_prefix_ratio,
         "evidence_payload_chars": evidence_payload_chars,
         "cache_health": _classify_cache_health(contract_prefix_ratio),
         "total_prompt_cache_health": _classify_cache_health(stable_prefix_ratio),
         "diff_stat_chars": diff_stat_chars,
+        "inline_diff_stat_chars": inline_diff_stat_chars,
+        "omitted_diff_stat_chars": omitted_diff_stat_chars,
         "patch_body_chars": patch_chars,
         "inline_patch_chars": inline_patch_chars,
         "omitted_patch_chars": omitted_patch_chars,
@@ -2184,7 +2415,8 @@ def build_reviewer_prompt_metrics(
         "estimated_patch_body_tokens": _estimated_tokens_from_chars(patch_chars),
         "estimated_inline_patch_tokens": _estimated_tokens_from_chars(inline_patch_chars),
         "estimated_omitted_patch_tokens": estimated_omitted_patch_tokens,
-        "estimated_avoidable_miss_tokens": estimated_omitted_patch_tokens,
+        "estimated_omitted_diff_stat_tokens": estimated_omitted_diff_stat_tokens,
+        "estimated_avoidable_miss_tokens": estimated_avoidable_miss_tokens,
         "estimated_provider_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),
         "estimated_provider_dynamic_payload_tokens": _estimated_tokens_from_chars(dynamic_payload_chars),
         "recommendations": [],
@@ -2668,7 +2900,7 @@ def _mark_planning_failed(
         mark_node_failed(graph, attempt.graph_node_id, "planning failed")
     attempt.phase = AttemptPhase.FAILED
     state.status = TaskStatus.FAILED
-    save_state(state, state_root)
+    _persist_state(state, state_root)
 
 
 def _mark_implementer_failed(
@@ -2683,7 +2915,7 @@ def _mark_implementer_failed(
         mark_node_failed(graph, attempt.graph_node_id, "implementer failed")
     attempt.phase = AttemptPhase.FAILED
     state.status = TaskStatus.FAILED
-    save_state(state, state_root)
+    _persist_state(state, state_root)
 
 
 def _mark_review_failed(
@@ -2698,7 +2930,7 @@ def _mark_review_failed(
         mark_node_failed(graph, attempt.graph_node_id, "review failed")
     attempt.phase = AttemptPhase.FAILED
     state.status = TaskStatus.FAILED
-    save_state(state, state_root)
+    _persist_state(state, state_root)
 
 
 def _begin_attempt(

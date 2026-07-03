@@ -73,7 +73,12 @@ def _estimate_evidence_chars(prompt: str, marker: str) -> int:
         return 0
     dynamic = prompt[prompt.index(marker) :]
     evidence = 0
-    for section in ("### Diff stat", "### Selected patches", "### Patch artifact references"):
+    for section in (
+        "### Diff stat",
+        "### Diff stat summary",
+        "### Selected patches",
+        "### Patch artifact references",
+    ):
         start = dynamic.find(section)
         if start >= 0:
             next_heading = dynamic.find("\n### ", start + len(section))
@@ -82,18 +87,29 @@ def _estimate_evidence_chars(prompt: str, marker: str) -> int:
     return evidence
 
 
-def build_planner_phase_cache(*, prompt: str, skipped: bool = False) -> dict[str, Any]:
+def build_planner_phase_cache(
+    *,
+    prompt: str,
+    skipped: bool = False,
+    planner_mode_resolved: str = "provider",
+    planner_direct_reason: str = "",
+    provider_skipped: bool | None = None,
+) -> dict[str, Any]:
     metrics = _phase_layout_metrics(
         prompt=prompt,
         marker=DYNAMIC_PLANNER_MARKER,
         layout="stable-prefix-v1",
     )
     metrics["skipped"] = skipped
+    metrics["planner_mode_resolved"] = planner_mode_resolved
+    metrics["planner_direct_reason"] = planner_direct_reason
+    metrics["provider_skipped"] = skipped if provider_skipped is None else provider_skipped
     metrics["recommendations"] = []
     if skipped:
         metrics["estimated_provider_prompt_tokens"] = 0
         metrics["estimated_provider_dynamic_payload_tokens"] = 0
-        metrics["recommendations"].append("Planner provider skipped via planner_mode=direct.")
+        reason_note = planner_direct_reason or "planner_mode=direct"
+        metrics["recommendations"].append(f"Planner provider skipped ({reason_note}).")
     elif metrics["total_prompt_cache_health"] != "good":
         metrics["recommendations"].append(
             "Keep planner stable contract before Dynamic Planner Payload marker."

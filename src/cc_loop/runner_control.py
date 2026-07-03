@@ -155,6 +155,9 @@ def cancel_task(state_root: Path, task_id: str) -> RunnerControlResult:
                 node.notes = (node.notes + "; " if node.notes else "") + "cancelled by user"
     state.status = TaskStatus.CANCELLED
     save_state(state, state_root)
+    from cc_loop.summary import finalize_terminal_task
+
+    finalize_terminal_task(state, state_root)
 
     from cc_loop.events import EventType, append_event
 

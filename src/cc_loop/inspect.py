@@ -528,6 +528,8 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
             "running_provider": hb.running_provider,
             "updated_at": hb.updated_at,
         }
+        if hb.provider_progress:
+            snapshot["heartbeat"]["provider_progress"] = hb.provider_progress
     if runner_state == "stale_heartbeat":
         snapshot["stale_heartbeat_guidance"] = derive_stale_heartbeat_guidance(
             running=running,

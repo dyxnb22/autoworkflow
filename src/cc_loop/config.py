@@ -43,6 +43,8 @@ class LoopConfig(TypedDict, total=False):
     allow_node_policy_weakening: bool
     planner_granularity: str
     planner_mode: str
+    auto_direct_planner: bool
+    auto_direct_max_goal_chars: int
     review_context_mode: str
     review_inline_patch_threshold: int
     provider_watchdog_grace_seconds: int
@@ -84,6 +86,8 @@ DEFAULT_CONFIG: LoopConfig = {
     "allow_node_policy_weakening": False,
     "planner_granularity": "auto",
     "planner_mode": "auto",
+    "auto_direct_planner": True,
+    "auto_direct_max_goal_chars": 500,
     "review_context_mode": "hybrid",
     "review_inline_patch_threshold": 8000,
     "provider_watchdog_grace_seconds": 5,
