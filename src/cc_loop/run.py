@@ -2325,7 +2325,9 @@ def _update_review_trace(
         "metrics_path": str(artifact_paths["review_prompt_metrics"]),
         "estimated_prompt_tokens": metrics["estimated_prompt_tokens"],
         "stable_prefix_ratio": metrics["stable_prefix_ratio"],
+        "contract_prefix_ratio": metrics.get("contract_prefix_ratio", ""),
         "cache_health": metrics.get("cache_health", ""),
+        "total_prompt_cache_health": metrics.get("total_prompt_cache_health", ""),
     }
     if decision:
         fields["decision"] = decision

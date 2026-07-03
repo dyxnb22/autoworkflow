@@ -189,7 +189,9 @@ def build_trace_snapshot(
         }
         if metrics is not None:
             review_phase["stable_prefix_ratio"] = metrics.get("stable_prefix_ratio")
+            review_phase["contract_prefix_ratio"] = metrics.get("contract_prefix_ratio")
             review_phase["cache_health"] = metrics.get("cache_health")
+            review_phase["total_prompt_cache_health"] = metrics.get("total_prompt_cache_health")
         trace["phases"]["review"] = review_phase
 
     if artifact_paths["merge_output"].is_file() or attempt.phase.value == "merged":

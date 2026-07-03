@@ -157,6 +157,9 @@ Stdout is a single JSON object. No extra prose.
 | `current_message` | string | Short UI-friendly status message (v0.6) |
 | `running_node_ids` | array | Parallel running node ids when applicable (v0.9) |
 | `reviewer_prompt_metrics` | object \| omitted | Latest attempt reviewer cache metrics when `review.prompt.metrics.json` exists (v0.10 additive) |
+| `heartbeat` | object \| omitted | Fresh `runner.heartbeat.json` phase/provider snapshot during active runs (v0.10 additive) |
+
+`attempt.running_provider` (v0.10) is non-empty while a provider subprocess is active.
 
 The `task_graph` block is omitted for legacy tasks without a graph. See [TASK_GRAPH.md](TASK_GRAPH.md).
 
@@ -356,7 +359,9 @@ when available, and `timestamp`.
   "reviewer_prompt_metrics": {
     "layout": "stable-prefix-v1",
     "stable_prefix_ratio": 0.8,
+    "contract_prefix_ratio": 0.92,
     "cache_health": "good",
+    "total_prompt_cache_health": "warning",
     "estimated_prompt_tokens": 456
   },
   "prompt_metadata_paths": {
