@@ -192,6 +192,16 @@ def build_export_rows(state: TaskState, state_root: Path) -> list[dict[str, Any]
             stable_prefix_ratio = metrics.get("stable_prefix_ratio")
         if stable_prefix_ratio is not None:
             row["stable_prefix_ratio"] = stable_prefix_ratio
+        contract_prefix_ratio = review.get("contract_prefix_ratio")
+        if contract_prefix_ratio is None and metrics is not None:
+            contract_prefix_ratio = metrics.get("contract_prefix_ratio")
+        if contract_prefix_ratio is not None:
+            row["contract_prefix_ratio"] = contract_prefix_ratio
+        cache_health = review.get("cache_health")
+        if cache_health is None and metrics is not None:
+            cache_health = metrics.get("cache_health")
+        if cache_health:
+            row["cache_health"] = cache_health
         rows.append(row)
 
     merge = phases.get("merge", {})

@@ -85,7 +85,8 @@ Stdout is a single JSON object. No extra prose.
     "merge_error": "",
     "artifact_dir": "/absolute/path/to/artifacts/iter-001",
     "created_at": "ISO8601 or empty",
-    "graph_node_id": "T1 or empty for legacy tasks"
+    "graph_node_id": "T1 or empty for legacy tasks",
+    "running_provider": "cursor or empty when no provider subprocess is active"
   },
   "task_graph": {
     "schema_version": 1,
@@ -155,6 +156,10 @@ Stdout is a single JSON object. No extra prose.
 | `log_path` | string | Path to `runner.log` (v0.5) |
 | `current_message` | string | Short UI-friendly status message (v0.6) |
 | `running_node_ids` | array | Parallel running node ids when applicable (v0.9) |
+| `reviewer_prompt_metrics` | object \| omitted | Latest attempt reviewer cache metrics when `review.prompt.metrics.json` exists (v0.10 additive) |
+| `heartbeat` | object \| omitted | Fresh `runner.heartbeat.json` phase/provider snapshot during active runs (v0.10 additive) |
+
+`attempt.running_provider` (v0.10) is non-empty while a provider subprocess is active.
 
 The `task_graph` block is omitted for legacy tasks without a graph. See [TASK_GRAPH.md](TASK_GRAPH.md).
 
@@ -266,7 +271,7 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 
 In addition to goal/repo/providers/test-command:
 
-- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. With this separator, every following token belongs to the test command; put cc-loop flags before `--test-command`. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
+- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. With this separator, every following token belongs to the test command; put cc-loop flags before `--test-command`. cc-loop emits a **stderr warning** (non-fatal) when known cc-loop flags appear after `--test-command --`. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
 - `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`)
 - `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (config key `provider_watchdog_grace_seconds`, default `5`)
 - `--task-id ID` — explicit task id (recommended for integrations)
@@ -293,7 +298,7 @@ Each attempt artifact directory may include:
 | `plan.prompt.meta.json` | Planner prompt version/label/deployment metadata |
 | `implementer.prompt.meta.json` | Implementer prompt metadata |
 | `review.prompt.meta.json` | Reviewer prompt metadata |
-| `review.prompt.metrics.json` | Reviewer cache-layout metrics (stable prefix ratio, token estimates) |
+| `review.prompt.metrics.json` | Reviewer cache-layout metrics (`stable_prefix_ratio`, `contract_prefix_ratio`, `cache_health`, token estimates) |
 | `attempt.trace.json` | Normalized per-attempt trace with phase status and artifact paths |
 | `command.argv.json` | Executed argv per phase (`planner`, `implementer`, `reviewer`, `test`) |
 | `subprocess.result.json` | Subprocess exit metadata per phase (`exit_code`, `timed_out`, `hung`, `duration_seconds`, `killed`, stdout/stderr paths) |
@@ -354,6 +359,9 @@ when available, and `timestamp`.
   "reviewer_prompt_metrics": {
     "layout": "stable-prefix-v1",
     "stable_prefix_ratio": 0.8,
+    "contract_prefix_ratio": 0.92,
+    "cache_health": "good",
+    "total_prompt_cache_health": "warning",
     "estimated_prompt_tokens": 456
   },
   "prompt_metadata_paths": {

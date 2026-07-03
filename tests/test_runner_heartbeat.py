@@ -40,6 +40,21 @@ class RunnerHeartbeatTests(unittest.TestCase):
         self.assertEqual(loaded.graph_node_id, "T1")
         self.assertEqual(loaded.task_id, "hb-task")
 
+    def test_heartbeat_persists_running_provider(self) -> None:
+        hb = refresh_heartbeat(
+            self.state_root,
+            task_id="hb-task",
+            pid=99,
+            status="running",
+            phase="executing",
+            iteration=1,
+            running_provider="cursor",
+        )
+        loaded = read_heartbeat(self.state_root, "hb-task")
+        assert loaded is not None
+        self.assertEqual(hb.running_provider, "cursor")
+        self.assertEqual(loaded.running_provider, "cursor")
+
     def test_stale_heartbeat_detection(self) -> None:
         hb = refresh_heartbeat(
             self.state_root,

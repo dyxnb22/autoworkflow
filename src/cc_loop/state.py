@@ -123,6 +123,7 @@ class AttemptRecord:
     implementer_raw_path: str = ""
     implementer_exit_code: int | None = None
     implementer_provider: str = ""
+    running_provider: str = ""
     test_command: list[str] = field(default_factory=list)
     test_exit_code: int | None = None
     test_status: str = ""

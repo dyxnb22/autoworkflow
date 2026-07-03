@@ -59,6 +59,8 @@ def test_reviewer_prompt_keeps_stable_contract_before_dynamic_payload() -> None:
     assert prompt.index('"decision": "approve"') < payload_index
     assert prompt.index("Task ID: task-a") > payload_index
     assert prompt.index("diff --git") > patch_index
+    assert "diff --git" not in prompt[:payload_index]
+    assert "### Test result" in prompt[payload_index:]
 
 
 def test_reviewer_prompt_prefix_is_identical_before_dynamic_payload() -> None:
@@ -110,6 +112,7 @@ def test_reviewer_prompt_metrics_describe_cache_layout() -> None:
     assert metrics["stable_prefix_chars"] == prompt.index("## Dynamic Review Payload")
     assert metrics["dynamic_payload_chars"] == len(prompt) - metrics["stable_prefix_chars"]
     assert metrics["stable_prefix_ratio"] > 0.75
+    assert metrics["cache_health"] == "good"
     assert metrics["patch_body_chars"] == len(patch_body)
     assert metrics["diff_stat_chars"] == len(diff_stat)
     assert metrics["estimated_prompt_tokens"] == (len(prompt) + 3) // 4
