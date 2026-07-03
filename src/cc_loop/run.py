@@ -284,17 +284,16 @@ def _invoke_provider(
             raw_output_path=raw_output_path,
             print_only=print_only,
         )
+        write_subprocess_result_artifact(
+            artifact_root,
+            phase=phase_key,
+            result=run_result,
+            stdout_path=str(run_result.raw_artifact_path),
+        )
+        return run_result
     finally:
         attempt.running_provider = ""
         save_state(state, state_root)
-
-    write_subprocess_result_artifact(
-        artifact_root,
-        phase=phase_key,
-        result=run_result,
-        stdout_path=str(run_result.raw_artifact_path),
-    )
-    return run_result
 
 
 def _provider_failure_report(
@@ -1882,10 +1881,10 @@ def _estimated_tokens_from_chars(char_count: int) -> int:
     return (char_count + 3) // 4
 
 
-def _classify_cache_health(stable_prefix_ratio: float) -> str:
-    if stable_prefix_ratio >= 0.60:
+def _classify_cache_health(prefix_ratio: float) -> str:
+    if prefix_ratio >= 0.60:
         return "good"
-    if stable_prefix_ratio >= 0.40:
+    if prefix_ratio >= 0.40:
         return "warning"
     return "poor"
 
@@ -1903,8 +1902,14 @@ def build_reviewer_prompt_metrics(
     dynamic_payload_chars = len(prompt) - stable_prefix_chars
     patch_chars = len(patch_body)
     diff_stat_chars = len(diff_stat)
+    evidence_payload_chars = patch_chars + diff_stat_chars
+    contract_dynamic_chars = max(0, dynamic_payload_chars - evidence_payload_chars)
+    contract_denominator = stable_prefix_chars + contract_dynamic_chars
     stable_prefix_ratio = round(stable_prefix_chars / len(prompt), 6) if prompt else 0.0
     dynamic_payload_ratio = round(dynamic_payload_chars / len(prompt), 6) if prompt else 0.0
+    contract_prefix_ratio = (
+        round(stable_prefix_chars / contract_denominator, 6) if contract_denominator > 0 else 0.0
+    )
     return {
         "schema_version": 1,
         "layout": "stable-prefix-v1",
@@ -1914,7 +1919,10 @@ def build_reviewer_prompt_metrics(
         "dynamic_payload_chars": dynamic_payload_chars,
         "stable_prefix_ratio": stable_prefix_ratio,
         "dynamic_payload_ratio": dynamic_payload_ratio,
-        "cache_health": _classify_cache_health(stable_prefix_ratio),
+        "contract_prefix_ratio": contract_prefix_ratio,
+        "evidence_payload_chars": evidence_payload_chars,
+        "cache_health": _classify_cache_health(contract_prefix_ratio),
+        "total_prompt_cache_health": _classify_cache_health(stable_prefix_ratio),
         "diff_stat_chars": diff_stat_chars,
         "patch_body_chars": patch_chars,
         "estimated_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),

@@ -15,7 +15,7 @@ from unittest import mock
 import tests.fake_providers  # noqa: F401
 from cc_loop.cli import main
 from cc_loop.config import merge_config
-from cc_loop.inspect import build_status_snapshot
+from cc_loop.inspect import build_status_snapshot, derive_current_message
 from cc_loop.failure import failure_report_path
 from cc_loop.providers.base import ProviderAdapter, ProviderRunResult, register_provider
 from cc_loop.run import (
@@ -39,6 +39,7 @@ from cc_loop.state import (
     save_state,
     utc_now_iso,
 )
+from cc_loop.runner_heartbeat import refresh_heartbeat
 from cc_loop.task_graph import graph_from_planner_json
 from tests.helpers import TempEnv, make_task
 
@@ -190,7 +191,7 @@ class ReviewerPromptMetricsTests(unittest.TestCase):
         marker = "## Dynamic Review Payload"
         self.assertNotIn("diff --git", prompt[: prompt.index(marker)])
 
-    def test_large_patch_marks_cache_health_poor(self) -> None:
+    def test_large_patch_keeps_contract_cache_health_good(self) -> None:
         diff_stat = " big.txt | 999 +"
         patch_body = "x" * 5000
         prompt = build_reviewer_prompt(
@@ -221,7 +222,10 @@ class ReviewerPromptMetricsTests(unittest.TestCase):
             diff_stat=diff_stat,
             patch_body=patch_body,
         )
-        self.assertEqual(metrics["cache_health"], "poor")
+        self.assertLess(metrics["stable_prefix_ratio"], 0.40)
+        self.assertEqual(metrics["total_prompt_cache_health"], "poor")
+        self.assertGreater(metrics["contract_prefix_ratio"], 0.60)
+        self.assertEqual(metrics["cache_health"], "good")
 
 
 @register_provider
@@ -600,3 +604,68 @@ class SubprocessDiagnosticsTests(unittest.TestCase):
                     self.assertIn(key, entry, msg=f"{phase} missing {key}")
         finally:
             env.close()
+
+
+class HeartbeatStatusEnrichmentTests(unittest.TestCase):
+    def test_fresh_heartbeat_overrides_stale_worktree_created_phase(self) -> None:
+        env = TempEnv()
+        try:
+            make_task(repo=env.repo(), state_root=env.state_root(), task_id="hb-enrich")
+            state = load_state("hb-enrich", env.state_root())
+            state.status = TaskStatus.RUNNING
+            state.history = [
+                AttemptRecord(
+                    iteration=1,
+                    retry=0,
+                    created_at=utc_now_iso(),
+                    base_commit=state.base_commit,
+                    phase=AttemptPhase.WORKTREE_CREATED,
+                )
+            ]
+            save_state(state, env.state_root())
+            refresh_heartbeat(
+                env.state_root(),
+                task_id="hb-enrich",
+                pid=4242,
+                status="running",
+                phase="executing",
+                iteration=1,
+                running_provider="cursor",
+            )
+            snapshot = build_status_snapshot(load_state("hb-enrich", env.state_root()), env.state_root())
+            self.assertEqual(snapshot["attempt"]["phase"], "executing")
+            self.assertEqual(snapshot["attempt"]["running_provider"], "cursor")
+            self.assertEqual(snapshot["current_message"], "Implementer running (cursor)")
+            self.assertIn("heartbeat", snapshot)
+        finally:
+            env.close()
+
+    def test_derive_current_message_prefers_provider_phase_while_runner_active(self) -> None:
+        attempt = AttemptRecord(
+            iteration=1,
+            retry=0,
+            created_at=utc_now_iso(),
+            base_commit="abc",
+            phase=AttemptPhase.WORKTREE_CREATED,
+            graph_node_id="T1",
+        )
+        state = TaskState(
+            task_id="msg",
+            goal="g",
+            target_repo="/repo",
+            base_branch="main",
+            base_commit="abc",
+            status=TaskStatus.RUNNING,
+            iteration=1,
+            config=merge_config({}),
+            history=[attempt],
+            providers={"planner": "codex", "reviewer": "codex", "implementer": "cursor"},
+        )
+        message = derive_current_message(
+            state,
+            attempt,
+            running=True,
+            live_phase="executing",
+            live_running_provider="cursor",
+        )
+        self.assertEqual(message, "Implementer running (cursor)")

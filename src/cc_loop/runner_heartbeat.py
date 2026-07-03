@@ -26,6 +26,7 @@ class RunnerHeartbeat:
     phase: str
     iteration: int
     graph_node_id: str = ""
+    running_provider: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,6 +42,7 @@ class RunnerHeartbeat:
             phase=str(data.get("phase", "")),
             iteration=int(data.get("iteration", 0)),
             graph_node_id=str(data.get("graph_node_id", "")),
+            running_provider=str(data.get("running_provider", "")),
         )
 
 
@@ -99,6 +101,7 @@ def refresh_heartbeat(
     phase: str,
     iteration: int,
     graph_node_id: str = "",
+    running_provider: str = "",
     started_at: str | None = None,
 ) -> RunnerHeartbeat:
     existing = read_heartbeat(state_root, task_id)
@@ -111,6 +114,7 @@ def refresh_heartbeat(
         phase=phase,
         iteration=iteration,
         graph_node_id=graph_node_id,
+        running_provider=running_provider,
     )
     write_heartbeat(state_root, hb)
     return hb

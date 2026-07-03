@@ -57,6 +57,7 @@ def run_provider_with_heartbeat(
                 phase=attempt.phase.value,
                 iteration=state.iteration,
                 graph_node_id=attempt.graph_node_id,
+                running_provider=attempt.running_provider,
             )
 
     thread = threading.Thread(target=_refresh_loop, name="cc-loop-heartbeat", daemon=True)
@@ -93,6 +94,7 @@ def run_provider_with_heartbeat(
         phase=attempt.phase.value,
         iteration=state.iteration,
         graph_node_id=attempt.graph_node_id,
+        running_provider=attempt.running_provider,
     )
 
     if errors:

@@ -750,6 +750,7 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
             phase=phase,
             iteration=state.iteration,
             graph_node_id=attempt.graph_node_id if attempt else "",
+            running_provider=attempt.running_provider if attempt else "",
         )
 
         if attempt is not None and artifact_paths is not None:

@@ -20,7 +20,7 @@ from cc_loop.state import (
     task_dir,
 )
 from cc_loop.budgets import wall_clock_elapsed_seconds
-from cc_loop.runner_heartbeat import is_heartbeat_stale, read_heartbeat
+from cc_loop.runner_heartbeat import RunnerHeartbeat, is_heartbeat_stale, read_heartbeat
 from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph, graph_status_summary, sync_graph_node_with_attempt
 
 INTEGRATION_SCHEMA_VERSION = 1
@@ -52,9 +52,61 @@ def _reviewer_prompt_metrics_snapshot(
     return {
         "layout": metrics.get("layout"),
         "stable_prefix_ratio": metrics.get("stable_prefix_ratio"),
+        "contract_prefix_ratio": metrics.get("contract_prefix_ratio"),
         "cache_health": metrics.get("cache_health"),
+        "total_prompt_cache_health": metrics.get("total_prompt_cache_health"),
         "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
     }
+
+
+_ACTIVE_PROVIDER_PHASES = frozenset(
+    {
+        AttemptPhase.PLANNING.value,
+        AttemptPhase.EXECUTING.value,
+        AttemptPhase.REVIEWING.value,
+        AttemptPhase.TESTING.value,
+    }
+)
+
+
+def _resolve_live_attempt_fields(
+    attempt: AttemptRecord | None,
+    *,
+    running: bool,
+    hb: RunnerHeartbeat | None,
+    stale_seconds: int,
+) -> tuple[str, str]:
+    """Merge state.json attempt fields with a fresh runner heartbeat when available."""
+    if attempt is None:
+        return "", ""
+    phase = attempt.phase.value
+    running_provider = attempt.running_provider or ""
+    if hb is None or is_heartbeat_stale(hb, stale_seconds=stale_seconds):
+        return phase, running_provider
+    if hb.running_provider:
+        running_provider = hb.running_provider
+    if hb.phase in _ACTIVE_PROVIDER_PHASES:
+        if phase == AttemptPhase.WORKTREE_CREATED.value or hb.running_provider:
+            phase = hb.phase
+    return phase, running_provider
+
+
+def _provider_phase_message(phase: str, running_provider: str) -> str:
+    if phase == AttemptPhase.REVIEWING.value:
+        if running_provider:
+            return f"Reviewer running ({running_provider})"
+        return "Review in progress"
+    if phase == AttemptPhase.TESTING.value:
+        return "Running tests"
+    if phase == AttemptPhase.EXECUTING.value:
+        if running_provider:
+            return f"Implementer running ({running_provider})"
+        return "Implementer running"
+    if phase == AttemptPhase.PLANNING.value:
+        if running_provider:
+            return f"Planner running ({running_provider})"
+        return "Planning"
+    return ""
 
 
 def runner_pid_path(state_root: Path, task_id: str) -> Path:
@@ -311,12 +363,27 @@ def build_attempt_snapshot(
     }
 
 
-def derive_current_message(state: TaskState, attempt: AttemptRecord | None, running: bool, *, runner_state: str = "") -> str:
+def derive_current_message(
+    state: TaskState,
+    attempt: AttemptRecord | None,
+    running: bool,
+    *,
+    runner_state: str = "",
+    live_phase: str = "",
+    live_running_provider: str = "",
+) -> str:
     if runner_state == "stale_heartbeat":
         if running:
             return "Runner heartbeat is stale but process is still alive — cancel or wait"
         return "Runner heartbeat is stale with no live runner — safe to resume or cleanup"
+    phase = live_phase or (attempt.phase.value if attempt is not None else "")
+    running_provider = live_running_provider or (
+        attempt.running_provider if attempt is not None else ""
+    )
     if running:
+        provider_message = _provider_phase_message(phase, running_provider)
+        if provider_message:
+            return provider_message
         if attempt is not None and attempt.graph_node_id:
             return f"Running node {attempt.graph_node_id}"
         return "Auto runner active"
@@ -341,21 +408,10 @@ def derive_current_message(state: TaskState, attempt: AttemptRecord | None, runn
         return "Reviewer rejected — retry available"
     if attempt.phase == AttemptPhase.APPROVED:
         return "Approved — pending merge"
-    if attempt.phase == AttemptPhase.REVIEWING:
-        if attempt.running_provider:
-            return f"Reviewer running ({attempt.running_provider})"
-        return "Review in progress"
-    if attempt.phase == AttemptPhase.TESTING:
-        return "Running tests"
-    if attempt.phase == AttemptPhase.EXECUTING:
-        if attempt.running_provider:
-            return f"Implementer running ({attempt.running_provider})"
-        return "Implementer running"
-    if attempt.phase == AttemptPhase.PLANNING:
-        if attempt.running_provider:
-            return f"Planner running ({attempt.running_provider})"
-        return "Planning"
-    return f"Phase: {attempt.phase.value}"
+    provider_message = _provider_phase_message(phase, running_provider)
+    if provider_message:
+        return provider_message
+    return f"Phase: {phase or attempt.phase.value}"
 
 
 def _runner_capability_flags(state: TaskState, state_root: Path, running: bool) -> dict[str, bool]:
@@ -394,6 +450,12 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
     from cc_loop.test_command import format_test_command_display
 
     runner_state = runner_state_label(state_root, state.task_id, stale_heartbeat_seconds=stale_seconds)
+    live_phase, live_running_provider = _resolve_live_attempt_fields(
+        attempt,
+        running=running,
+        hb=hb,
+        stale_seconds=stale_seconds,
+    )
     next_action = derive_next_action(
         state,
         attempt,
@@ -424,9 +486,25 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
         "runner_started_at": hb.started_at if hb else "",
         "elapsed_seconds": int(wall_clock_elapsed_seconds(state)),
         "log_path": str(runner_log_path(state_root, state.task_id)),
-        "current_message": derive_current_message(state, attempt, running, runner_state=runner_state),
+        "current_message": derive_current_message(
+            state,
+            attempt,
+            running,
+            runner_state=runner_state,
+            live_phase=live_phase,
+            live_running_provider=live_running_provider,
+        ),
         **caps,
     }
+    if attempt is not None:
+        snapshot["attempt"]["phase"] = live_phase or snapshot["attempt"]["phase"]
+        snapshot["attempt"]["running_provider"] = live_running_provider
+    if hb is not None and not is_heartbeat_stale(hb, stale_seconds=stale_seconds):
+        snapshot["heartbeat"] = {
+            "phase": hb.phase,
+            "running_provider": hb.running_provider,
+            "updated_at": hb.updated_at,
+        }
     if runner_state == "stale_heartbeat":
         snapshot["stale_heartbeat_guidance"] = derive_stale_heartbeat_guidance(
             running=running,

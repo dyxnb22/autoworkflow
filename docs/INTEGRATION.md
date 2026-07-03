@@ -295,7 +295,7 @@ Each attempt artifact directory may include:
 | `plan.prompt.meta.json` | Planner prompt version/label/deployment metadata |
 | `implementer.prompt.meta.json` | Implementer prompt metadata |
 | `review.prompt.meta.json` | Reviewer prompt metadata |
-| `review.prompt.metrics.json` | Reviewer cache-layout metrics (`stable_prefix_ratio`, `cache_health`, token estimates) |
+| `review.prompt.metrics.json` | Reviewer cache-layout metrics (`stable_prefix_ratio`, `contract_prefix_ratio`, `cache_health`, token estimates) |
 | `attempt.trace.json` | Normalized per-attempt trace with phase status and artifact paths |
 | `command.argv.json` | Executed argv per phase (`planner`, `implementer`, `reviewer`, `test`) |
 | `subprocess.result.json` | Subprocess exit metadata per phase (`exit_code`, `timed_out`, `hung`, `duration_seconds`, `killed`, stdout/stderr paths) |
