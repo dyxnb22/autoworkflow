@@ -41,6 +41,7 @@ class LoopConfig(TypedDict, total=False):
     max_parallel_nodes: int
     allow_parallel_execution: bool
     allow_node_policy_weakening: bool
+    planner_granularity: str
 
 
 DEFAULT_CONFIG: LoopConfig = {
@@ -77,6 +78,7 @@ DEFAULT_CONFIG: LoopConfig = {
     "max_parallel_nodes": 1,
     "allow_parallel_execution": False,
     "allow_node_policy_weakening": False,
+    "planner_granularity": "auto",
 }
 
 

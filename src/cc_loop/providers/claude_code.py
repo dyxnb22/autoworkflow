@@ -148,6 +148,9 @@ class ClaudeCodeAdapter(ProviderAdapter):
             exit_code=result.returncode,
             raw_artifact_path=raw_output_path or output_path,
             timed_out=result.timed_out,
+            interrupted=result.interrupted,
+            killed=result.killed,
+            duration_seconds=result.duration_seconds,
         )
 
     def run_planner(

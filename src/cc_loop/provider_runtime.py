@@ -1,0 +1,142 @@
+"""Provider invocation helpers: heartbeat refresh and subprocess diagnostics."""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from cc_loop.providers.base import ProviderAdapter, ProviderRunResult
+from cc_loop.runner_heartbeat import refresh_heartbeat
+from cc_loop.state import AttemptRecord, TaskState
+from cc_loop.subprocess_util import RunResult
+
+
+def _heartbeat_interval_seconds(stale_seconds: int) -> float:
+    if stale_seconds <= 0:
+        return 30.0
+    return max(5.0, min(30.0, stale_seconds / 3))
+
+
+def run_provider_with_heartbeat(
+    provider: ProviderAdapter,
+    *,
+    state_root: Path,
+    state: TaskState,
+    attempt: AttemptRecord,
+    heartbeat_pid: int | None = None,
+    **provider_kwargs: Any,
+) -> ProviderRunResult:
+    """Run a provider while refreshing runner heartbeat during long calls."""
+    pid = heartbeat_pid if heartbeat_pid is not None else os.getpid()
+    stale_seconds = int(state.config.get("stale_heartbeat_seconds", 120) or 120)
+    stop_event = threading.Event()
+    interval = _heartbeat_interval_seconds(stale_seconds)
+
+    def _refresh_loop() -> None:
+        while not stop_event.wait(timeout=interval):
+            refresh_heartbeat(
+                state_root,
+                task_id=state.task_id,
+                pid=pid,
+                status=state.status.value,
+                phase=attempt.phase.value,
+                iteration=state.iteration,
+                graph_node_id=attempt.graph_node_id,
+            )
+
+    thread = threading.Thread(target=_refresh_loop, name="cc-loop-heartbeat", daemon=True)
+    thread.start()
+    try:
+        return provider.run(**provider_kwargs)
+    finally:
+        stop_event.set()
+        thread.join(timeout=1.0)
+        refresh_heartbeat(
+            state_root,
+            task_id=state.task_id,
+            pid=pid,
+            status=state.status.value,
+            phase=attempt.phase.value,
+            iteration=state.iteration,
+            graph_node_id=attempt.graph_node_id,
+        )
+
+
+def write_command_argv_artifact(
+    artifact_root: Path,
+    *,
+    phase: str,
+    argv: list[str],
+    existing: dict[str, list[str]] | None = None,
+) -> Path:
+    path = artifact_root / "command.argv.json"
+    payload = dict(existing or {})
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = {str(k): list(v) for k, v in loaded.items() if isinstance(v, list)}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+    payload[phase] = list(argv)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def write_subprocess_result_artifact(
+    artifact_root: Path,
+    *,
+    phase: str,
+    result: RunResult | ProviderRunResult,
+    stdout_path: str = "",
+    stderr_path: str = "",
+    existing: dict[str, Any] | None = None,
+) -> Path:
+    path = artifact_root / "subprocess.result.json"
+    payload: dict[str, Any] = dict(existing or {})
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = dict(loaded)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    if isinstance(result, RunResult):
+        entry = {
+            "exit_code": result.returncode,
+            "timed_out": result.timed_out,
+            "duration_seconds": round(result.duration_seconds, 3),
+            "killed": result.killed,
+            "interrupted": result.interrupted,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+        }
+    else:
+        entry = {
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "duration_seconds": round(getattr(result, "duration_seconds", 0.0), 3),
+            "killed": getattr(result, "killed", False),
+            "interrupted": result.interrupted,
+            "stdout_path": stdout_path or str(result.raw_artifact_path),
+            "stderr_path": stderr_path,
+        }
+    payload[phase] = entry
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def provider_argv_from_result(provider: ProviderAdapter, **build_kwargs: Any) -> list[str]:
+    return list(
+        provider.build_args(
+            worktree_path=build_kwargs["worktree_path"],
+            prompt=build_kwargs.get("prompt", ""),
+            output_path=build_kwargs["output_path"],
+            config=build_kwargs["config"],
+        )
+    )

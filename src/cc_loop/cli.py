@@ -17,7 +17,7 @@ from cc_loop.git import resolve_base_commit_if_possible
 from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, failure_report_path
 from cc_loop.report import build_report, format_report_human
 from cc_loop.runner_control import cancel_task, cleanup_task, stop_runner
-from cc_loop.runner_heartbeat import refresh_heartbeat, remove_heartbeat
+from cc_loop.runner_heartbeat import mark_heartbeat_terminal, refresh_heartbeat, remove_heartbeat
 from cc_loop.evals import format_eval_human, run_eval_suite
 from cc_loop.export import write_jsonl_export
 from cc_loop.events import EventType, append_event, read_events
@@ -26,6 +26,7 @@ from cc_loop.inspect import (
     clear_runner_pid_if_matches,
     format_task_graph_human,
     runner_log_path,
+    runner_pid_path,
 )
 from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph
 from cc_loop.recovery import (
@@ -54,6 +55,12 @@ from cc_loop.run import (
 )
 from cc_loop.parallel_scheduler import discover_parallel_runnable, execute_parallel_batch
 from cc_loop.budgets import check_budgets
+from cc_loop.test_command import (
+    TEST_COMMAND_HINT,
+    format_test_command_argv,
+    format_test_command_display,
+    normalize_test_command,
+)
 from cc_loop.state import (
     DEFAULT_STATE_ROOT,
     AttemptPhase,
@@ -67,12 +74,26 @@ from cc_loop.state import (
 )
 
 
+class CcLoopArgumentParser(argparse.ArgumentParser):
+    """Argument parser with clearer errors for misplaced test-command flags."""
+
+    def error(self, message: str) -> None:
+        if message.startswith("unrecognized arguments:"):
+            tail = message.split("unrecognized arguments:", 1)[1].strip()
+            if tail.startswith("-"):
+                self.print_usage(sys.stderr)
+                print(f"error: {message}", file=sys.stderr)
+                print(f"hint: {TEST_COMMAND_HINT}", file=sys.stderr)
+                self.exit(2)
+        super().error(message)
+
+
 def _task_id_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task-id", help="Explicit task identifier")
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cc-loop", description="Local coding agent orchestrator")
+    parser = CcLoopArgumentParser(prog="cc-loop", description="Local coding agent orchestrator")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--state-root",
@@ -91,7 +112,17 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--task-id", help="Optional task identifier")
     init_parser.add_argument("--base-branch", default="main", help="Base branch name")
     init_parser.add_argument(
-        "--test-command", nargs="+", metavar="ARG", default=None, help="Test command argv (e.g. pytest tests/)"
+        "--test-command",
+        nargs="+",
+        metavar="ARG",
+        default=None,
+        help="Test command argv; use `--` before flags (e.g. --test-command -- pytest tests -q)",
+    )
+    init_parser.add_argument(
+        "--planner-granularity",
+        choices=["single", "auto", "graph"],
+        default=None,
+        help="Planner decomposition: single node, auto (default), or multi-node graph",
     )
     init_parser.add_argument("--planner", default=None, help="Planner provider name (default: codex)")
     init_parser.add_argument("--reviewer", default=None, help="Reviewer provider name (default: codex)")
@@ -181,7 +212,11 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--reviewer", default=None, help="Reviewer provider name")
     doctor_parser.add_argument("--implementer", default=None, help="Implementer provider name")
     doctor_parser.add_argument(
-        "--test-command", nargs="+", metavar="ARG", default=None, help="Test command argv to validate",
+        "--test-command",
+        nargs="+",
+        metavar="ARG",
+        default=None,
+        help="Test command argv to validate; use `--` before flags",
     )
     doctor_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
 
@@ -210,7 +245,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Task identifier (positional alternative to --task-id)",
     )
     _task_id_arg(report_parser)
-    report_parser.add_argument("--json", action="store_true", default=False)
+    report_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
+    report_parser.add_argument(
+        "--format",
+        choices=["json", "human"],
+        default=None,
+        help="Output format (alias for --json when set to json)",
+    )
 
     eval_parser = subparsers.add_parser("eval", help="Run a local eval suite against task artifacts")
     _task_id_arg(eval_parser)
@@ -271,7 +312,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     task_id = args.task_id or uuid.uuid4().hex[:12]
     overrides: dict = {"base_branch": args.base_branch}
     if args.test_command is not None:
-        overrides["test_command"] = args.test_command
+        try:
+            overrides["test_command"] = normalize_test_command(args.test_command)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print(f"hint: {TEST_COMMAND_HINT}", file=sys.stderr)
+            return 1
     if args.planner is not None:
         overrides["planner_provider"] = args.planner
     if args.reviewer is not None:
@@ -308,6 +354,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["max_artifact_log_bytes"] = args.max_artifact_log_bytes
     if args.allow_node_policy_weakening:
         overrides["allow_node_policy_weakening"] = True
+    if args.planner_granularity is not None:
+        overrides["planner_granularity"] = args.planner_granularity
 
     config = merge_config(overrides)
     base_commit = resolve_base_commit_if_possible(repo, args.base_branch)
@@ -334,7 +382,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"implementer: {config['implementer_provider']}"
     )
     if config.get("test_command"):
-        print(f"test_command: {' '.join(config['test_command'])}")
+        print(f"test_command: {format_test_command_argv(config['test_command'])}")
+        print(f"test_command_argv: {format_test_command_display(config['test_command'])}")
     print("next: cc-loop run")
     return 0
 
@@ -355,6 +404,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     attempt = state.history[-1] if state.history else None
     print(f"task_id: {state.task_id}")
     print(f"status: {state.status.value}")
+    if state.config.get("test_command"):
+        print(f"test_command_argv: {format_test_command_display(state.config.get('test_command'))}")
     print(f"goal: {state.goal}")
     print(f"target_repo: {state.target_repo}")
     print(f"iteration: {state.iteration}")
@@ -480,7 +531,10 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 1
     state = load_state(task_id, args.state_root)
     report = build_report(state, args.state_root)
-    if args.json:
+    output_format = args.format
+    if output_format is None:
+        output_format = "json" if args.json else "human"
+    if output_format == "json":
         print(json.dumps(report, indent=2))
     else:
         print(format_report_human(report))
@@ -523,6 +577,14 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     repo = args.repo.expanduser().resolve()
+    test_command = args.test_command
+    if test_command is not None:
+        try:
+            test_command = normalize_test_command(test_command)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print(f"hint: {TEST_COMMAND_HINT}", file=sys.stderr)
+            return 1
     try:
         run_doctor_preflight(
             target_repo=repo,
@@ -530,16 +592,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             planner=args.planner,
             reviewer=args.reviewer,
             implementer=args.implementer,
-            test_command=args.test_command,
+            test_command=test_command,
         )
     except PreflightError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
-        print(json.dumps({"ok": True}))
+        payload = {"ok": True}
+        if test_command is not None:
+            payload["test_command_argv"] = test_command
+        print(json.dumps(payload))
     else:
         print("ok")
+        if test_command is not None:
+            print(f"test_command_argv: {format_test_command_display(test_command)}")
     return 0
 
 
@@ -655,6 +722,7 @@ def _run_auto_loop(args: argparse.Namespace, task_id: str) -> int:
         event_type=EventType.RUNNER_STARTED,
         message="auto loop started",
     )
+    runner_pid_path(state_root, task_id).write_text(f"{os.getpid()}\n", encoding="utf-8")
 
     while True:
         state = load_state(task_id, state_root)
@@ -807,6 +875,7 @@ def _handle_provider_auto_failure(
     artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
     report = classify_provider_exception(exc, phase=phase.value, provider=provider)
     soft_reset_provider_failure(state, state_root, phase=phase)
+    mark_heartbeat_terminal(state_root, task_id, status="stopped", phase=phase.value)
     state = load_state(task_id, state_root)
     attempt = state.history[-1]
     if report.disposition == RecoveryDisposition.RECOVERABLE and state.config.get("auto_recover_provider_errors", True):
@@ -901,12 +970,33 @@ def _notify(title: str, message: str) -> None:
         pass
 
 
+def _expand_test_command_with_double_dash(argv: list[str]) -> list[str]:
+    """Expand ``--test-command -- ARG...`` before argparse sees a bare ``--``."""
+    result: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--test-command" and i + 1 < len(argv) and argv[i + 1] == "--":
+            result.append("--test-command")
+            i += 2
+            parts: list[str] = []
+            while i < len(argv):
+                parts.append(argv[i])
+                i += 1
+            if parts:
+                result.append(" ".join(parts))
+            continue
+        result.append(token)
+        i += 1
+    return result
+
+
 def _apply_state_root_default(argv: list[str] | None) -> list[str]:
     args = list(sys.argv[1:] if argv is None else argv)
     env_root = os.environ.get("CC_LOOP_STATE_ROOT")
     if env_root and "--state-root" not in args:
-        return ["--state-root", env_root, *args]
-    return args
+        args = ["--state-root", env_root, *args]
+    return _expand_test_command_with_double_dash(args)
 
 
 def main(argv: list[str] | None = None) -> int:

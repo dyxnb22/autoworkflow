@@ -54,12 +54,21 @@ def is_process_alive(pid: int) -> bool:
 
 
 def is_runner_alive(state_root: Path, task_id: str) -> tuple[bool, int | None]:
+    from cc_loop.runner_control import validate_pid_ownership
+
     pid = read_runner_pid(state_root, task_id)
-    if pid is None:
-        return False, None
-    if not is_process_alive(pid):
+    if pid is not None and is_process_alive(pid):
+        return True, pid
+
+    hb = read_heartbeat(state_root, task_id)
+    if hb is not None and hb.pid and is_process_alive(hb.pid):
+        if validate_pid_ownership(hb.pid, task_id, state_root=state_root):
+            return True, hb.pid
+    if pid is not None:
         return False, pid
-    return True, pid
+    if hb is not None and hb.pid:
+        return False, hb.pid
+    return False, None
 
 
 def clear_runner_pid_if_matches(state_root: Path, task_id: str, expected_pid: int | None = None) -> None:
@@ -87,7 +96,10 @@ def derive_next_action(
     *,
     running: bool,
     state_root: Path | None = None,
+    runner_state: str = "",
 ) -> str:
+    if runner_state == "stale_heartbeat":
+        return _derive_stale_heartbeat_next_action(state, attempt, running=running)
     artifact_paths = None
     if attempt is not None and state_root is not None:
         artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
@@ -99,6 +111,39 @@ def derive_next_action(
         running=running,
     )
     return derive_next_action_from_step(step, report)
+
+
+def _derive_stale_heartbeat_next_action(
+    state: TaskState,
+    attempt: AttemptRecord | None,
+    *,
+    running: bool,
+) -> str:
+    if running:
+        return "cancel"
+    if state.status == TaskStatus.CANCELLED:
+        return "cleanup"
+    if attempt is not None and attempt.phase in {AttemptPhase.EXECUTING, AttemptPhase.PLANNING, AttemptPhase.REVIEWING}:
+        return "resume"
+    return "resume"
+
+
+def derive_stale_heartbeat_guidance(
+    *,
+    running: bool,
+    runner_pid: int | None,
+) -> dict[str, str]:
+    if running:
+        return {
+            "resume": "risk: may start a second provider while the existing runner is still alive",
+            "cancel": "recommended: stop the hung runner and mark the task cancelled",
+            "cleanup": "risk: removes runtime files but may leave a live runner process",
+        }
+    return {
+        "resume": "recommended: no live runner detected; resume from saved phase",
+        "cancel": "mark task cancelled without starting new work",
+        "cleanup": "remove runner pid/heartbeat/worktrees after confirming no live process",
+    }
 
 
 def _empty_failure_snapshot(attempt: AttemptRecord | None = None) -> dict:
@@ -233,7 +278,11 @@ def build_attempt_snapshot(
     }
 
 
-def derive_current_message(state: TaskState, attempt: AttemptRecord | None, running: bool) -> str:
+def derive_current_message(state: TaskState, attempt: AttemptRecord | None, running: bool, *, runner_state: str = "") -> str:
+    if runner_state == "stale_heartbeat":
+        if running:
+            return "Runner heartbeat is stale but process is still alive — cancel or wait"
+        return "Runner heartbeat is stale with no live runner — safe to resume or cleanup"
     if running:
         if attempt is not None and attempt.graph_node_id:
             return f"Running node {attempt.graph_node_id}"
@@ -303,6 +352,16 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
     hb = read_heartbeat(state_root, state.task_id)
     caps = _runner_capability_flags(state, state_root, running)
     from cc_loop.runner_control import runner_state_label
+    from cc_loop.test_command import format_test_command_display
+
+    runner_state = runner_state_label(state_root, state.task_id, stale_heartbeat_seconds=stale_seconds)
+    next_action = derive_next_action(
+        state,
+        attempt,
+        running=running,
+        state_root=state_root,
+        runner_state=runner_state,
+    )
 
     snapshot = {
         "schema_version": INTEGRATION_SCHEMA_VERSION,
@@ -314,19 +373,26 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
         "base_commit": state.base_commit,
         "status": state.status.value,
         "iteration": state.iteration,
+        "test_command_argv": list(state.config.get("test_command") or []),
+        "test_command_display": format_test_command_display(state.config.get("test_command")),
         "attempt": build_attempt_snapshot(state, attempt, state_root),
         "failure": build_failure_snapshot(attempt, state_root, state.task_id, state=state),
-        "next_action": derive_next_action(state, attempt, running=running, state_root=state_root),
+        "next_action": next_action,
         "running": running,
         "runner_pid": runner_pid,
-        "runner_state": runner_state_label(state_root, state.task_id, stale_heartbeat_seconds=stale_seconds),
+        "runner_state": runner_state,
         "last_heartbeat_at": hb.updated_at if hb else "",
         "runner_started_at": hb.started_at if hb else "",
         "elapsed_seconds": int(wall_clock_elapsed_seconds(state)),
         "log_path": str(runner_log_path(state_root, state.task_id)),
-        "current_message": derive_current_message(state, attempt, running),
+        "current_message": derive_current_message(state, attempt, running, runner_state=runner_state),
         **caps,
     }
+    if runner_state == "stale_heartbeat":
+        snapshot["stale_heartbeat_guidance"] = derive_stale_heartbeat_guidance(
+            running=running,
+            runner_pid=runner_pid,
+        )
     if graph is not None:
         snapshot["task_graph"] = build_graph_snapshot(
             graph,

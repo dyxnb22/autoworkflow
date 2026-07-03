@@ -78,7 +78,7 @@ class TempEnv:
 
     def state_root(self) -> Path:
         path = self.root / "state"
-        path.mkdir()
+        path.mkdir(exist_ok=True)
         return path
 
     def worktree_root(self) -> Path:

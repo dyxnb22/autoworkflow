@@ -18,6 +18,9 @@ class RunResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    killed: bool = False
+    interrupted: bool = False
+    duration_seconds: float = 0.0
 
 
 def _terminate_process_group(pid: int, *, grace_seconds: float = 2.0) -> None:
@@ -72,21 +75,48 @@ def run_with_timeout(
 
     proc = subprocess.Popen(**popen_kwargs)
     timed_out = False
+    killed = False
+    interrupted = False
+    started = time.monotonic()
+    stdout = ""
+    stderr = ""
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
+    except KeyboardInterrupt:
+        interrupted = True
         _terminate_process_group(proc.pid)
+        killed = True
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            killed = True
             stdout, stderr = proc.communicate()
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate_process_group(proc.pid)
+        killed = True
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            killed = True
+            stdout, stderr = proc.communicate()
+
+    duration_seconds = time.monotonic() - started
+    returncode = proc.returncode
+    if interrupted:
+        returncode = -1
+    elif timed_out:
+        returncode = -1
 
     return RunResult(
         args=args,
-        returncode=-1 if timed_out else proc.returncode,
+        returncode=returncode,
         stdout=stdout or "",
         stderr=stderr or "",
         timed_out=timed_out,
+        killed=killed,
+        interrupted=interrupted,
+        duration_seconds=duration_seconds,
     )

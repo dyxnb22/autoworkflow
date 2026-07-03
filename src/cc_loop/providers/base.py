@@ -18,6 +18,8 @@ class ProviderRunResult:
     raw_artifact_path: Path
     timed_out: bool = False
     interrupted: bool = False
+    killed: bool = False
+    duration_seconds: float = 0.0
     summary: str = ""
 
 

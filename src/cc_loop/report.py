@@ -8,9 +8,9 @@ from typing import Any
 
 from cc_loop.events import events_path, read_events
 from cc_loop.failure import FailureReport, classify_attempt_outcome, read_failure_report
-from cc_loop.inspect import build_attempt_snapshot, build_failure_snapshot, derive_next_action
+from cc_loop.inspect import build_attempt_snapshot, build_failure_snapshot, derive_next_action, is_runner_alive
 from cc_loop.recovery import decide_auto_step, derive_next_action_from_step
-from cc_loop.runner_control import runner_log_path
+from cc_loop.runner_control import runner_log_path, runner_state_label
 from cc_loop.state import (
     AttemptPhase,
     TaskState,
@@ -157,12 +157,30 @@ def _failure_summary_from_report(report: FailureReport, failure_summary: dict[st
     return summary
 
 
+def _attempt_history(state: TaskState, state_root: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for attempt in state.history:
+        artifact_dir = artifacts_dir(state.task_id, attempt.iteration, attempt.retry, state_root)
+        rows.append(
+            {
+                "iteration": attempt.iteration,
+                "retry": attempt.retry,
+                "phase": attempt.phase.value,
+                "test_status": attempt.test_status or "",
+                "decision": attempt.decision or "",
+                "failure_type": attempt.failure_type or "",
+                "artifact_dir": str(artifact_dir.resolve()),
+                "graph_node_id": attempt.graph_node_id or "",
+            }
+        )
+    return rows
+
+
 def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
     attempt = _latest_attempt(state)
-    running = False
-    from cc_loop.inspect import is_runner_alive
-
-    running, _ = is_runner_alive(state_root, state.task_id)
+    running, runner_pid = is_runner_alive(state_root, state.task_id)
+    stale_seconds = int(state.config.get("stale_heartbeat_seconds", 120) or 120)
+    runner_state = runner_state_label(state_root, state.task_id, stale_heartbeat_seconds=stale_seconds)
     graph = ensure_task_graph(state)
     artifact_paths: dict[str, str] = {}
     if attempt is not None:
@@ -260,6 +278,13 @@ def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
     )
 
     return {
+        "task_id": state.task_id,
+        "status": state.status.value,
+        "stop_reason": failure_summary.get("stop_reason", ""),
+        "runner_state": runner_state,
+        "runner_pid": runner_pid,
+        "running": running,
+        "attempts": _attempt_history(state, state_root),
         "task_summary": summary,
         "graph": graph_section,
         "latest_attempt": build_attempt_snapshot(state, attempt, state_root) if attempt else None,
