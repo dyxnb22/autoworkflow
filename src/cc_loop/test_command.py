@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import sys
 
 TEST_COMMAND_HINT = (
     "Use --test-command -- pytest tests -q "
@@ -91,6 +92,16 @@ def _reject_shell_operators(text: str) -> None:
         )
 
 
+def _warn_misplaced_cc_loop_flags(tokens: list[str], subcommand: str) -> None:
+    for token in tokens:
+        if _is_cc_loop_flag(token, subcommand):
+            print(
+                f"warning: {token} appears after --test-command -- and will be passed to the "
+                "test command; put cc-loop flags before --test-command",
+                file=sys.stderr,
+            )
+
+
 def expand_test_command_in_argv(argv: list[str]) -> list[str]:
     """Normalize ``--test-command`` sections before argparse parses subcommands.
 
@@ -120,7 +131,9 @@ def expand_test_command_in_argv(argv: list[str]) -> list[str]:
         parts: list[str] = []
         if argv[i] == "--":
             i += 1
-            parts.extend(argv[i:])
+            tail = argv[i:]
+            _warn_misplaced_cc_loop_flags(tail, subcommand)
+            parts.extend(tail)
             i = len(argv)
         while i < len(argv) and not _is_cc_loop_flag(argv[i], subcommand):
             parts.append(argv[i])

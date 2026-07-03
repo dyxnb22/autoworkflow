@@ -193,6 +193,13 @@ def _ensure_safe_stale_resume(state: TaskState, state_root: Path, attempt: Attem
     )
 
 
+_PROVIDER_PHASE_BY_KEY = {
+    "planner": AttemptPhase.PLANNING,
+    "implementer": AttemptPhase.EXECUTING,
+    "reviewer": AttemptPhase.REVIEWING,
+}
+
+
 def _invoke_provider(
     *,
     provider,
@@ -219,19 +226,31 @@ def _invoke_provider(
     )
     artifact_root = artifact_paths["plan_prompt"].parent
     write_command_argv_artifact(artifact_root, phase=phase_key, argv=argv)
-    run_result = run_provider_with_heartbeat(
-        provider,
-        state_root=state_root,
-        state=state,
-        attempt=attempt,
-        worktree_path=worktree,
-        prompt=prompt,
-        output_path=output_path,
-        config=config,
-        timeout_seconds=timeout_seconds,
-        raw_output_path=raw_output_path,
-        print_only=print_only,
-    )
+
+    provider_phase = _PROVIDER_PHASE_BY_KEY.get(phase_key)
+    if provider_phase is not None:
+        attempt.phase = provider_phase
+    attempt.running_provider = provider_name
+    save_state(state, state_root)
+
+    try:
+        run_result = run_provider_with_heartbeat(
+            provider,
+            state_root=state_root,
+            state=state,
+            attempt=attempt,
+            worktree_path=worktree,
+            prompt=prompt,
+            output_path=output_path,
+            config=config,
+            timeout_seconds=timeout_seconds,
+            raw_output_path=raw_output_path,
+            print_only=print_only,
+        )
+    finally:
+        attempt.running_provider = ""
+        save_state(state, state_root)
+
     write_subprocess_result_artifact(
         artifact_root,
         phase=phase_key,
@@ -891,6 +910,9 @@ def run_implementer_phase(
     config: LoopConfig = state.config
     provider_name = _resolve_implementer_provider(state, attempt)
     worktree = Path(attempt.worktree_path)
+    attempt.phase = AttemptPhase.EXECUTING
+    save_state(state, state_root)
+
     prompt = build_implementer_prompt(state, attempt.plan_json, attempt=attempt)
 
     _write_implementer_artifacts_before(
@@ -905,8 +927,6 @@ def run_implementer_phase(
         provider_name=provider_name,
     )
 
-    attempt.phase = AttemptPhase.EXECUTING
-    save_state(state, state_root)
     _emit_run_event(state_root, state, attempt, EventType.IMPLEMENTER_STARTED, message=provider_name)
 
     try:
@@ -1541,22 +1561,27 @@ def build_planner_prompt(state: TaskState) -> str:
 
     completed_section = ""
     if completed_steps:
-        completed_section = "\n\nCompleted steps so far:\n" + "\n".join(completed_steps)
+        completed_section = "\nCompleted steps so far:\n" + "\n".join(completed_steps)
 
     retry_feedback = ""
     for prev in reversed(state.history):
         if prev.phase == AttemptPhase.REJECTED and prev.review_json:
             rp = str(prev.review_json.get("retry_prompt", "")).strip()
             if rp:
-                retry_feedback = f"\n\nPrior attempt was rejected. Reviewer's required changes:\n{rp}"
+                retry_feedback = f"Prior attempt was rejected. Reviewer's required changes:\n{rp}\n"
             break
 
     granularity = resolve_planner_granularity(state.goal, state.config)
-    granularity_section = planner_granularity_prompt_section(granularity)
+    granularity_section = planner_granularity_prompt_section(granularity).strip()
+    dynamic_marker = "## Dynamic Planner Payload"
 
-    return (
+    stable_prefix = (
         "You are the cc-loop planner. Analyze the task goal and repository checkout.\n"
-        "Respond with JSON only. Prefer task graph mode using this shape:\n"
+        "\n"
+        "## Output Format\n"
+        "Return raw JSON only. Do not wrap in markdown fences. Do not add commentary.\n"
+        "\n"
+        "## Preferred Task Graph Shape\n"
         "{\n"
         '  "mode": "task_graph",\n'
         '  "summary": "Short summary of the implementation strategy",\n'
@@ -1573,24 +1598,56 @@ def build_planner_prompt(state: TaskState) -> str:
         "    }\n"
         "  ],\n"
         '  "is_final_step": false\n'
-        "}\n\n"
-        "Legacy single-step JSON is also accepted:\n"
+        "}\n"
+        "\n"
+        "## Legacy Single-Step Shape\n"
         "{\n"
         '  "prompt": "Detailed implementation prompt for the implementer provider",\n'
         '  "expected_changes": "Expected files or areas",\n'
         '  "acceptance_criteria": "How this step will be judged",\n'
         '  "is_final_step": false\n'
-        "}\n\n"
-        f"Task ID: {state.task_id}\n"
+        "}\n"
+        "\n"
+        "## Task Graph Rules\n"
+        "- Prefer task_graph mode when decomposition reduces risk or clarifies ownership.\n"
+        "- Each node must have a unique id, title, description, and acceptance_criteria.\n"
+        "- Use dependencies to order work; do not duplicate completed steps or existing repo functionality.\n"
+        "- Set is_final_step true only when the entire goal is complete after this plan.\n"
+        "\n"
+        "## Planner Granularity\n"
+        f"{granularity_section}\n"
+        "\n"
+        f"{dynamic_marker}\n"
+        "Everything below this line is task-specific. Use it as context for planning.\n"
+    )
+
+    dynamic_payload = (
+        f"\nTask ID: {state.task_id}\n"
         f"Goal: {state.goal}\n"
         f"Target repo: {state.target_repo}\n"
         f"Base branch: {state.base_branch}\n"
         f"Base commit: {state.base_commit}\n"
-        f"{retry_feedback}"
         f"Iteration: {state.iteration}\n"
-        f"{granularity_section}"
+        f"{retry_feedback}"
         f"{completed_section}"
     )
+    return stable_prefix + dynamic_payload
+
+
+_IMPLEMENTER_STABLE_CONTRACT = (
+    "You are the cc-loop implementer. Apply the planned changes in this worktree checkout.\n"
+    "\n"
+    "## Implementer Contract\n"
+    "- Keep changes scoped to the assigned work; do not expand scope.\n"
+    "- Do not perform unrelated refactors or drive-by edits.\n"
+    "- Do not undo user changes or completed dependency work.\n"
+    "- Add or update tests when the change warrants them.\n"
+    "- Do not weaken existing tests or documented contracts.\n"
+    "- Preserve existing code patterns and conventions in this repository.\n"
+    "\n"
+    "## Dynamic Implementer Payload\n"
+    "Everything below this line is task-specific context for this attempt.\n"
+)
 
 
 def build_implementer_prompt(
@@ -1607,7 +1664,7 @@ def build_implementer_prompt(
             return _build_node_implementer_prompt(state, graph, node)
 
     sections = [
-        "You are the cc-loop implementer. Apply the planned changes in this worktree checkout.",
+        _IMPLEMENTER_STABLE_CONTRACT,
         "",
         f"Task ID: {state.task_id}",
         f"Goal: {state.goal}",
@@ -1634,7 +1691,7 @@ def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
     files_scope = node.files_scope or ["(not restricted)"]
 
     sections = [
-        "You are the cc-loop implementer.",
+        _IMPLEMENTER_STABLE_CONTRACT,
         "",
         "You are implementing one node from a task graph.",
         "",
@@ -1665,12 +1722,8 @@ def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
     sections.extend(
         [
             "",
-            "Instructions:",
+            "Node instructions:",
             "- Focus on this node.",
-            "- Keep changes scoped.",
-            "- Do not undo completed dependency work.",
-            "- Add or update tests for this node.",
-            "- Do not weaken existing tests.",
             "- Implement only this node's scope unless a small adjacent change is necessary.",
         ]
     )
@@ -1762,6 +1815,8 @@ def build_reviewer_prompt(
         f"Base commit: {attempt.base_commit}\n"
         f"Head commit: {attempt.head_commit}\n"
         f"{node_section}\n"
+        "### Test result\n"
+        f"Status: {test_status}\n\n"
         "### Diff stat\n"
         f"{diff_stat}\n\n"
         "### Selected patches\n"
@@ -1773,6 +1828,14 @@ def _estimated_tokens_from_chars(char_count: int) -> int:
     if char_count <= 0:
         return 0
     return (char_count + 3) // 4
+
+
+def _classify_cache_health(stable_prefix_ratio: float) -> str:
+    if stable_prefix_ratio >= 0.60:
+        return "good"
+    if stable_prefix_ratio >= 0.40:
+        return "warning"
+    return "poor"
 
 
 def build_reviewer_prompt_metrics(
@@ -1788,6 +1851,8 @@ def build_reviewer_prompt_metrics(
     dynamic_payload_chars = len(prompt) - stable_prefix_chars
     patch_chars = len(patch_body)
     diff_stat_chars = len(diff_stat)
+    stable_prefix_ratio = round(stable_prefix_chars / len(prompt), 6) if prompt else 0.0
+    dynamic_payload_ratio = round(dynamic_payload_chars / len(prompt), 6) if prompt else 0.0
     return {
         "schema_version": 1,
         "layout": "stable-prefix-v1",
@@ -1795,8 +1860,9 @@ def build_reviewer_prompt_metrics(
         "prompt_chars": len(prompt),
         "stable_prefix_chars": stable_prefix_chars,
         "dynamic_payload_chars": dynamic_payload_chars,
-        "stable_prefix_ratio": round(stable_prefix_chars / len(prompt), 6) if prompt else 0.0,
-        "dynamic_payload_ratio": round(dynamic_payload_chars / len(prompt), 6) if prompt else 0.0,
+        "stable_prefix_ratio": stable_prefix_ratio,
+        "dynamic_payload_ratio": dynamic_payload_ratio,
+        "cache_health": _classify_cache_health(stable_prefix_ratio),
         "diff_stat_chars": diff_stat_chars,
         "patch_body_chars": patch_chars,
         "estimated_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),
@@ -2199,6 +2265,7 @@ def _update_review_trace(
         "metrics_path": str(artifact_paths["review_prompt_metrics"]),
         "estimated_prompt_tokens": metrics["estimated_prompt_tokens"],
         "stable_prefix_ratio": metrics["stable_prefix_ratio"],
+        "cache_health": metrics.get("cache_health", ""),
     }
     if decision:
         fields["decision"] = decision

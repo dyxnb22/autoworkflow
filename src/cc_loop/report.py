@@ -120,6 +120,7 @@ def _observability_section(
         reviewer_metrics_summary = {
             "layout": metrics.get("layout"),
             "stable_prefix_ratio": metrics.get("stable_prefix_ratio"),
+            "cache_health": metrics.get("cache_health"),
             "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
         }
 
@@ -338,8 +339,11 @@ def format_report_human(report: dict[str, Any]) -> str:
     if reviewer_metrics:
         ratio = reviewer_metrics.get("stable_prefix_ratio")
         tokens = reviewer_metrics.get("estimated_prompt_tokens")
+        cache_health = reviewer_metrics.get("cache_health")
         if ratio is not None:
             lines.append(f"Reviewer stable prefix ratio: {ratio}")
+        if cache_health:
+            lines.append(f"Reviewer prompt cache health: {cache_health}")
         if tokens is not None:
             lines.append(f"Reviewer estimated prompt tokens: {tokens}")
         lines.append("")

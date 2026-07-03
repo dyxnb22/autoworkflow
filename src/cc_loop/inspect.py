@@ -275,6 +275,7 @@ def build_attempt_snapshot(
         "artifact_dir": artifact_path,
         "created_at": attempt.created_at or "",
         "graph_node_id": attempt.graph_node_id or "",
+        "running_provider": attempt.running_provider or "",
     }
 
 
@@ -309,12 +310,18 @@ def derive_current_message(state: TaskState, attempt: AttemptRecord | None, runn
     if attempt.phase == AttemptPhase.APPROVED:
         return "Approved — pending merge"
     if attempt.phase == AttemptPhase.REVIEWING:
+        if attempt.running_provider:
+            return f"Reviewer running ({attempt.running_provider})"
         return "Review in progress"
     if attempt.phase == AttemptPhase.TESTING:
         return "Running tests"
     if attempt.phase == AttemptPhase.EXECUTING:
+        if attempt.running_provider:
+            return f"Implementer running ({attempt.running_provider})"
         return "Implementer running"
     if attempt.phase == AttemptPhase.PLANNING:
+        if attempt.running_provider:
+            return f"Planner running ({attempt.running_provider})"
         return "Planning"
     return f"Phase: {attempt.phase.value}"
 
