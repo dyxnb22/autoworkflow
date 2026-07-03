@@ -376,6 +376,7 @@ when available, and `timestamp`.
   "prompt_cache": {
     "path": "/absolute/path/prompt.cache.json",
     "estimated_prompt_tokens": 12000,
+    "estimated_provider_prompt_tokens": 9000,
     "estimated_avoidable_miss_tokens": 3000,
     "reviewer_context_mode": "hybrid",
     "reviewer_inline_patch": false,

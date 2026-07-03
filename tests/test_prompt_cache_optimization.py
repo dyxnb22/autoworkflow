@@ -15,6 +15,7 @@ from cc_loop.providers.cursor import CursorAdapter
 from cc_loop.providers.base import register_provider
 from cc_loop.run import (
     build_direct_plan_json,
+    build_planner_prompt,
     build_reviewer_prompt,
     build_reviewer_prompt_metrics,
     prepare_run,
@@ -100,6 +101,7 @@ class ReviewContextModeTests(unittest.TestCase):
             context_mode="artifact_refs",
         )
         self.assertEqual(metrics["omitted_patch_chars"], 10000)
+        self.assertLess(metrics["evidence_payload_chars"], 10000)
         self.assertGreater(metrics["estimated_avoidable_miss_tokens"], 0)
         self.assertFalse(metrics["inline_patch"])
 
@@ -172,6 +174,7 @@ class DirectPlannerModeTests(unittest.TestCase):
             self.assertEqual(planner_calls, [])
             self.assertTrue(artifact_paths["plan_prompt"].is_file())
             self.assertTrue(artifact_paths["plan_prompt_meta"].is_file())
+            self.assertTrue(artifact_paths["plan_raw"].is_file())
             self.assertTrue(artifact_paths["plan_parsed"].is_file())
             from cc_loop.trace import trace_file_path
 
@@ -188,6 +191,17 @@ class DirectPlannerModeTests(unittest.TestCase):
                 artifact_paths["plan_provider"].read_text(encoding="utf-8").strip(),
                 "(direct)",
             )
+            meta = json.loads(artifact_paths["plan_prompt_meta"].read_text(encoding="utf-8"))
+            self.assertEqual(meta["provider"], "(direct)")
+            prompt_cache = json.loads(artifact_paths["prompt_cache"].read_text(encoding="utf-8"))
+            self.assertEqual(
+                prompt_cache["phases"]["planner"]["estimated_provider_prompt_tokens"],
+                0,
+            )
+            self.assertEqual(
+                prompt_cache["totals"]["estimated_provider_prompt_tokens"],
+                0,
+            )
         finally:
             env.close()
 
@@ -196,6 +210,13 @@ class DirectPlannerModeTests(unittest.TestCase):
         self.assertEqual(plan["nodes"][0]["id"], "T1")
         self.assertEqual(plan["nodes"][0]["description"], "Implement feature X with tests")
         self.assertEqual(len(plan["nodes"][0]["acceptance_criteria"]), 2)
+
+    def test_planner_mode_single_controls_planner_prompt_granularity(self) -> None:
+        prompt = build_planner_prompt(
+            _state(config={"planner_mode": "single", "planner_granularity": "graph"})
+        )
+        self.assertIn("Planner granularity: SINGLE NODE.", prompt)
+        self.assertNotIn("Planner granularity: MULTI-NODE GRAPH.", prompt)
 
 
 class ProviderArgvSanitizationTests(unittest.TestCase):
@@ -221,6 +242,18 @@ class ProviderArgvSanitizationTests(unittest.TestCase):
         self.assertNotIn(prompt, joined)
         self.assertIn("<prompt:", joined)
 
+    def test_claude_provider_argv_display_preserves_print_only_flag(self) -> None:
+        adapter = ClaudeCodeAdapter()
+        argv = provider_argv_from_result(
+            adapter,
+            worktree_path=Path("/tmp/wt"),
+            prompt="review " * 300,
+            output_path=Path("/tmp/out"),
+            config=merge_config({}),
+            print_only=True,
+        )
+        self.assertIn("--print", argv)
+
     def test_cursor_provider_argv_artifact_excludes_full_prompt(self) -> None:
         adapter = CursorAdapter()
         prompt = "implement " * 400
@@ -234,6 +267,8 @@ class ProviderArgvSanitizationTests(unittest.TestCase):
         joined = " ".join(argv)
         self.assertNotIn(prompt, joined)
         self.assertIn("<prompt:", joined)
+        self.assertIn("--output-format", argv)
+        self.assertIn("json", argv)
 
 
 def _state(*, config: dict | None = None):

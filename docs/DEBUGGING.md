@@ -113,8 +113,10 @@ cc-loop init --goal "Fix CLI flag parsing" --repo "$REPO" --planner-mode direct 
 
 Per-attempt artifact summarizing planner/implementer/reviewer prompt layout metrics and totals:
 
-- `estimated_prompt_tokens`, `estimated_dynamic_payload_tokens`, `estimated_avoidable_miss_tokens`
+- `estimated_prompt_tokens`, `estimated_provider_prompt_tokens`, `estimated_dynamic_payload_tokens`, `estimated_avoidable_miss_tokens`
 - Reviewer phase includes `context_mode`, `inline_patch`, `omitted_patch_chars`, `recommendations`
+
+`estimated_prompt_tokens` counts persisted prompt artifacts. `estimated_provider_prompt_tokens` counts prompt tokens actually sent to a provider; skipped phases such as `planner_mode: direct` report provider tokens as `0`.
 
 Also exposed in `status --json` as optional `prompt_cache` and in `report --json` observability.
 

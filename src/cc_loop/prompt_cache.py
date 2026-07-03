@@ -61,8 +61,10 @@ def _phase_layout_metrics(
         "cache_health": _classify_cache_health(contract_prefix_ratio),
         "total_prompt_cache_health": _classify_cache_health(stable_prefix_ratio),
         "estimated_prompt_tokens": estimated_tokens_from_chars(prompt_chars),
+        "estimated_provider_prompt_tokens": estimated_tokens_from_chars(prompt_chars),
         "estimated_stable_prefix_tokens": estimated_tokens_from_chars(stable_prefix_chars),
         "estimated_dynamic_payload_tokens": estimated_tokens_from_chars(dynamic_payload_chars),
+        "estimated_provider_dynamic_payload_tokens": estimated_tokens_from_chars(dynamic_payload_chars),
     }
 
 
@@ -89,6 +91,8 @@ def build_planner_phase_cache(*, prompt: str, skipped: bool = False) -> dict[str
     metrics["skipped"] = skipped
     metrics["recommendations"] = []
     if skipped:
+        metrics["estimated_provider_prompt_tokens"] = 0
+        metrics["estimated_provider_dynamic_payload_tokens"] = 0
         metrics["recommendations"].append("Planner provider skipped via planner_mode=direct.")
     elif metrics["total_prompt_cache_health"] != "good":
         metrics["recommendations"].append(
@@ -131,21 +135,39 @@ def build_reviewer_phase_cache(*, metrics: dict[str, Any]) -> dict[str, Any]:
 
 def compute_prompt_cache_totals(phases: dict[str, Any]) -> dict[str, int]:
     estimated_prompt_tokens = 0
+    estimated_provider_prompt_tokens = 0
     estimated_dynamic_payload_tokens = 0
+    estimated_provider_dynamic_payload_tokens = 0
     estimated_avoidable_miss_tokens = 0
     for phase_data in phases.values():
         if not isinstance(phase_data, dict):
             continue
         estimated_prompt_tokens += int(phase_data.get("estimated_prompt_tokens", 0) or 0)
+        estimated_provider_prompt_tokens += int(
+            phase_data.get(
+                "estimated_provider_prompt_tokens",
+                phase_data.get("estimated_prompt_tokens", 0),
+            )
+            or 0
+        )
         estimated_dynamic_payload_tokens += int(
             phase_data.get("estimated_dynamic_payload_tokens", 0) or 0
+        )
+        estimated_provider_dynamic_payload_tokens += int(
+            phase_data.get(
+                "estimated_provider_dynamic_payload_tokens",
+                phase_data.get("estimated_dynamic_payload_tokens", 0),
+            )
+            or 0
         )
         estimated_avoidable_miss_tokens += int(
             phase_data.get("estimated_avoidable_miss_tokens", 0) or 0
         )
     return {
         "estimated_prompt_tokens": estimated_prompt_tokens,
+        "estimated_provider_prompt_tokens": estimated_provider_prompt_tokens,
         "estimated_dynamic_payload_tokens": estimated_dynamic_payload_tokens,
+        "estimated_provider_dynamic_payload_tokens": estimated_provider_dynamic_payload_tokens,
         "estimated_avoidable_miss_tokens": estimated_avoidable_miss_tokens,
     }
 
@@ -188,7 +210,11 @@ def prompt_cache_snapshot(cache_path: Path) -> dict[str, Any] | None:
     return {
         "path": str(cache_path),
         "estimated_prompt_tokens": totals.get("estimated_prompt_tokens", 0),
+        "estimated_provider_prompt_tokens": totals.get("estimated_provider_prompt_tokens", 0),
         "estimated_dynamic_payload_tokens": totals.get("estimated_dynamic_payload_tokens", 0),
+        "estimated_provider_dynamic_payload_tokens": totals.get(
+            "estimated_provider_dynamic_payload_tokens", 0
+        ),
         "estimated_avoidable_miss_tokens": totals.get("estimated_avoidable_miss_tokens", 0),
         "reviewer_context_mode": reviewer.get("context_mode"),
         "reviewer_inline_patch": reviewer.get("inline_patch"),

@@ -267,6 +267,7 @@ def _invoke_provider(
         prompt=prompt,
         output_path=output_path,
         config=config,
+        print_only=print_only,
     )
     artifact_root = artifact_paths["plan_prompt"].parent
     write_command_argv_artifact(artifact_root, phase=phase_key, argv=argv)
@@ -642,6 +643,13 @@ def _planner_mode(config: LoopConfig) -> str:
     return str(config.get("planner_mode", "auto") or "auto").strip().lower()
 
 
+def _planner_granularity_for_prompt(state: TaskState) -> str:
+    mode = _planner_mode(state.config)
+    if mode in {"single", "graph"}:
+        return mode
+    return resolve_planner_granularity(state.goal, state.config)
+
+
 def build_direct_plan_json(goal: str) -> dict[str, Any]:
     """Build a single-node task graph plan from the task goal without a planner provider."""
     title = goal.strip()
@@ -683,6 +691,16 @@ def _run_direct_planning(
     plan_json = build_direct_plan_json(state.goal)
     artifact_root = artifact_paths["plan_prompt"].parent
     artifact_paths["plan_provider"].write_text("(direct)\n", encoding="utf-8")
+    _write_planning_prompt_metadata(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        provider_name="(direct)",
+    )
+    artifact_paths["plan_raw"].write_text(
+        json.dumps(plan_json, indent=2) + "\n",
+        encoding="utf-8",
+    )
     artifact_paths["plan_last_message"].write_text(
         json.dumps(plan_json, indent=2) + "\n",
         encoding="utf-8",
@@ -1781,7 +1799,7 @@ def build_planner_prompt(state: TaskState) -> str:
                 retry_feedback = f"Prior attempt was rejected. Reviewer's required changes:\n{rp}\n"
             break
 
-    granularity = resolve_planner_granularity(state.goal, state.config)
+    granularity = _planner_granularity_for_prompt(state)
     granularity_section = planner_granularity_prompt_section(granularity).strip()
     dynamic_marker = "## Dynamic Planner Payload"
 
@@ -2131,7 +2149,7 @@ def build_reviewer_prompt_metrics(
     inline_patch_chars = patch_chars if inline_patch else 0
     omitted_patch_chars = 0 if inline_patch else patch_chars
     diff_stat_chars = len(diff_stat)
-    evidence_payload_chars = patch_chars + diff_stat_chars
+    evidence_payload_chars = inline_patch_chars + diff_stat_chars
     contract_dynamic_chars = max(0, dynamic_payload_chars - evidence_payload_chars)
     contract_denominator = stable_prefix_chars + contract_dynamic_chars
     stable_prefix_ratio = round(stable_prefix_chars / len(prompt), 6) if prompt else 0.0
@@ -2167,6 +2185,8 @@ def build_reviewer_prompt_metrics(
         "estimated_inline_patch_tokens": _estimated_tokens_from_chars(inline_patch_chars),
         "estimated_omitted_patch_tokens": estimated_omitted_patch_tokens,
         "estimated_avoidable_miss_tokens": estimated_omitted_patch_tokens,
+        "estimated_provider_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),
+        "estimated_provider_dynamic_payload_tokens": _estimated_tokens_from_chars(dynamic_payload_chars),
         "recommendations": [],
     }
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import threading
@@ -208,7 +209,12 @@ def _prompt_placeholder(text: str) -> str:
     return f"<prompt:{len(text)} chars sha256={digest}>"
 
 
-def sanitize_argv_for_display(argv: list[str], *, prompt_threshold: int = 200) -> list[str]:
+def sanitize_argv_for_display(
+    argv: list[str],
+    *,
+    prompt_threshold: int = 200,
+    prompt_text: str = "",
+) -> list[str]:
     """Replace large prompt arguments with placeholders for diagnostic argv artifacts."""
     sanitized: list[str] = []
     index = 0
@@ -216,10 +222,16 @@ def sanitize_argv_for_display(argv: list[str], *, prompt_threshold: int = 200) -
         arg = argv[index]
         if arg == "-p" and index + 1 < len(argv):
             sanitized.append(arg)
-            sanitized.append(_prompt_placeholder(argv[index + 1]))
+            next_arg = argv[index + 1]
+            if not prompt_text or next_arg == prompt_text:
+                sanitized.append(_prompt_placeholder(next_arg))
+            else:
+                sanitized.append(next_arg)
             index += 2
             continue
-        if len(arg) > prompt_threshold:
+        if prompt_text and arg == prompt_text:
+            sanitized.append(_prompt_placeholder(arg))
+        elif not prompt_text and len(arg) > prompt_threshold:
             sanitized.append(_prompt_placeholder(arg))
         else:
             sanitized.append(arg)
@@ -228,12 +240,17 @@ def sanitize_argv_for_display(argv: list[str], *, prompt_threshold: int = 200) -
 
 
 def provider_argv_from_result(provider: ProviderAdapter, **build_kwargs: Any) -> list[str]:
+    prompt = build_kwargs.get("prompt", "")
+    args_kwargs = {
+        "worktree_path": build_kwargs["worktree_path"],
+        "prompt": prompt,
+        "output_path": build_kwargs["output_path"],
+        "config": build_kwargs["config"],
+    }
+    signature = inspect.signature(provider.build_args)
+    if "print_only" in signature.parameters:
+        args_kwargs["print_only"] = bool(build_kwargs.get("print_only", False))
     argv = list(
-        provider.build_args(
-            worktree_path=build_kwargs["worktree_path"],
-            prompt=build_kwargs.get("prompt", ""),
-            output_path=build_kwargs["output_path"],
-            config=build_kwargs["config"],
-        )
+        provider.build_args(**args_kwargs)
     )
-    return sanitize_argv_for_display(argv)
+    return sanitize_argv_for_display(argv, prompt_text=str(prompt))
