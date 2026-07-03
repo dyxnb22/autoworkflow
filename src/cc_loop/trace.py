@@ -159,14 +159,22 @@ def build_trace_snapshot(
         }
 
     impl_prompt = artifact_paths["implementer_prompt"]
+    impl_metrics = _safe_read_json(artifact_paths["implementer_prompt_metrics"])
     if impl_prompt.is_file():
-        trace["phases"]["implementation"] = {
+        implementation_phase: dict[str, Any] = {
             "status": "completed" if attempt.implementer_exit_code == 0 else "failed",
             "prompt_path": str(artifact_paths["implementer_prompt"]),
             "prompt_meta_path": str(artifact_paths["implementer_prompt_meta"]),
+            "metrics_path": str(artifact_paths["implementer_prompt_metrics"]),
             "raw_path": str(artifact_paths["implementer_raw"]),
             "estimated_prompt_tokens": estimate_tokens_from_path(impl_prompt),
         }
+        if impl_metrics is not None:
+            implementation_phase["stable_prefix_ratio"] = impl_metrics.get("stable_prefix_ratio")
+            implementation_phase["contract_prefix_ratio"] = impl_metrics.get("contract_prefix_ratio")
+            implementation_phase["cache_health"] = impl_metrics.get("cache_health")
+            implementation_phase["total_prompt_cache_health"] = impl_metrics.get("total_prompt_cache_health")
+        trace["phases"]["implementation"] = implementation_phase
 
     if artifact_paths["test_output"].is_file() or attempt.test_status:
         trace["phases"]["testing"] = {

@@ -1,0 +1,27 @@
+# cc-loop-benchlab A/B scenario template — planner mode
+name: planner_mode_ab
+description: Compare direct planner skip vs full single-step planner on a short goal.
+fixture: small_cli_fix
+repetitions: 3
+variants:
+  - name: direct
+    cc_loop_config:
+      planner_mode: direct
+    commands:
+      - init
+      - auto
+  - name: single
+    cc_loop_config:
+      planner_mode: single
+    commands:
+      - init
+      - auto
+metrics:
+  - prompt.cache.json:phases.planner.provider_skipped
+  - prompt.cache.json:phases.planner.estimated_provider_prompt_tokens
+  - prompt.cache.json:totals.estimated_provider_prompt_tokens
+  - implementer.prompt.metrics.json:stable_prefix_ratio
+compare:
+  primary: prompt.cache.json:totals.estimated_provider_prompt_tokens
+  direction: lower_is_better
+  aggregate: median

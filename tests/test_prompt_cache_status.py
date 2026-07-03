@@ -21,6 +21,7 @@ from cc_loop.providers.base import ProviderAdapter, ProviderRunResult, register_
 from cc_loop.run import (
     ImplementingError,
     build_implementer_prompt,
+    build_implementer_prompt_metrics,
     build_planner_prompt,
     build_reviewer_prompt,
     build_reviewer_prompt_metrics,
@@ -67,7 +68,7 @@ class PlannerPromptLayoutTests(unittest.TestCase):
 
 
 class ImplementerPromptLayoutTests(unittest.TestCase):
-    def test_implementer_prompt_puts_stable_contract_before_dynamic_goal(self) -> None:
+    def test_implementer_prompt_puts_stable_contract_before_task_context(self) -> None:
         state = TaskState(
             task_id="impl-layout",
             goal="Unique implementer goal",
@@ -85,13 +86,16 @@ class ImplementerPromptLayoutTests(unittest.TestCase):
             "acceptance_criteria": "widget exists",
         }
         prompt = build_implementer_prompt(state, plan_json)
-        marker = "## Dynamic Implementer Payload"
+        context_marker = "## Task Implementer Context"
+        dynamic_marker = "## Dynamic Implementer Payload"
 
         assert "Do not perform unrelated refactors" in prompt
-        assert prompt.index(marker) < prompt.index("Unique implementer goal")
-        assert prompt.index(marker) < prompt.index("Create widget module")
+        assert prompt.index(context_marker) < prompt.index("Unique implementer goal")
+        assert prompt.index("Unique implementer goal") < prompt.index(dynamic_marker)
+        assert prompt.index("Create widget module") < prompt.index(dynamic_marker)
+        assert "Iteration: 1" in prompt[prompt.index(dynamic_marker) :]
 
-    def test_node_implementer_prompt_keeps_stable_prefix_across_nodes(self) -> None:
+    def test_node_implementer_prompt_keeps_stable_contract_across_nodes(self) -> None:
         graph = graph_from_planner_json(
             {
                 "mode": "task_graph",
@@ -148,10 +152,40 @@ class ImplementerPromptLayoutTests(unittest.TestCase):
         prompt_a = build_implementer_prompt(state, attempt_a.plan_json, attempt=attempt_a)
         state.goal = "Graph goal beta"
         prompt_b = build_implementer_prompt(state, attempt_b.plan_json, attempt=attempt_b)
-        marker = "## Dynamic Implementer Payload"
-        prefix_a = prompt_a[: prompt_a.index(marker)]
-        prefix_b = prompt_b[: prompt_b.index(marker)]
-        self.assertEqual(prefix_a, prefix_b)
+        context_marker = "## Task Implementer Context"
+        contract_a = prompt_a[: prompt_a.index(context_marker)]
+        contract_b = prompt_b[: prompt_b.index(context_marker)]
+        self.assertEqual(contract_a, contract_b)
+        self.assertIn("First", prompt_a)
+        self.assertIn("Second", prompt_b)
+        self.assertNotIn("Graph goal beta", contract_a)
+
+
+class ImplementerPromptMetricsTests(unittest.TestCase):
+    def test_implementer_metrics_improve_stable_prefix_ratio(self) -> None:
+        state = TaskState(
+            task_id="impl-metrics",
+            goal="A reasonably long goal to simulate real task context for cache metrics",
+            target_repo="/repo",
+            base_branch="main",
+            base_commit="abc",
+            status=TaskStatus.RUNNING,
+            iteration=1,
+            config=merge_config({}),
+            providers={"planner": "codex", "reviewer": "codex", "implementer": "cursor"},
+        )
+        plan_json = {
+            "prompt": "Implement the feature with tests and documentation updates.",
+            "expected_changes": "src/feature.py tests/test_feature.py",
+            "acceptance_criteria": "Tests pass and docs mention the feature.",
+        }
+        prompt = build_implementer_prompt(state, plan_json)
+        metrics = build_implementer_prompt_metrics(prompt=prompt)
+        self.assertGreater(metrics["task_context_ratio"], 0.0)
+        self.assertGreater(metrics["stable_prefix_ratio"], metrics["contract_prefix_ratio"])
+        self.assertIn(metrics["total_prompt_cache_health"], {"good", "warning", "poor"})
+        dynamic_marker = "## Dynamic Implementer Payload"
+        self.assertNotIn("Iteration:", prompt[: prompt.index(dynamic_marker)])
 
 
 class ReviewerPromptMetricsTests(unittest.TestCase):

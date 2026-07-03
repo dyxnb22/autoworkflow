@@ -85,6 +85,10 @@ class PromptMetadataTests(unittest.TestCase):
             paths["implementer_prompt_meta"],
             Path("/tmp/artifacts/implementer.prompt.meta.json"),
         )
+        self.assertEqual(
+            paths["implementer_prompt_metrics"],
+            Path("/tmp/artifacts/implementer.prompt.metrics.json"),
+        )
         self.assertEqual(paths["review_prompt_meta"], Path("/tmp/artifacts/review.prompt.meta.json"))
         self.assertEqual(paths["attempt_trace"], Path("/tmp/artifacts/attempt.trace.json"))
 

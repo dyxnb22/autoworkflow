@@ -117,18 +117,26 @@ def build_planner_phase_cache(
     return metrics
 
 
-def build_implementer_phase_cache(*, prompt: str) -> dict[str, Any]:
-    metrics = _phase_layout_metrics(
-        prompt=prompt,
-        marker=DYNAMIC_IMPLEMENTER_MARKER,
-        layout="stable-prefix-v1",
-    )
-    metrics["recommendations"] = []
-    if metrics["total_prompt_cache_health"] != "good":
-        metrics["recommendations"].append(
-            "Keep implementer stable contract before Dynamic Implementer Payload marker."
+def build_implementer_phase_cache(*, metrics: dict[str, Any] | None = None, prompt: str = "") -> dict[str, Any]:
+    if metrics is not None:
+        phase = dict(metrics)
+    else:
+        phase = _phase_layout_metrics(
+            prompt=prompt,
+            marker=DYNAMIC_IMPLEMENTER_MARKER,
+            layout="stable-prefix-v1",
         )
-    return metrics
+    recommendations: list[str] = list(phase.pop("recommendations", []) or [])
+    if phase.get("total_prompt_cache_health") != "good":
+        recommendations.append(
+            "Keep implementer stable contract and task context before Dynamic Implementer Payload marker."
+        )
+    if phase.get("task_context_ratio", 0) <= 0:
+        recommendations.append(
+            "Add Task Implementer Context section before dynamic payload for better cache reuse."
+        )
+    phase["recommendations"] = recommendations
+    return phase
 
 
 def build_reviewer_phase_cache(*, metrics: dict[str, Any]) -> dict[str, Any]:

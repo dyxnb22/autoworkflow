@@ -1,0 +1,27 @@
+# cc-loop-benchlab A/B scenario template — review depth modes
+name: review_depth_ab
+description: Compare fast-only vs deep-only reviewer on a small passing change.
+fixture: small_cli_fix
+repetitions: 3
+variants:
+  - name: fast
+    cc_loop_config:
+      review_depth: fast
+    commands:
+      - init
+      - auto
+  - name: deep
+    cc_loop_config:
+      review_depth: deep
+    commands:
+      - init
+      - auto
+metrics:
+  - prompt.cache.json:phases.reviewer.stable_prefix_ratio
+  - prompt.cache.json:phases.reviewer.estimated_provider_prompt_tokens
+  - review.prompt.metrics.json:review_stage
+  - review.fast.prompt.metrics.json:stable_prefix_ratio
+compare:
+  primary: prompt.cache.json:totals.estimated_provider_prompt_tokens
+  direction: lower_is_better
+  aggregate: median

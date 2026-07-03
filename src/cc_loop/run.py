@@ -42,7 +42,7 @@ from cc_loop.review_depth import (
     resolve_review_depth_mode,
     should_pre_escalate_to_deep,
 )
-from cc_loop.prompt_metadata import build_prompt_metadata, write_prompt_metadata
+from cc_loop.prompt_metadata import build_prompt_metadata, resolve_implementer_layout, write_prompt_metadata
 from cc_loop.providers.base import ProviderRunResult, get_provider
 from cc_loop.repair_prompts import build_repair_prompt
 from cc_loop.recovery import persist_failure_state
@@ -1197,6 +1197,11 @@ def run_implementer_phase(
     save_state(state, state_root)
 
     prompt = build_implementer_prompt(state, attempt.plan_json, attempt=attempt)
+    implementer_layout = resolve_implementer_layout(state, attempt)
+    implementer_prompt_metrics = build_implementer_prompt_metrics(
+        prompt=prompt,
+        layout=implementer_layout,
+    )
 
     _write_implementer_artifacts_before(
         artifact_paths=artifact_paths,
@@ -1209,10 +1214,14 @@ def run_implementer_phase(
         artifact_paths=artifact_paths,
         provider_name=provider_name,
     )
+    _write_implementer_prompt_metrics(
+        artifact_paths=artifact_paths,
+        metrics=implementer_prompt_metrics,
+    )
     update_prompt_cache_artifact(
         artifact_paths["prompt_cache"],
         phase="implementer",
-        phase_data=build_implementer_phase_cache(prompt=prompt),
+        phase_data=build_implementer_phase_cache(metrics=implementer_prompt_metrics),
     )
 
     _emit_run_event(state_root, state, attempt, EventType.IMPLEMENTER_STARTED, message=provider_name)
@@ -2139,31 +2148,28 @@ _IMPLEMENTER_STABLE_CONTRACT = (
     "- Add or update tests when the change warrants them.\n"
     "- Do not weaken existing tests or documented contracts.\n"
     "- Preserve existing code patterns and conventions in this repository.\n"
-    "\n"
-    "## Dynamic Implementer Payload\n"
-    "Everything below this line is task-specific context for this attempt.\n"
 )
 
+TASK_IMPLEMENTER_CONTEXT_MARKER = "## Task Implementer Context"
+DYNAMIC_IMPLEMENTER_MARKER = "## Dynamic Implementer Payload"
 
-def build_implementer_prompt(
+
+def _build_task_implementer_context_section(
+    *,
     state: TaskState,
     plan_json: dict[str, Any],
-    *,
     attempt: AttemptRecord | None = None,
 ) -> str:
-    """Construct the prompt for the configured implementer provider."""
     graph = ensure_task_graph(state)
     if graph is not None and attempt is not None and attempt.graph_node_id:
         node = get_node(graph, attempt.graph_node_id)
         if node is not None:
-            return _build_node_implementer_prompt(state, graph, node)
+            return _build_node_implementer_task_context(state, graph, node)
 
-    sections = [
-        _IMPLEMENTER_STABLE_CONTRACT,
-        "",
-        f"Task ID: {state.task_id}",
+    lines = [
+        TASK_IMPLEMENTER_CONTEXT_MARKER,
+        "Everything in this section is task-scoped and should remain stable across retries of the same step.",
         f"Goal: {state.goal}",
-        f"Iteration: {state.iteration}",
         "",
         "Implementation prompt:",
         str(plan_json.get("prompt", "")).strip(),
@@ -2171,36 +2177,30 @@ def build_implementer_prompt(
 
     expected_changes = str(plan_json.get("expected_changes", "")).strip()
     if expected_changes:
-        sections.extend(["", "Expected changes:", expected_changes])
+        lines.extend(["", "Expected changes:", expected_changes])
 
     acceptance_criteria = str(plan_json.get("acceptance_criteria", "")).strip()
     if acceptance_criteria:
-        sections.extend(["", "Acceptance criteria:", acceptance_criteria])
+        lines.extend(["", "Acceptance criteria:", acceptance_criteria])
 
-    return "\n".join(sections).strip() + "\n"
+    return "\n".join(lines).strip() + "\n\n"
 
 
-def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
+def _build_node_implementer_task_context(state: TaskState, graph, node) -> str:
     dep_lines = completed_dependency_labels(graph, node.id)
     criteria = node.acceptance_criteria or ["(none specified)"]
     files_scope = node.files_scope or ["(not restricted)"]
 
-    sections = [
-        _IMPLEMENTER_STABLE_CONTRACT,
-        "",
+    lines = [
+        TASK_IMPLEMENTER_CONTEXT_MARKER,
+        "Everything in this section is task/node-scoped and should remain stable across retries of the same node.",
         "You are implementing one node from a task graph.",
         "",
-        "Project goal:",
-        state.goal,
-        "",
+        f"Project goal: {state.goal}",
         f"Graph summary: {graph.summary or '(none)'}",
         "",
-        f"Current node:",
-        f"{node.id} — {node.title}",
-        "",
-        "Node description:",
-        node.description or "(none)",
-        "",
+        f"Current node: {node.id} — {node.title}",
+        f"Node description: {node.description or '(none)'}",
         f"Node kind: {node.kind.value}",
         f"Node owner: {node.owner}",
         "",
@@ -2212,9 +2212,9 @@ def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
     ]
 
     if dep_lines:
-        sections.extend(["", "Completed dependencies:", *[f"- {line}" for line in dep_lines]])
+        lines.extend(["", "Completed dependencies:", *[f"- {line}" for line in dep_lines]])
 
-    sections.extend(
+    lines.extend(
         [
             "",
             "Node instructions:",
@@ -2222,7 +2222,41 @@ def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
             "- Implement only this node's scope unless a small adjacent change is necessary.",
         ]
     )
-    return "\n".join(sections).strip() + "\n"
+    return "\n".join(lines).strip() + "\n\n"
+
+
+def _build_implementer_dynamic_payload(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord | None = None,
+) -> str:
+    lines = [
+        DYNAMIC_IMPLEMENTER_MARKER,
+        "Everything below this line changes per attempt.",
+        f"Task ID: {state.task_id}",
+        f"Iteration: {state.iteration}",
+    ]
+    if attempt is not None:
+        lines.append(f"Retry: {attempt.retry}")
+        if attempt.graph_node_id:
+            lines.append(f"Graph node: {attempt.graph_node_id}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_implementer_prompt(
+    state: TaskState,
+    plan_json: dict[str, Any],
+    *,
+    attempt: AttemptRecord | None = None,
+) -> str:
+    """Construct the prompt for the configured implementer provider."""
+    task_context = _build_task_implementer_context_section(
+        state=state,
+        plan_json=plan_json,
+        attempt=attempt,
+    )
+    dynamic_payload = _build_implementer_dynamic_payload(state=state, attempt=attempt)
+    return (_IMPLEMENTER_STABLE_CONTRACT + "\n\n" + task_context + dynamic_payload).strip() + "\n"
 
 
 TASK_REVIEW_CONTEXT_MARKER = "## Task Review Context"
@@ -2608,6 +2642,53 @@ def build_fast_reviewer_prompt(
     return (contract_prefix + task_context + dynamic_payload).strip() + "\n"
 
 
+def build_implementer_prompt_metrics(
+    *,
+    prompt: str,
+    layout: str = "legacy-single-step-v1",
+) -> dict[str, Any]:
+    """Return cache/cost layout metrics for an implementer prompt artifact."""
+    task_context_index = prompt.find(TASK_IMPLEMENTER_CONTEXT_MARKER)
+    dynamic_index = prompt.find(DYNAMIC_IMPLEMENTER_MARKER)
+    contract_prefix_chars = (
+        task_context_index if task_context_index >= 0 else (dynamic_index if dynamic_index >= 0 else len(prompt))
+    )
+    stable_prefix_chars = dynamic_index if dynamic_index >= 0 else len(prompt)
+    task_context_chars = max(0, stable_prefix_chars - contract_prefix_chars)
+    dynamic_payload_chars = len(prompt) - stable_prefix_chars
+    contract_denominator = contract_prefix_chars + max(0, dynamic_payload_chars)
+    stable_prefix_ratio = round(stable_prefix_chars / len(prompt), 6) if prompt else 0.0
+    dynamic_payload_ratio = round(dynamic_payload_chars / len(prompt), 6) if prompt else 0.0
+    contract_prefix_ratio = (
+        round(contract_prefix_chars / contract_denominator, 6) if contract_denominator > 0 else 0.0
+    )
+    task_context_ratio = round(task_context_chars / len(prompt), 6) if prompt else 0.0
+    return {
+        "schema_version": 1,
+        "layout": layout,
+        "implementer_layout": layout,
+        "dynamic_payload_marker": DYNAMIC_IMPLEMENTER_MARKER,
+        "task_implementer_context_marker": TASK_IMPLEMENTER_CONTEXT_MARKER,
+        "prompt_chars": len(prompt),
+        "contract_prefix_chars": contract_prefix_chars,
+        "contract_prefix_ratio": contract_prefix_ratio,
+        "task_context_chars": task_context_chars,
+        "task_context_ratio": task_context_ratio,
+        "stable_prefix_chars": stable_prefix_chars,
+        "dynamic_payload_chars": dynamic_payload_chars,
+        "stable_prefix_ratio": stable_prefix_ratio,
+        "dynamic_payload_ratio": dynamic_payload_ratio,
+        "cache_health": _classify_cache_health(contract_prefix_ratio),
+        "total_prompt_cache_health": _classify_cache_health(stable_prefix_ratio),
+        "estimated_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),
+        "estimated_stable_prefix_tokens": _estimated_tokens_from_chars(stable_prefix_chars),
+        "estimated_dynamic_payload_tokens": _estimated_tokens_from_chars(dynamic_payload_chars),
+        "estimated_provider_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),
+        "estimated_provider_dynamic_payload_tokens": _estimated_tokens_from_chars(dynamic_payload_chars),
+        "recommendations": [],
+    }
+
+
 def _estimated_tokens_from_chars(char_count: int) -> int:
     if char_count <= 0:
         return 0
@@ -2866,6 +2947,16 @@ def _run_implementer_with_prompt(
         artifact_paths=artifact_paths,
         provider_name=provider_name,
     )
+    implementer_prompt_metrics = build_implementer_prompt_metrics(prompt=prompt, layout="repair-v1")
+    _write_implementer_prompt_metrics(
+        artifact_paths=artifact_paths,
+        metrics=implementer_prompt_metrics,
+    )
+    update_prompt_cache_artifact(
+        artifact_paths["prompt_cache"],
+        phase="implementer",
+        phase_data=build_implementer_phase_cache(metrics=implementer_prompt_metrics),
+    )
     attempt.phase = AttemptPhase.EXECUTING
     save_state(state, state_root)
 
@@ -3023,6 +3114,17 @@ def _write_implementer_prompt_metadata(
         prompt_path=artifact_paths["implementer_prompt"],
     )
     write_prompt_metadata(artifact_paths["implementer_prompt_meta"], metadata)
+
+
+def _write_implementer_prompt_metrics(
+    *,
+    artifact_paths: dict[str, Path],
+    metrics: dict[str, Any],
+) -> None:
+    artifact_paths["implementer_prompt_metrics"].write_text(
+        json.dumps(metrics, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_reviewer_prompt_metadata(

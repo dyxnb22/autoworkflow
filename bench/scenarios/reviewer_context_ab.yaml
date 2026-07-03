@@ -1,0 +1,27 @@
+# cc-loop-benchlab A/B scenario template — reviewer context mode
+# Copy to cc-loop-benchlab/scenarios/ or point benchlab --scenarios-dir here.
+name: reviewer_context_ab
+description: Compare inline vs artifact_refs reviewer prompts on a medium patch fixture.
+fixture: large_patch_review
+repetitions: 1
+variants:
+  - name: inline
+    cc_loop_config:
+      review_context_mode: inline
+    commands:
+      - init
+      - auto
+  - name: artifact_refs
+    cc_loop_config:
+      review_context_mode: artifact_refs
+    commands:
+      - init
+      - auto
+metrics:
+  - prompt.cache.json:phases.reviewer.stable_prefix_ratio
+  - prompt.cache.json:phases.reviewer.estimated_provider_prompt_tokens
+  - review.prompt.metrics.json:contract_prefix_ratio
+  - review.prompt.metrics.json:estimated_avoidable_miss_tokens
+compare:
+  primary: prompt.cache.json:phases.reviewer.estimated_provider_prompt_tokens
+  direction: lower_is_better

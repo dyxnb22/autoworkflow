@@ -87,6 +87,7 @@ def plan_artifact_paths(artifact_root: Path) -> dict[str, Path]:
         "plan_provider": artifact_root / "plan.provider.txt",
         "implementer_prompt": artifact_root / "implementer.prompt.txt",
         "implementer_prompt_meta": artifact_root / "implementer.prompt.meta.json",
+        "implementer_prompt_metrics": artifact_root / "implementer.prompt.metrics.json",
         "implementer_raw": artifact_root / "implementer.raw.json",
         "implementer_provider": artifact_root / "implementer.provider.txt",
         "test_output": artifact_root / "test.output.txt",
