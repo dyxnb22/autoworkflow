@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from cc_loop.events import events_path, read_events
-from cc_loop.failure import read_failure_report
+from cc_loop.failure import FailureReport, classify_attempt_outcome, read_failure_report
 from cc_loop.inspect import build_attempt_snapshot, build_failure_snapshot, derive_next_action
 from cc_loop.recovery import decide_auto_step, derive_next_action_from_step
 from cc_loop.runner_control import runner_log_path
@@ -138,6 +138,25 @@ def _observability_section(
     }
 
 
+def _failure_summary_from_report(report: FailureReport, failure_summary: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(failure_summary)
+    summary.update(
+        {
+            "failure_type": report.failure_type.value,
+            "disposition": report.disposition.value,
+            "stop_reason": report.stop_reason,
+            "suggested_actions": list(report.suggested_actions),
+            "details": dict(report.details),
+        }
+    )
+    summary.setdefault("recovery_retry_count", failure_summary.get("recovery_retry_count", 0))
+    summary.setdefault("merge_retry_count", failure_summary.get("merge_retry_count", 0))
+    summary.setdefault("attempted_repairs", failure_summary.get("attempted_repairs", []))
+    if report.message:
+        summary["message"] = report.message
+    return summary
+
+
 def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
     attempt = _latest_attempt(state)
     running = False
@@ -211,6 +230,25 @@ def build_report(state: TaskState, state_root: Path) -> dict[str, Any]:
             failure_summary["message"] = report_obj.message
             if report_obj.suggested_actions:
                 failure_summary["suggested_actions"] = list(report_obj.suggested_actions)
+    elif attempt is not None:
+        inferred_report = classify_attempt_outcome(
+            state,
+            attempt,
+            plan_artifact_paths(artifacts_dir(state.task_id, attempt.iteration, attempt.retry, state_root)),
+        )
+        if inferred_report is not None:
+            failure_summary = _failure_summary_from_report(inferred_report, failure_summary)
+            if report is not None and report.failure_type == inferred_report.failure_type:
+                failure_summary["disposition"] = report.disposition.value
+                if report.stop_reason:
+                    failure_summary["stop_reason"] = report.stop_reason
+                if report.suggested_actions:
+                    failure_summary["suggested_actions"] = list(report.suggested_actions)
+                elif report.stop_reason == "retry_exhausted":
+                    failure_summary["suggested_actions"] = [
+                        "Inspect review.parsed.json and test.output.txt before restarting",
+                        "Start a new run after fixing the rejected attempt manually",
+                    ]
 
     diagnostics = _diagnostics_section(
         state,

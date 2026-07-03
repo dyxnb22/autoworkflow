@@ -89,6 +89,32 @@ class EventsReportTests(unittest.TestCase):
         self.assertIn("Diagnosis:", human)
         self.assertIn("test.output.txt", human)
 
+    def test_report_infers_failure_summary_without_failure_report(self) -> None:
+        state = load_state("evt-task", self.state_root)
+        attempt = AttemptRecord(
+            iteration=1,
+            retry=1,
+            created_at="t",
+            base_commit="abc",
+            phase=AttemptPhase.REJECTED,
+            decision="reject",
+            review_json={"reason": "missing generated file", "retry_prompt": "add the file"},
+            worktree_path=str(self.repo),
+        )
+        state.history = [attempt]
+        state.status = TaskStatus.STOPPED
+        state.config["max_retries_per_step"] = 1
+        save_state(state, self.state_root)
+        artifacts_dir("evt-task", 1, 1, self.state_root).mkdir(parents=True, exist_ok=True)
+
+        report = build_report(state, self.state_root)
+
+        self.assertEqual(report["failure_summary"]["failure_type"], "reviewer_reject")
+        self.assertEqual(report["failure_summary"]["disposition"], "terminal")
+        self.assertEqual(report["failure_summary"]["stop_reason"], "retry_exhausted")
+        self.assertEqual(report["diagnostics"]["failure_type"], "reviewer_reject")
+        self.assertIn("Inspect", report["diagnostics"]["suggested_actions"][0])
+
     def test_report_cli_human_smoke(self) -> None:
         result = _cli("report", "--task-id", "evt-task", state_root=self.state_root)
         self.assertEqual(result.returncode, 0)
