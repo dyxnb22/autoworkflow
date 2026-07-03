@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,37 @@ from cc_loop.runner_heartbeat import is_heartbeat_stale, read_heartbeat
 from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph, graph_status_summary, sync_graph_node_with_attempt
 
 INTEGRATION_SCHEMA_VERSION = 1
+
+
+def _safe_read_json(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _reviewer_prompt_metrics_snapshot(
+    state: TaskState,
+    attempt: AttemptRecord | None,
+    state_root: Path,
+) -> dict | None:
+    if attempt is None:
+        return None
+    paths = plan_artifact_paths(
+        artifacts_dir(state.task_id, attempt.iteration, attempt.retry, state_root)
+    )
+    metrics = _safe_read_json(paths["review_prompt_metrics"])
+    if metrics is None:
+        return None
+    return {
+        "layout": metrics.get("layout"),
+        "stable_prefix_ratio": metrics.get("stable_prefix_ratio"),
+        "cache_health": metrics.get("cache_health"),
+        "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
+    }
 
 
 def runner_pid_path(state_root: Path, task_id: str) -> Path:
@@ -408,6 +440,9 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
         )
         if len(getattr(state, "running_attempts", None) or {}) > 1:
             snapshot["running_node_ids"] = list(state.running_attempts.keys())
+    reviewer_metrics = _reviewer_prompt_metrics_snapshot(state, attempt, state_root)
+    if reviewer_metrics is not None:
+        snapshot["reviewer_prompt_metrics"] = reviewer_metrics
     return snapshot
 
 

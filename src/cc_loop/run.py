@@ -50,7 +50,7 @@ from cc_loop.state import (
     utc_now_iso,
     worktree_path,
 )
-from cc_loop.subprocess_util import run_with_timeout
+from cc_loop.subprocess_util import RunResult, run_with_timeout
 from cc_loop.planner_granularity import planner_granularity_prompt_section, resolve_planner_granularity
 from cc_loop.provider_runtime import (
     provider_argv_from_result,
@@ -198,6 +198,43 @@ _PROVIDER_PHASE_BY_KEY = {
     "implementer": AttemptPhase.EXECUTING,
     "reviewer": AttemptPhase.REVIEWING,
 }
+
+
+def _write_provider_startup_failure_artifacts(
+    *,
+    artifact_paths: dict[str, Path],
+    phase_key: str,
+    provider_name: str,
+    error: str,
+) -> None:
+    """Persist argv/result/failure artifacts when a provider cannot be resolved or started."""
+    artifact_root = artifact_paths["plan_prompt"].parent
+    argv = ["(provider-resolution-failed)", provider_name]
+    write_command_argv_artifact(artifact_root, phase=phase_key, argv=argv)
+    write_subprocess_result_artifact(
+        artifact_root,
+        phase=phase_key,
+        result=RunResult(
+            args=argv,
+            returncode=-1,
+            stdout="",
+            stderr=error,
+            duration_seconds=0.0,
+        ),
+        stderr_path="",
+        stdout_path="",
+    )
+    write_failure_report(
+        artifact_root,
+        FailureReport(
+            failure_type=FailureType.PROVIDER_EXIT_ERROR,
+            disposition=RecoveryDisposition.TERMINAL,
+            message=error,
+            stop_reason="provider_resolution_failed",
+            details={"provider": provider_name, "phase": phase_key},
+            suggested_actions=[f"Configure or install provider: {provider_name}"],
+        ),
+    )
 
 
 def _invoke_provider(
@@ -652,12 +689,15 @@ def run_planning_phase(
             _mark_planning_failed(state, state_root)
             raise PlanningError(str(exc)) from exc
 
-    attempt.phase = AttemptPhase.WORKTREE_CREATED
-    save_state(state, state_root)
-
     try:
         provider = get_provider(provider_name)
     except ValueError as exc:
+        _write_provider_startup_failure_artifacts(
+            artifact_paths=artifact_paths,
+            phase_key="planner",
+            provider_name=provider_name,
+            error=str(exc),
+        )
         _mark_planning_failed(state, state_root)
         raise PlanningError(str(exc)) from exc
 
@@ -932,6 +972,12 @@ def run_implementer_phase(
     try:
         provider = get_provider(provider_name)
     except ValueError as exc:
+        _write_provider_startup_failure_artifacts(
+            artifact_paths=artifact_paths,
+            phase_key="implementer",
+            provider_name=provider_name,
+            error=str(exc),
+        )
         _update_implementer_trace(
             state=state,
             attempt=attempt,
@@ -1239,6 +1285,12 @@ def run_review_phase(
         try:
             provider = get_provider(provider_name)
         except ValueError as exc:
+            _write_provider_startup_failure_artifacts(
+                artifact_paths=artifact_paths,
+                phase_key="reviewer",
+                provider_name=provider_name,
+                error=str(exc),
+            )
             _update_review_trace(
                 state=state,
                 attempt=attempt,

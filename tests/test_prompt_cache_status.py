@@ -16,8 +16,10 @@ import tests.fake_providers  # noqa: F401
 from cc_loop.cli import main
 from cc_loop.config import merge_config
 from cc_loop.inspect import build_status_snapshot
+from cc_loop.failure import failure_report_path
 from cc_loop.providers.base import ProviderAdapter, ProviderRunResult, register_provider
 from cc_loop.run import (
+    ImplementingError,
     build_implementer_prompt,
     build_planner_prompt,
     build_reviewer_prompt,
@@ -318,6 +320,154 @@ class ProviderPhasePersistenceTests(unittest.TestCase):
         finally:
             PhaseCheckingImplementer.observed = None
             PhaseCheckingImplementer.release = None
+            env.close()
+
+
+class PlannerPhasePersistenceTests(unittest.TestCase):
+    def test_planner_phase_persisted_before_provider_run(self) -> None:
+        env = TempEnv()
+        try:
+            observed: dict[str, str] = {}
+            release = threading.Event()
+
+            @register_provider
+            class PhaseCheckingPlanner(ProviderAdapter):
+                name = "phase-check-planner"
+
+                def build_args(self, *, worktree_path, prompt, output_path, config) -> list[str]:
+                    return ["true"]
+
+                def run(self, **kwargs) -> ProviderRunResult:
+                    state = load_state("plan-phase", env.state_root())
+                    attempt = state.history[-1]
+                    observed["phase"] = attempt.phase.value
+                    observed["running_provider"] = attempt.running_provider
+                    release.wait(timeout=2.0)
+                    payload = {
+                        "prompt": "Create hello.txt",
+                        "expected_changes": "hello.txt",
+                        "acceptance_criteria": "hello.txt exists",
+                        "is_final_step": True,
+                    }
+                    kwargs["output_path"].write_text(json.dumps(payload), encoding="utf-8")
+                    return ProviderRunResult(
+                        provider=self.name,
+                        exit_code=0,
+                        raw_artifact_path=kwargs["output_path"],
+                    )
+
+                def parse_planner_output(self, last_message_path: Path):
+                    return json.loads(last_message_path.read_text(encoding="utf-8"))
+
+                def parse_reviewer_output(self, last_message_path: Path):
+                    raise NotImplementedError
+
+                def preflight_check_argv(self) -> list[str]:
+                    return ["true"]
+
+            make_task(
+                repo=env.repo(),
+                state_root=env.state_root(),
+                task_id="plan-phase",
+                config={"planner_provider": "phase-check-planner"},
+            )
+
+            with mock.patch("cc_loop.run.DEFAULT_WORKTREE_ROOT", env.worktree_root()):
+                state = load_state("plan-phase", env.state_root())
+                state, _attempt, artifact_paths = prepare_run(state, env.state_root())
+
+                def _run_planning() -> None:
+                    run_planning_phase(state, env.state_root(), artifact_paths)
+
+                worker = threading.Thread(target=_run_planning)
+                worker.start()
+                deadline = time.time() + 5.0
+                snapshot = None
+                while time.time() < deadline:
+                    snapshot = build_status_snapshot(
+                        load_state("plan-phase", env.state_root()),
+                        env.state_root(),
+                    )
+                    if snapshot["attempt"]["phase"] == "planning":
+                        break
+                    time.sleep(0.05)
+                release.set()
+                worker.join(timeout=5.0)
+
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            self.assertEqual(snapshot["attempt"]["phase"], "planning")
+            self.assertNotEqual(snapshot["attempt"]["phase"], "worktree_created")
+            self.assertEqual(observed.get("phase"), "planning")
+            self.assertEqual(observed.get("running_provider"), "phase-check-planner")
+        finally:
+            env.close()
+
+
+class ProviderStartupFailureTests(unittest.TestCase):
+    def test_unknown_implementer_writes_startup_failure_artifacts(self) -> None:
+        env = TempEnv()
+        try:
+            make_task(repo=env.repo(), state_root=env.state_root(), task_id="startup-fail")
+            with mock.patch("cc_loop.run.DEFAULT_WORKTREE_ROOT", env.worktree_root()):
+                state = load_state("startup-fail", env.state_root())
+                state, _attempt, artifact_paths = prepare_run(state, env.state_root())
+                state = run_planning_phase(state, env.state_root(), artifact_paths)
+                with mock.patch(
+                    "cc_loop.run.get_provider",
+                    side_effect=ValueError("unknown provider: missing-implementer-xyz"),
+                ):
+                    with self.assertRaises(ImplementingError):
+                        run_implementer_phase(state, env.state_root(), artifact_paths)
+
+            artifact_root = artifact_paths["plan_prompt"].parent
+            argv_payload = json.loads((artifact_root / "command.argv.json").read_text(encoding="utf-8"))
+            result_payload = json.loads((artifact_root / "subprocess.result.json").read_text(encoding="utf-8"))
+            self.assertIn("implementer", argv_payload)
+            self.assertEqual(result_payload["implementer"]["exit_code"], -1)
+            self.assertTrue(failure_report_path(artifact_root).is_file())
+            failure = json.loads(failure_report_path(artifact_root).read_text(encoding="utf-8"))
+            self.assertEqual(failure["stop_reason"], "provider_resolution_failed")
+        finally:
+            env.close()
+
+
+class StatusReviewerMetricsTests(unittest.TestCase):
+    def test_status_json_includes_reviewer_prompt_metrics_when_present(self) -> None:
+        env = TempEnv()
+        try:
+            make_task(repo=env.repo(), state_root=env.state_root(), task_id="status-metrics")
+            state = load_state("status-metrics", env.state_root())
+            state.status = TaskStatus.RUNNING
+            state.history = [
+                AttemptRecord(
+                    iteration=1,
+                    retry=0,
+                    created_at=utc_now_iso(),
+                    base_commit=state.base_commit,
+                    phase=AttemptPhase.REVIEWING,
+                )
+            ]
+            save_state(state, env.state_root())
+            artifact_root = artifacts_dir("status-metrics", 1, 0, env.state_root())
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            paths = plan_artifact_paths(artifact_root)
+            paths["review_prompt_metrics"].write_text(
+                json.dumps(
+                    {
+                        "layout": "stable-prefix-v1",
+                        "stable_prefix_ratio": 0.82,
+                        "cache_health": "good",
+                        "estimated_prompt_tokens": 120,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            snapshot = build_status_snapshot(load_state("status-metrics", env.state_root()), env.state_root())
+            self.assertIn("reviewer_prompt_metrics", snapshot)
+            self.assertEqual(snapshot["reviewer_prompt_metrics"]["cache_health"], "good")
+        finally:
             env.close()
 
 
