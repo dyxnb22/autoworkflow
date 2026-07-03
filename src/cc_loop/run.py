@@ -30,6 +30,13 @@ from cc_loop.git import (
     merge_branch_into_base,
 )
 from cc_loop.preflight import PreflightResult, run_preflight
+from cc_loop.prompt_cache import (
+    build_implementer_phase_cache,
+    build_planner_phase_cache,
+    build_reviewer_phase_cache,
+    update_prompt_cache_artifact,
+)
+from cc_loop.review_context import format_patch_path_list, resolve_review_context_mode
 from cc_loop.prompt_metadata import build_prompt_metadata, write_prompt_metadata
 from cc_loop.providers.base import ProviderRunResult, get_provider
 from cc_loop.repair_prompts import build_repair_prompt
@@ -631,6 +638,116 @@ def _run_from_phase(
     return _run_finalize_phase(state, state_root, attempt, artifact_paths)
 
 
+def _planner_mode(config: LoopConfig) -> str:
+    return str(config.get("planner_mode", "auto") or "auto").strip().lower()
+
+
+def build_direct_plan_json(goal: str) -> dict[str, Any]:
+    """Build a single-node task graph plan from the task goal without a planner provider."""
+    title = goal.strip()
+    if len(title) > 80:
+        title = title[:77] + "..."
+    return {
+        "mode": "task_graph",
+        "summary": title,
+        "nodes": [
+            {
+                "id": "T1",
+                "title": title,
+                "description": goal,
+                "kind": "implementation",
+                "owner": "implementer",
+                "dependencies": [],
+                "acceptance_criteria": [
+                    "Implementation satisfies the requested goal",
+                    "Configured tests pass or are explicitly skipped",
+                ],
+                "files_scope": [],
+            }
+        ],
+        "is_final_step": True,
+    }
+
+
+def _run_direct_planning(
+    *,
+    state: TaskState,
+    state_root: Path,
+    artifact_paths: dict[str, Path],
+    attempt: AttemptRecord,
+    config: LoopConfig,
+    max_retries: int,
+    prompt: str,
+) -> TaskState:
+    """Skip planner provider and synthesize a single-node plan from the task goal."""
+    plan_json = build_direct_plan_json(state.goal)
+    artifact_root = artifact_paths["plan_prompt"].parent
+    artifact_paths["plan_provider"].write_text("(direct)\n", encoding="utf-8")
+    artifact_paths["plan_last_message"].write_text(
+        json.dumps(plan_json, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    artifact_paths["plan_parsed"].write_text(
+        json.dumps(plan_json, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    write_command_argv_artifact(
+        artifact_root,
+        phase="planner",
+        argv=["(planner-skipped-direct)"],
+    )
+
+    try:
+        graph = graph_from_planner_json(plan_json)
+    except (KeyError, TypeError, ValueError) as exc:
+        _mark_planning_failed(state, state_root)
+        raise PlanningError(f"direct plan parse failed: {exc}") from exc
+
+    state.task_graph = graph
+    node = next_runnable_node(graph, max_retries=max_retries)
+    if node is None:
+        _mark_planning_failed(state, state_root)
+        raise PlanningError("direct plan produced a task graph with no runnable nodes")
+
+    mark_node_running(graph, node.id)
+    attempt.graph_node_id = node.id
+    attempt.plan_json = plan_json
+    clear_report_from_attempt(attempt)
+    failure_report_path(artifact_root).unlink(missing_ok=True)
+    attempt.phase = AttemptPhase.WORKTREE_CREATED
+    _emit_run_event(
+        state_root,
+        state,
+        attempt,
+        EventType.PLANNER_COMPLETED,
+        message="direct plan (planner provider skipped)",
+    )
+    if attempt.graph_node_id:
+        _emit_run_event(
+            state_root,
+            state,
+            attempt,
+            EventType.GRAPH_NODE_STARTED,
+            message=node.title,
+        )
+    save_state(state, state_root)
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=config,
+        phase="planning",
+        status="completed",
+        prompt_path=str(artifact_paths["plan_prompt"]),
+        prompt_meta_path=str(artifact_paths["plan_prompt_meta"]),
+        raw_path=str(artifact_paths["plan_raw"]),
+        estimated_prompt_tokens=estimate_tokens_from_path(artifact_paths["plan_prompt"]),
+        planner_mode="direct",
+        provider_skipped=True,
+    )
+    return state
+
+
 def run_planning_phase(
     state: TaskState,
     state_root: Path,
@@ -675,6 +792,14 @@ def run_planning_phase(
         artifact_paths=artifact_paths,
         provider_name=provider_name,
     )
+    update_prompt_cache_artifact(
+        artifact_paths["prompt_cache"],
+        phase="planner",
+        phase_data=build_planner_phase_cache(
+            prompt=prompt,
+            skipped=_planner_mode(config) == "direct",
+        ),
+    )
 
     if not worktree.is_dir():
         try:
@@ -687,6 +812,17 @@ def run_planning_phase(
         except GitError as exc:
             _mark_planning_failed(state, state_root)
             raise PlanningError(str(exc)) from exc
+
+    if _planner_mode(config) == "direct":
+        return _run_direct_planning(
+            state=state,
+            state_root=state_root,
+            artifact_paths=artifact_paths,
+            attempt=attempt,
+            config=config,
+            max_retries=max_retries,
+            prompt=prompt,
+        )
 
     try:
         provider = get_provider(provider_name)
@@ -856,6 +992,11 @@ def _run_graph_node_setup(
         artifact_paths=artifact_paths,
         provider_name=provider_name,
     )
+    update_prompt_cache_artifact(
+        artifact_paths["prompt_cache"],
+        phase="planner",
+        phase_data=build_planner_phase_cache(prompt=prompt, skipped=False),
+    )
     artifact_paths["plan_parsed"].write_text(
         json.dumps(attempt.plan_json, indent=2) + "\n",
         encoding="utf-8",
@@ -964,6 +1105,11 @@ def run_implementer_phase(
         attempt=attempt,
         artifact_paths=artifact_paths,
         provider_name=provider_name,
+    )
+    update_prompt_cache_artifact(
+        artifact_paths["prompt_cache"],
+        phase="implementer",
+        phase_data=build_implementer_phase_cache(prompt=prompt),
     )
 
     _emit_run_event(state_root, state, attempt, EventType.IMPLEMENTER_STARTED, message=provider_name)
@@ -1244,22 +1390,35 @@ def run_review_phase(
     attempt.diff_patch_paths = [str(path) for path in patch_paths]
 
     diff_stat = read_diff_stat_summary(worktree, attempt.base_commit)
+    context_mode, inline_patch = resolve_review_context_mode(config, len(patch_body))
     prompt = build_reviewer_prompt(
         state=state,
         attempt=attempt,
         diff_stat=diff_stat,
         patch_body=patch_body,
         test_status=attempt.test_status,
+        config=config,
+        artifact_paths=artifact_paths,
+        patch_paths=patch_paths,
+        inline_patch=inline_patch,
+        context_mode=context_mode,
     )
     artifact_paths["review_prompt"].write_text(prompt, encoding="utf-8")
     review_prompt_metrics = build_reviewer_prompt_metrics(
         prompt=prompt,
         diff_stat=diff_stat,
         patch_body=patch_body,
+        inline_patch=inline_patch,
+        context_mode=context_mode,
     )
     artifact_paths["review_prompt_metrics"].write_text(
         json.dumps(review_prompt_metrics, indent=2) + "\n",
         encoding="utf-8",
+    )
+    update_prompt_cache_artifact(
+        artifact_paths["prompt_cache"],
+        phase="reviewer",
+        phase_data=build_reviewer_phase_cache(metrics=review_prompt_metrics),
     )
     _write_reviewer_prompt_metadata(
         state=state,
@@ -1788,12 +1947,24 @@ def build_reviewer_prompt(
     diff_stat: str,
     patch_body: str,
     test_status: str,
+    config: LoopConfig | None = None,
+    artifact_paths: dict[str, Path] | None = None,
+    patch_paths: list[Path] | None = None,
+    inline_patch: bool | None = None,
+    context_mode: str | None = None,
 ) -> str:
     """Construct the reviewer prompt with bounded diff context.
 
     Keep stable reviewer rules before dynamic task/diff payload so provider
     prefix caches can reuse the rubric and JSON contract across iterations.
     """
+    config = config or state.config
+    patch_body_chars = len(patch_body)
+    if context_mode is None or inline_patch is None:
+        resolved_mode, resolved_inline = resolve_review_context_mode(config, patch_body_chars)
+        context_mode = context_mode or resolved_mode
+        inline_patch = resolved_inline if inline_patch is None else inline_patch
+
     graph = ensure_task_graph(state)
     node_section = ""
     if graph is not None and attempt.graph_node_id:
@@ -1816,7 +1987,25 @@ def build_reviewer_prompt(
                 "\nReview whether this graph node is complete — not whether the entire project is complete.\n"
             )
 
-    return (
+    allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
+    artifact_root = ""
+    diff_stat_path = ""
+    diff_files_path = ""
+    test_output_path = ""
+    patches_dir = ""
+    selected_patch_paths = ""
+    omitted_patch_chars = 0 if inline_patch else patch_body_chars
+    estimated_avoided_tokens = _estimated_tokens_from_chars(omitted_patch_chars)
+
+    if artifact_paths is not None:
+        artifact_root = str(artifact_paths["plan_prompt"].parent)
+        diff_stat_path = str(artifact_paths["diff_stat"])
+        diff_files_path = str(artifact_paths["diff_files"])
+        test_output_path = str(artifact_paths["test_output"])
+        patches_dir = str(artifact_paths["patches_dir"])
+        selected_patch_paths = format_patch_path_list(list(patch_paths or []))
+
+    stable_prefix = (
         "You are the cc-loop reviewer.\n"
         "\n"
         "## Stable Review Contract\n"
@@ -1825,6 +2014,11 @@ def build_reviewer_prompt(
         "Prefer precise, actionable feedback over broad commentary.\n"
         "Do not request unrelated refactors, style churn, or work outside the scoped node.\n"
         "Treat generated caches, build artifacts, and unrelated file churn as review findings.\n"
+        "Before approving, you must inspect test status and diff/patch evidence.\n"
+        "When patch content is not inlined, read the listed artifact paths or inspect the worktree git diff.\n"
+        "Do not approve solely because patch text is omitted from the prompt.\n"
+        f"Default to reject when tests failed or timed_out unless allow_merge_without_tests is enabled "
+        f"(currently {allow_merge_without_tests}).\n"
         "\n"
         "## Stable Review Rubric\n"
         "- Verify the implementation satisfies the stated acceptance criteria.\n"
@@ -1844,13 +2038,19 @@ def build_reviewer_prompt(
         '  "reason": "Why this attempt is acceptable or not",\n'
         '  "issues": [],\n'
         '  "retry_prompt": "",\n'
-        '  "stop_reason": ""\n'
+        '  "stop_reason": "",\n'
+        '  "inspected_artifacts": [],\n'
+        '  "inspected_files": [],\n'
+        '  "test_status_checked": true\n'
         "}\n"
         'Allowed decisions: "approve", "reject", "stop", "replan".\n'
         'For "approve", keep issues empty and retry_prompt empty.\n'
         'For "reject", include concise issues and a retry_prompt the implementer can execute.\n'
         'For "stop", include stop_reason.\n'
         'For "replan", include replan_reason and replan_prompt or suggested_changes.\n'
+        "Set inspected_artifacts to artifact paths you reviewed.\n"
+        "Set inspected_files to changed file paths you verified.\n"
+        "Set test_status_checked true only after reading test status/output evidence.\n"
         "\n"
         "## Dynamic Review Payload\n"
         "Everything below this line may change on every attempt. Use it as evidence, but keep the stable contract above authoritative.\n"
@@ -1866,13 +2066,38 @@ def build_reviewer_prompt(
         f"Base commit: {attempt.base_commit}\n"
         f"Head commit: {attempt.head_commit}\n"
         f"{node_section}\n"
+        "### Review context\n"
+        f"Context mode: {context_mode}\n"
+        f"Inline patch: {inline_patch}\n"
+        f"Artifact root: {artifact_root or '(unknown)'}\n"
+        f"diff.stat.txt: {diff_stat_path or '(unknown)'}\n"
+        f"diff.files.txt: {diff_files_path or '(unknown)'}\n"
+        f"test.output.txt: {test_output_path or '(unknown)'}\n"
+        f"Patches directory: {patches_dir or '(unknown)'}\n"
+        f"Selected patch paths:\n{selected_patch_paths or '(unknown)'}\n"
+        f"Omitted patch chars: {omitted_patch_chars}\n"
+        f"Estimated avoided cache-miss tokens: {estimated_avoided_tokens}\n"
+        "\n"
         "### Test result\n"
-        f"Status: {test_status}\n\n"
+        f"Status: {test_status}\n"
+        f"Output path: {test_output_path or '(unknown)'}\n\n"
         "### Diff stat\n"
         f"{diff_stat}\n\n"
-        "### Selected patches\n"
-        f"{patch_body or '(no patch content selected)'}\n"
     )
+
+    if inline_patch:
+        stable_prefix += (
+            "### Selected patches\n"
+            f"{patch_body or '(no patch content selected)'}\n"
+        )
+    else:
+        stable_prefix += (
+            "### Patch artifact references\n"
+            "Patch content is not inlined. Inspect the selected patch paths above, diff.files.txt, "
+            "or run `git diff` in the worktree before approving.\n"
+        )
+
+    return stable_prefix.strip() + "\n"
 
 
 def _estimated_tokens_from_chars(char_count: int) -> int:
@@ -1894,6 +2119,8 @@ def build_reviewer_prompt_metrics(
     prompt: str,
     diff_stat: str,
     patch_body: str,
+    inline_patch: bool = True,
+    context_mode: str = "inline",
 ) -> dict[str, Any]:
     """Return cache/cost layout metrics for a reviewer prompt artifact."""
     marker = "## Dynamic Review Payload"
@@ -1901,6 +2128,8 @@ def build_reviewer_prompt_metrics(
     stable_prefix_chars = marker_index if marker_index >= 0 else len(prompt)
     dynamic_payload_chars = len(prompt) - stable_prefix_chars
     patch_chars = len(patch_body)
+    inline_patch_chars = patch_chars if inline_patch else 0
+    omitted_patch_chars = 0 if inline_patch else patch_chars
     diff_stat_chars = len(diff_stat)
     evidence_payload_chars = patch_chars + diff_stat_chars
     contract_dynamic_chars = max(0, dynamic_payload_chars - evidence_payload_chars)
@@ -1910,9 +2139,12 @@ def build_reviewer_prompt_metrics(
     contract_prefix_ratio = (
         round(stable_prefix_chars / contract_denominator, 6) if contract_denominator > 0 else 0.0
     )
+    estimated_omitted_patch_tokens = _estimated_tokens_from_chars(omitted_patch_chars)
     return {
         "schema_version": 1,
         "layout": "stable-prefix-v1",
+        "context_mode": context_mode,
+        "inline_patch": inline_patch,
         "dynamic_payload_marker": marker,
         "prompt_chars": len(prompt),
         "stable_prefix_chars": stable_prefix_chars,
@@ -1925,11 +2157,17 @@ def build_reviewer_prompt_metrics(
         "total_prompt_cache_health": _classify_cache_health(stable_prefix_ratio),
         "diff_stat_chars": diff_stat_chars,
         "patch_body_chars": patch_chars,
+        "inline_patch_chars": inline_patch_chars,
+        "omitted_patch_chars": omitted_patch_chars,
         "estimated_prompt_tokens": _estimated_tokens_from_chars(len(prompt)),
         "estimated_stable_prefix_tokens": _estimated_tokens_from_chars(stable_prefix_chars),
         "estimated_dynamic_payload_tokens": _estimated_tokens_from_chars(dynamic_payload_chars),
         "estimated_diff_stat_tokens": _estimated_tokens_from_chars(diff_stat_chars),
         "estimated_patch_body_tokens": _estimated_tokens_from_chars(patch_chars),
+        "estimated_inline_patch_tokens": _estimated_tokens_from_chars(inline_patch_chars),
+        "estimated_omitted_patch_tokens": estimated_omitted_patch_tokens,
+        "estimated_avoidable_miss_tokens": estimated_omitted_patch_tokens,
+        "recommendations": [],
     }
 
 

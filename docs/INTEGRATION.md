@@ -157,6 +157,7 @@ Stdout is a single JSON object. No extra prose.
 | `current_message` | string | Short UI-friendly status message (v0.6) |
 | `running_node_ids` | array | Parallel running node ids when applicable (v0.9) |
 | `reviewer_prompt_metrics` | object \| omitted | Latest attempt reviewer cache metrics when `review.prompt.metrics.json` exists (v0.10 additive) |
+| `prompt_cache` | object \| omitted | Summary from `prompt.cache.json` when present: path, token totals, reviewer context mode, omitted patch chars (additive) |
 | `heartbeat` | object \| omitted | Fresh `runner.heartbeat.json` phase/provider snapshot during active runs (v0.10 additive) |
 
 `attempt.running_provider` (v0.10) is non-empty while a provider subprocess is active.
@@ -272,7 +273,10 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 In addition to goal/repo/providers/test-command:
 
 - `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. With this separator, every following token belongs to the test command; put cc-loop flags before `--test-command`. cc-loop emits a **stderr warning** (non-fatal) when known cc-loop flags appear after `--test-command --`. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
-- `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`)
+- `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`; still invokes the planner provider)
+- `--planner-mode auto|graph|single|direct` — planner execution mode (default `auto`). `direct` skips the planner provider and synthesizes a single-node task graph from the goal; `graph`/`single`/`auto` still run the planner unless `direct` is set.
+- `--review-context-mode hybrid|inline|artifact_refs` — reviewer prompt context (default `hybrid`). `inline` always embeds patch text; `artifact_refs` references patch/test/diff artifact paths only; `hybrid` inlines patches up to the threshold below.
+- `--review-inline-patch-threshold N` — hybrid reviewer inline patch character limit (default `8000`)
 - `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (config key `provider_watchdog_grace_seconds`, default `5`)
 - `--task-id ID` — explicit task id (recommended for integrations)
 - `--codex-model`, `--cursor-model`, `--claude-code-model`
@@ -298,9 +302,10 @@ Each attempt artifact directory may include:
 | `plan.prompt.meta.json` | Planner prompt version/label/deployment metadata |
 | `implementer.prompt.meta.json` | Implementer prompt metadata |
 | `review.prompt.meta.json` | Reviewer prompt metadata |
-| `review.prompt.metrics.json` | Reviewer cache-layout metrics (`stable_prefix_ratio`, `contract_prefix_ratio`, `cache_health`, token estimates) |
+| `review.prompt.metrics.json` | Reviewer cache-layout metrics (`stable_prefix_ratio`, `contract_prefix_ratio`, `cache_health`, `context_mode`, `omitted_patch_chars`, `estimated_avoidable_miss_tokens`, token estimates) |
+| `prompt.cache.json` | Per-attempt prompt cache budget across planner/implementer/reviewer phases with totals |
 | `attempt.trace.json` | Normalized per-attempt trace with phase status and artifact paths |
-| `command.argv.json` | Executed argv per phase (`planner`, `implementer`, `reviewer`, `test`) |
+| `command.argv.json` | Executed argv per phase (`planner`, `implementer`, `reviewer`, `test`); prompt text is redacted as `<prompt:N chars sha256=...>` placeholders |
 | `subprocess.result.json` | Subprocess exit metadata per phase (`exit_code`, `timed_out`, `hung`, `duration_seconds`, `killed`, stdout/stderr paths) |
 
 ### Prompt metadata contract (`schema_version` 1)
@@ -362,7 +367,19 @@ when available, and `timestamp`.
     "contract_prefix_ratio": 0.92,
     "cache_health": "good",
     "total_prompt_cache_health": "warning",
-    "estimated_prompt_tokens": 456
+    "estimated_prompt_tokens": 456,
+    "context_mode": "hybrid",
+    "inline_patch": false,
+    "omitted_patch_chars": 12000,
+    "estimated_avoidable_miss_tokens": 3000
+  },
+  "prompt_cache": {
+    "path": "/absolute/path/prompt.cache.json",
+    "estimated_prompt_tokens": 12000,
+    "estimated_avoidable_miss_tokens": 3000,
+    "reviewer_context_mode": "hybrid",
+    "reviewer_inline_patch": false,
+    "reviewer_omitted_patch_chars": 12000
   },
   "prompt_metadata_paths": {
     "planner": "/absolute/path/plan.prompt.meta.json",

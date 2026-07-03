@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -202,8 +203,32 @@ def write_subprocess_result_artifact(
     return path
 
 
+def _prompt_placeholder(text: str) -> str:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"<prompt:{len(text)} chars sha256={digest}>"
+
+
+def sanitize_argv_for_display(argv: list[str], *, prompt_threshold: int = 200) -> list[str]:
+    """Replace large prompt arguments with placeholders for diagnostic argv artifacts."""
+    sanitized: list[str] = []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "-p" and index + 1 < len(argv):
+            sanitized.append(arg)
+            sanitized.append(_prompt_placeholder(argv[index + 1]))
+            index += 2
+            continue
+        if len(arg) > prompt_threshold:
+            sanitized.append(_prompt_placeholder(arg))
+        else:
+            sanitized.append(arg)
+        index += 1
+    return sanitized
+
+
 def provider_argv_from_result(provider: ProviderAdapter, **build_kwargs: Any) -> list[str]:
-    return list(
+    argv = list(
         provider.build_args(
             worktree_path=build_kwargs["worktree_path"],
             prompt=build_kwargs.get("prompt", ""),
@@ -211,3 +236,4 @@ def provider_argv_from_result(provider: ProviderAdapter, **build_kwargs: Any) ->
             config=build_kwargs["config"],
         )
     )
+    return sanitize_argv_for_display(argv)

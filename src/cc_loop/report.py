@@ -9,6 +9,7 @@ from typing import Any
 from cc_loop.events import events_path, read_events
 from cc_loop.failure import FailureReport, classify_attempt_outcome, read_failure_report
 from cc_loop.inspect import build_attempt_snapshot, build_failure_snapshot, derive_next_action, is_runner_alive
+from cc_loop.prompt_cache import prompt_cache_snapshot
 from cc_loop.recovery import decide_auto_step, derive_next_action_from_step
 from cc_loop.runner_control import runner_log_path, runner_state_label
 from cc_loop.state import (
@@ -129,6 +130,7 @@ def _observability_section(
     return {
         "trace_path": str(trace_file_path(artifact_root)),
         "reviewer_prompt_metrics": reviewer_metrics_summary,
+        "prompt_cache": prompt_cache_snapshot(paths["prompt_cache"]),
         "prompt_metadata_paths": {
             "planner": artifact_paths.get("plan_prompt_meta", str(paths["plan_prompt_meta"])),
             "implementer": artifact_paths.get(
