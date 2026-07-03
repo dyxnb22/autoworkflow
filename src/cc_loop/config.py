@@ -47,6 +47,9 @@ class LoopConfig(TypedDict, total=False):
     auto_direct_max_goal_chars: int
     review_context_mode: str
     review_inline_patch_threshold: int
+    review_depth: str
+    review_fast_max_changed_files: int
+    review_escalate_diff_stat_chars: int
     provider_watchdog_grace_seconds: int
 
 
@@ -90,6 +93,9 @@ DEFAULT_CONFIG: LoopConfig = {
     "auto_direct_max_goal_chars": 500,
     "review_context_mode": "hybrid",
     "review_inline_patch_threshold": 8000,
+    "review_depth": "standard",
+    "review_fast_max_changed_files": 10,
+    "review_escalate_diff_stat_chars": 8000,
     "provider_watchdog_grace_seconds": 5,
 }
 

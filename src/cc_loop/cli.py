@@ -145,6 +145,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Hybrid reviewer mode inlines patches up to this many characters (default: 8000)",
     )
     init_parser.add_argument(
+        "--review-depth",
+        choices=["standard", "fast", "deep", "auto"],
+        default=None,
+        help="Reviewer depth: standard (default), fast artifact-only, deep full review, or auto two-stage",
+    )
+    init_parser.add_argument(
         "--provider-watchdog-grace-seconds",
         type=int,
         default=None,
@@ -390,6 +396,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["planner_mode"] = args.planner_mode
     if args.review_context_mode is not None:
         overrides["review_context_mode"] = args.review_context_mode
+    if args.review_depth is not None:
+        overrides["review_depth"] = args.review_depth
     if args.review_inline_patch_threshold is not None:
         overrides["review_inline_patch_threshold"] = args.review_inline_patch_threshold
 

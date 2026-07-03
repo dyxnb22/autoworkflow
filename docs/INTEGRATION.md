@@ -448,6 +448,27 @@ When `planner_mode` is `auto` (default), cc-loop may skip the planner provider f
 
 `prompt.cache.json` planner phase records `planner_mode_resolved`, `planner_direct_reason`, and `provider_skipped`.
 
+### Two-stage reviewer (`review_depth`)
+
+Config key `review_depth` (default `standard`):
+
+| Mode | Behavior |
+|------|----------|
+| `standard` | Single deep reviewer prompt (existing behavior) |
+| `fast` | Artifact-ref-only fast reviewer prompt |
+| `deep` | Full reviewer prompt (same as standard) |
+| `auto` | Fast review when low risk; escalate to deep on failure signals or `escalate` decision |
+
+Auto pre-escalation triggers (skip fast, run deep): failed/timed_out tests, `changed_files > review_fast_max_changed_files` (default 10), large diff stat (`review_escalate_diff_stat_chars`, default 8000), security-sensitive patch paths.
+
+Fast review artifacts: `review.fast.prompt.txt`, `review.fast.parsed.json`, `review.fast.prompt.metrics.json`.
+
+Init example:
+
+```bash
+cc-loop init --goal "..." --repo "$REPO" --review-depth auto ...
+```
+
 ### Task-level terminal artifacts (v0.10+)
 
 On terminal disposition (`done`, `failed`, `cancelled`, or non-recoverable `stopped`), cc-loop writes:

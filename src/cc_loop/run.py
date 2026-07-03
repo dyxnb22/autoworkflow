@@ -38,6 +38,10 @@ from cc_loop.prompt_cache import (
     update_prompt_cache_artifact,
 )
 from cc_loop.review_context import format_patch_path_list, resolve_review_context_mode
+from cc_loop.review_depth import (
+    resolve_review_depth_mode,
+    should_pre_escalate_to_deep,
+)
 from cc_loop.prompt_metadata import build_prompt_metadata, write_prompt_metadata
 from cc_loop.providers.base import ProviderRunResult, get_provider
 from cc_loop.repair_prompts import build_repair_prompt
@@ -489,6 +493,9 @@ def _aggregate_reviewer_decisions(reviews: list[dict[str, Any]]) -> dict[str, An
     if any(d == "replan" for d in decisions):
         replan_review = next(r for r in reviews if r.get("decision") == "replan")
         return dict(replan_review)
+    if any(d == "escalate" for d in decisions):
+        escalate_review = next(r for r in reviews if r.get("decision") == "escalate")
+        return dict(escalate_review)
     if any(d == "reject" for d in decisions):
         reject_review = next(r for r in reviews if r.get("decision") == "reject")
         return dict(reject_review)
@@ -1458,78 +1465,70 @@ def _review_artifact_path(base: Path, idx: int) -> Path:
     return base.parent / f"{base.stem}.{idx}{base.suffix}"
 
 
-def run_review_phase(
-    state: TaskState,
-    state_root: Path,
-    artifact_paths: dict[str, Path],
+def _write_review_stage_artifacts(
     *,
-    attempt: AttemptRecord | None = None,
-) -> TaskState:
-    """Build bounded review context and run the configured reviewer provider(s)."""
-    attempt = _resolve_attempt(state, attempt)
-    if attempt.review_json is not None and attempt.decision:
-        return state
-
-    config: LoopConfig = state.config
-    reviewer_chain = _resolve_reviewer_chain(state, attempt)
-    worktree = Path(attempt.worktree_path)
-    attempt.phase = AttemptPhase.REVIEWING
-    save_state(state, state_root)
-    _emit_run_event(state_root, state, attempt, EventType.REVIEWER_STARTED)
-
-    patch_paths, patch_body, _used_bytes = collect_bounded_review_patches(
-        worktree,
-        attempt.base_commit,
-        patches_dir=artifact_paths["patches_dir"],
-        max_bytes=config["max_review_patch_bytes"],
-    )
-    attempt.diff_patch_paths = [str(path) for path in patch_paths]
-
-    diff_stat = read_diff_stat_summary(worktree, attempt.base_commit)
-    context_mode, inline_patch = resolve_review_context_mode(config, len(patch_body))
-    prompt = build_reviewer_prompt(
-        state=state,
-        attempt=attempt,
-        diff_stat=diff_stat,
-        patch_body=patch_body,
-        test_status=attempt.test_status,
-        config=config,
-        artifact_paths=artifact_paths,
-        patch_paths=patch_paths,
-        inline_patch=inline_patch,
-        context_mode=context_mode,
-    )
-    artifact_paths["review_prompt"].write_text(prompt, encoding="utf-8")
-    review_prompt_metrics = build_reviewer_prompt_metrics(
-        prompt=prompt,
-        diff_stat=diff_stat,
-        patch_body=patch_body,
-        inline_patch=inline_patch,
-        context_mode=context_mode,
-    )
-    artifact_paths["review_prompt_metrics"].write_text(
-        json.dumps(review_prompt_metrics, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    update_prompt_cache_artifact(
-        artifact_paths["prompt_cache"],
-        phase="reviewer",
-        phase_data=build_reviewer_phase_cache(metrics=review_prompt_metrics),
-    )
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    config: LoopConfig,
+    reviewer_chain: list[str],
+    prompt: str,
+    review_prompt_metrics: dict[str, Any],
+    prompt_path: Path,
+    metrics_path: Path,
+    prompt_meta_path: Path,
+    review_stage: str,
+    review_depth_mode: str,
+    pre_escalate_reasons: list[str] | None = None,
+    update_prompt_cache: bool = True,
+) -> None:
+    metrics = dict(review_prompt_metrics)
+    metrics["review_stage"] = review_stage
+    metrics["review_depth_mode"] = review_depth_mode
+    if pre_escalate_reasons:
+        metrics["pre_escalate_reasons"] = list(pre_escalate_reasons)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+    if update_prompt_cache:
+        update_prompt_cache_artifact(
+            artifact_paths["prompt_cache"],
+            phase="reviewer",
+            phase_data=build_reviewer_phase_cache(metrics=metrics),
+        )
     _write_reviewer_prompt_metadata(
         state=state,
         attempt=attempt,
         artifact_paths=artifact_paths,
         provider_name=reviewer_chain[0],
+        prompt_path=prompt_path,
+        prompt_meta_path=prompt_meta_path,
     )
 
+
+def _execute_reviewer_providers(
+    *,
+    state: TaskState,
+    state_root: Path,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    config: LoopConfig,
+    reviewer_chain: list[str],
+    worktree: Path,
+    prompt: str,
+    review_prompt_metrics: dict[str, Any],
+    review_provider_path: Path,
+    review_raw_path: Path,
+    review_last_message_path: Path,
+    parsed_path: Path,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Run reviewer provider chain and return aggregated review JSON."""
     all_reviews: list[dict[str, Any]] = []
     review_raw_paths: list[str] = []
     review_last_message_paths: list[str] = []
     for idx, provider_name in enumerate(reviewer_chain):
-        provider_path = _review_artifact_path(artifact_paths["review_provider"], idx)
-        raw_path = _review_artifact_path(artifact_paths["review_raw"], idx)
-        last_message_path = _review_artifact_path(artifact_paths["review_last_message"], idx)
+        provider_path = _review_artifact_path(review_provider_path, idx)
+        raw_path = _review_artifact_path(review_raw_path, idx)
+        last_message_path = _review_artifact_path(review_last_message_path, idx)
         current_raw_paths = review_raw_paths + [str(raw_path)]
         current_last_message_paths = review_last_message_paths + [str(last_message_path)]
         provider_path.write_text(provider_name + "\n", encoding="utf-8")
@@ -1659,15 +1658,189 @@ def run_review_phase(
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"reviewer output parse failed: {exc}") from exc
 
-        review_artifact = artifact_paths["review_parsed"].parent / f"review.parsed.{idx}.json"
+        review_artifact = parsed_path.parent / f"{parsed_path.stem}.{idx}{parsed_path.suffix}"
         review_artifact.write_text(json.dumps(review_json, indent=2) + "\n", encoding="utf-8")
         all_reviews.append(review_json)
 
-    review_json = _aggregate_reviewer_decisions(all_reviews)
-    artifact_paths["review_parsed"].write_text(
-        json.dumps(review_json, indent=2) + "\n",
-        encoding="utf-8",
+    aggregated = _aggregate_reviewer_decisions(all_reviews)
+    parsed_path.write_text(json.dumps(aggregated, indent=2) + "\n", encoding="utf-8")
+    return aggregated, review_raw_paths, review_last_message_paths
+
+
+def run_review_phase(
+    state: TaskState,
+    state_root: Path,
+    artifact_paths: dict[str, Path],
+    *,
+    attempt: AttemptRecord | None = None,
+) -> TaskState:
+    """Build bounded review context and run the configured reviewer provider(s)."""
+    attempt = _resolve_attempt(state, attempt)
+    if attempt.review_json is not None and attempt.decision:
+        return state
+
+    config: LoopConfig = state.config
+    reviewer_chain = _resolve_reviewer_chain(state, attempt)
+    worktree = Path(attempt.worktree_path)
+    attempt.phase = AttemptPhase.REVIEWING
+    save_state(state, state_root)
+    _emit_run_event(state_root, state, attempt, EventType.REVIEWER_STARTED)
+
+    patch_paths, patch_body, _used_bytes = collect_bounded_review_patches(
+        worktree,
+        attempt.base_commit,
+        patches_dir=artifact_paths["patches_dir"],
+        max_bytes=config["max_review_patch_bytes"],
     )
+    attempt.diff_patch_paths = [str(path) for path in patch_paths]
+
+    diff_stat = read_diff_stat_summary(worktree, attempt.base_commit)
+    diff_summary = summarize_diff_stat(diff_stat)
+    review_depth_mode = resolve_review_depth_mode(config)
+    pre_escalate, pre_escalate_reasons = should_pre_escalate_to_deep(
+        test_status=attempt.test_status or "",
+        changed_file_count=diff_summary["changed_file_count"],
+        diff_stat_chars=len(diff_stat),
+        patch_paths=patch_paths,
+        config=config,
+    )
+
+    review_stage = "standard"
+    review_prompt_metrics: dict[str, Any] = {}
+    review_raw_paths: list[str] = []
+    review_last_message_paths: list[str] = []
+
+    def _run_deep_stage(stage_label: str) -> dict[str, Any]:
+        nonlocal review_prompt_metrics, review_raw_paths, review_last_message_paths, review_stage
+        context_mode, inline_patch = resolve_review_context_mode(config, len(patch_body))
+        prompt = build_reviewer_prompt(
+            state=state,
+            attempt=attempt,
+            diff_stat=diff_stat,
+            patch_body=patch_body,
+            test_status=attempt.test_status,
+            config=config,
+            artifact_paths=artifact_paths,
+            patch_paths=patch_paths,
+            inline_patch=inline_patch,
+            context_mode=context_mode,
+        )
+        review_prompt_metrics = build_reviewer_prompt_metrics(
+            prompt=prompt,
+            diff_stat=diff_stat,
+            patch_body=patch_body,
+            inline_patch=inline_patch,
+            context_mode=context_mode,
+        )
+        _write_review_stage_artifacts(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            reviewer_chain=reviewer_chain,
+            prompt=prompt,
+            review_prompt_metrics=review_prompt_metrics,
+            prompt_path=artifact_paths["review_prompt"],
+            metrics_path=artifact_paths["review_prompt_metrics"],
+            prompt_meta_path=artifact_paths["review_prompt_meta"],
+            review_stage=stage_label,
+            review_depth_mode=review_depth_mode,
+            pre_escalate_reasons=pre_escalate_reasons if stage_label == "deep" else None,
+        )
+        review_json, review_raw_paths, review_last_message_paths = _execute_reviewer_providers(
+            state=state,
+            state_root=state_root,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            reviewer_chain=reviewer_chain,
+            worktree=worktree,
+            prompt=prompt,
+            review_prompt_metrics=review_prompt_metrics,
+            review_provider_path=artifact_paths["review_provider"],
+            review_raw_path=artifact_paths["review_raw"],
+            review_last_message_path=artifact_paths["review_last_message"],
+            parsed_path=artifact_paths["review_parsed"],
+        )
+        review_stage = stage_label
+        return review_json
+
+    def _run_fast_stage() -> dict[str, Any]:
+        nonlocal review_prompt_metrics, review_raw_paths, review_last_message_paths, review_stage
+        prompt = build_fast_reviewer_prompt(
+            state=state,
+            attempt=attempt,
+            diff_stat=diff_stat,
+            test_status=attempt.test_status,
+            config=config,
+            artifact_paths=artifact_paths,
+            patch_paths=patch_paths,
+            patch_body_chars=len(patch_body),
+        )
+        review_prompt_metrics = build_reviewer_prompt_metrics(
+            prompt=prompt,
+            diff_stat=diff_stat,
+            patch_body=patch_body,
+            inline_patch=False,
+            context_mode="artifact_refs",
+            inline_diff_stat=False,
+        )
+        _write_review_stage_artifacts(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            reviewer_chain=reviewer_chain,
+            prompt=prompt,
+            review_prompt_metrics=review_prompt_metrics,
+            prompt_path=artifact_paths["review_fast_prompt"],
+            metrics_path=artifact_paths["review_fast_prompt_metrics"],
+            prompt_meta_path=artifact_paths["review_prompt_meta"],
+            review_stage="fast",
+            review_depth_mode=review_depth_mode,
+            update_prompt_cache=True,
+        )
+        review_json, review_raw_paths, review_last_message_paths = _execute_reviewer_providers(
+            state=state,
+            state_root=state_root,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            reviewer_chain=reviewer_chain,
+            worktree=worktree,
+            prompt=prompt,
+            review_prompt_metrics=review_prompt_metrics,
+            review_provider_path=artifact_paths["review_fast_provider"],
+            review_raw_path=artifact_paths["review_fast_raw"],
+            review_last_message_path=artifact_paths["review_fast_last_message"],
+            parsed_path=artifact_paths["review_fast_parsed"],
+        )
+        review_stage = "fast"
+        return review_json
+
+    if review_depth_mode in {"standard", "deep"} or (review_depth_mode == "auto" and pre_escalate):
+        stage_label = "deep" if review_depth_mode in {"deep", "auto"} else "standard"
+        review_json = _run_deep_stage(stage_label)
+    elif review_depth_mode == "fast":
+        review_json = _run_fast_stage()
+    else:
+        fast_json = _run_fast_stage()
+        fast_decision = str(fast_json.get("decision", "escalate"))
+        if fast_decision == "approve":
+            review_json = fast_json
+            artifact_paths["review_parsed"].write_text(
+                json.dumps(review_json, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        elif fast_decision == "escalate":
+            review_json = _run_deep_stage("deep_after_fast")
+        else:
+            review_json = fast_json
+            artifact_paths["review_parsed"].write_text(
+                json.dumps(review_json, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
     attempt.review_json = review_json
     attempt.decision = str(review_json.get("decision", "reject"))
     attempt.review_provider = ",".join(reviewer_chain)
@@ -1675,8 +1848,11 @@ def run_review_phase(
 
     if attempt.decision == "approve":
         attempt.phase = AttemptPhase.APPROVED
+    elif attempt.decision in {"reject", "stop", "replan"}:
+        attempt.phase = AttemptPhase.REJECTED
     else:
         attempt.phase = AttemptPhase.REJECTED
+        attempt.decision = "reject"
 
     _emit_run_event(
         state_root,
@@ -1685,11 +1861,15 @@ def run_review_phase(
         EventType.REVIEWER_COMPLETED,
         message=attempt.decision,
         details={
-            "prompt_chars": review_prompt_metrics["prompt_chars"],
-            "stable_prefix_chars": review_prompt_metrics["stable_prefix_chars"],
-            "dynamic_payload_chars": review_prompt_metrics["dynamic_payload_chars"],
-            "estimated_prompt_tokens": review_prompt_metrics["estimated_prompt_tokens"],
-            "estimated_dynamic_payload_tokens": review_prompt_metrics["estimated_dynamic_payload_tokens"],
+            "review_stage": review_stage,
+            "review_depth_mode": review_depth_mode,
+            "prompt_chars": review_prompt_metrics.get("prompt_chars", 0),
+            "stable_prefix_chars": review_prompt_metrics.get("stable_prefix_chars", 0),
+            "dynamic_payload_chars": review_prompt_metrics.get("dynamic_payload_chars", 0),
+            "estimated_prompt_tokens": review_prompt_metrics.get("estimated_prompt_tokens", 0),
+            "estimated_dynamic_payload_tokens": review_prompt_metrics.get(
+                "estimated_dynamic_payload_tokens", 0
+            ),
         },
     )
     _update_review_trace(
@@ -1702,6 +1882,8 @@ def run_review_phase(
         last_message_paths=review_last_message_paths,
         metrics=review_prompt_metrics,
         decision=attempt.decision,
+        review_stage=review_stage,
+        review_depth_mode=review_depth_mode,
     )
     save_state(state, state_root)
     return state
@@ -2327,6 +2509,105 @@ def build_reviewer_prompt(
     return (contract_prefix + task_context + dynamic_payload).strip() + "\n"
 
 
+def build_fast_reviewer_prompt(
+    *,
+    state: TaskState,
+    attempt: AttemptRecord,
+    diff_stat: str,
+    test_status: str,
+    config: LoopConfig | None = None,
+    artifact_paths: dict[str, Path] | None = None,
+    patch_paths: list[Path] | None = None,
+    patch_body_chars: int = 0,
+) -> str:
+    """Construct a cache-friendly fast reviewer prompt using artifact refs only."""
+    config = config or state.config
+    context_mode = "artifact_refs"
+    inline_patch = False
+    inline_diff_stat = False
+    artifact_root = ""
+    diff_stat_path = ""
+    diff_files_path = ""
+    test_output_path = ""
+    patches_dir = ""
+    selected_patch_paths = ""
+    omitted_patch_chars = patch_body_chars
+    omitted_diff_stat_chars = len(diff_stat)
+
+    if artifact_paths is not None:
+        artifact_root = str(artifact_paths["plan_prompt"].parent)
+        diff_stat_path = str(artifact_paths["diff_stat"])
+        diff_files_path = str(artifact_paths["diff_files"])
+        test_output_path = str(artifact_paths["test_output"])
+        patches_dir = str(artifact_paths["patches_dir"])
+        selected_patch_paths = format_patch_path_list(list(patch_paths or []))
+
+    contract_prefix = (
+        "You are the cc-loop fast reviewer.\n"
+        "\n"
+        "## Fast Review Contract\n"
+        "Perform a lightweight review using artifact references only.\n"
+        "Approve when tests passed, the diff summary looks scoped, and there are no obvious red flags.\n"
+        "Escalate to deep review when correctness, security, or scope needs inline patch inspection.\n"
+        "Reject when tests failed or the attempt is clearly not merge-ready.\n"
+        "Stop only when blocked by missing requirements.\n"
+        "\n"
+        "## Fast JSON Output Contract\n"
+        "Respond with JSON only:\n"
+        "{\n"
+        '  "decision": "approve",\n'
+        '  "reason": "Why this attempt is acceptable, needs escalation, or must not merge",\n'
+        '  "issues": [],\n'
+        '  "retry_prompt": "",\n'
+        '  "stop_reason": "",\n'
+        '  "inspected_artifacts": [],\n'
+        '  "test_status_checked": true\n'
+        "}\n"
+        'Allowed decisions: "approve", "escalate", "reject", "stop".\n'
+        'Use "escalate" when deep inline patch review is required.\n'
+        "\n"
+    )
+    task_context = _build_task_review_context_section(state=state, attempt=attempt)
+    dynamic_payload = (
+        f"{DYNAMIC_REVIEW_MARKER}\n"
+        "Fast review evidence (artifact refs only).\n"
+        "\n"
+        "### Attempt metadata\n"
+        f"- Task ID: {state.task_id}\n"
+        f"- Iteration: {attempt.iteration}\n"
+        f"- Retry: {attempt.retry}\n"
+        f"- Test status: {test_status}\n"
+        f"- Graph node: {attempt.graph_node_id or '(legacy single-step)'}\n"
+        "\n"
+        "### Review context\n"
+        f"- Review stage: fast\n"
+        f"- Context mode: {context_mode}\n"
+        f"- Artifact root: {artifact_root or '(unknown)'}\n"
+        f"- diff.stat.txt: {diff_stat_path or '(unknown)'}\n"
+        f"- diff.files.txt: {diff_files_path or '(unknown)'}\n"
+        f"- test.output.txt: {test_output_path or '(unknown)'}\n"
+        f"- Patches directory: {patches_dir or '(unknown)'}\n"
+        f"- Selected patch paths:\n{selected_patch_paths or '(unknown)'}\n"
+        f"- Omitted patch chars: {omitted_patch_chars}\n"
+        f"- Omitted diff stat chars: {omitted_diff_stat_chars}\n"
+        "\n"
+        "### Test result\n"
+        f"Status: {test_status}\n"
+        f"Output path: {test_output_path or '(unknown)'}\n\n"
+    )
+    dynamic_payload += _format_diff_stat_section(
+        diff_stat=diff_stat,
+        inline_diff_stat=inline_diff_stat,
+        diff_stat_path=diff_stat_path,
+        diff_files_path=diff_files_path,
+    )
+    dynamic_payload += (
+        "### Patch artifact references\n"
+        "Patch content is not inlined in fast review. Inspect artifact paths before approving.\n"
+    )
+    return (contract_prefix + task_context + dynamic_payload).strip() + "\n"
+
+
 def _estimated_tokens_from_chars(char_count: int) -> int:
     if char_count <= 0:
         return 0
@@ -2750,16 +3031,20 @@ def _write_reviewer_prompt_metadata(
     attempt: AttemptRecord,
     artifact_paths: dict[str, Path],
     provider_name: str,
+    prompt_path: Path | None = None,
+    prompt_meta_path: Path | None = None,
 ) -> None:
+    resolved_prompt_path = prompt_path or artifact_paths["review_prompt"]
+    resolved_meta_path = prompt_meta_path or artifact_paths["review_prompt_meta"]
     metadata = build_prompt_metadata(
         role="reviewer",
         provider=provider_name,
         config=state.config,
         state=state,
         attempt=attempt,
-        prompt_path=artifact_paths["review_prompt"],
+        prompt_path=resolved_prompt_path,
     )
-    write_prompt_metadata(artifact_paths["review_prompt_meta"], metadata)
+    write_prompt_metadata(resolved_meta_path, metadata)
 
 
 def _update_implementer_trace(
@@ -2805,6 +3090,8 @@ def _update_review_trace(
     metrics: dict[str, Any],
     decision: str = "",
     error: str = "",
+    review_stage: str = "",
+    review_depth_mode: str = "",
 ) -> None:
     fields: dict[str, Any] = {
         "prompt_path": str(artifact_paths["review_prompt"]),
@@ -2813,12 +3100,16 @@ def _update_review_trace(
         "raw_paths": raw_paths,
         "last_message_paths": last_message_paths,
         "metrics_path": str(artifact_paths["review_prompt_metrics"]),
-        "estimated_prompt_tokens": metrics["estimated_prompt_tokens"],
-        "stable_prefix_ratio": metrics["stable_prefix_ratio"],
+        "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens", 0),
+        "stable_prefix_ratio": metrics.get("stable_prefix_ratio", ""),
         "contract_prefix_ratio": metrics.get("contract_prefix_ratio", ""),
         "cache_health": metrics.get("cache_health", ""),
         "total_prompt_cache_health": metrics.get("total_prompt_cache_health", ""),
     }
+    if review_stage:
+        fields["review_stage"] = review_stage
+    if review_depth_mode:
+        fields["review_depth_mode"] = review_depth_mode
     if decision:
         fields["decision"] = decision
     if error:

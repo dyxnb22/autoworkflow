@@ -95,6 +95,15 @@ Config keys: `review_context_mode` (`hybrid` default), `review_inline_patch_thre
 | `artifact_refs` | Omits patch body and full diff stat; prompt lists artifact paths (`diff.stat.txt`, `diff.files.txt`, `test.output.txt`, `patches/`) plus a short diff stat summary |
 | `hybrid` | Inlines patches when `patch_body` chars ≤ threshold; otherwise uses artifact refs. Inlines full diff stat only when the patch is inlined; otherwise summarizes diff stat with paths |
 
+#### Review depth (`review_depth`)
+
+| Mode | Behavior |
+|------|----------|
+| `standard` | Single full reviewer prompt (default) |
+| `fast` | Cache-friendly fast reviewer using artifact refs only (`review.fast.prompt.txt`) |
+| `deep` | Full reviewer prompt |
+| `auto` | Fast review for low-risk passing changes; escalate to deep on risk signals or `escalate` decision |
+
 When patches or diff stat are omitted, check `review.prompt.metrics.json` for `omitted_patch_chars`, `omitted_diff_stat_chars`, and `estimated_avoidable_miss_tokens`, and `prompt.cache.json` for cross-phase totals. The reviewer prompt keeps stable contract/rubric/JSON **before** `## Task Review Context`, then per-attempt evidence after `## Dynamic Review Payload`.
 
 #### Direct planner mode (`planner_mode: direct` or auto heuristic)
