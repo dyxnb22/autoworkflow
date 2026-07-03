@@ -58,6 +58,8 @@ def _process_group_alive(pid: int) -> bool:
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
 
 
 def _terminate_process_group(pid: int, *, grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS) -> bool:
@@ -69,12 +71,16 @@ def _terminate_process_group(pid: int, *, grace_seconds: float = DEFAULT_KILL_GR
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        return False
 
     if grace_seconds <= 0:
         try:
             os.killpg(pid, signal.SIGKILL)
         except ProcessLookupError:
-            return False
+            return True
+        except PermissionError:
+            return True
         return True
 
     deadline = time.monotonic() + grace_seconds
@@ -86,6 +92,8 @@ def _terminate_process_group(pid: int, *, grace_seconds: float = DEFAULT_KILL_GR
     try:
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
+        return False
+    except PermissionError:
         return False
     return True
 

@@ -266,7 +266,7 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 
 In addition to goal/repo/providers/test-command:
 
-- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. Additional `init`/`doctor` flags may follow the test command. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
+- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. With this separator, every following token belongs to the test command; put cc-loop flags before `--test-command`. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
 - `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`)
 - `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (config key `provider_watchdog_grace_seconds`, default `5`)
 - `--task-id ID` — explicit task id (recommended for integrations)

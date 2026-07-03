@@ -8,7 +8,8 @@ import shlex
 
 TEST_COMMAND_HINT = (
     "Use --test-command -- pytest tests -q "
-    "(place `--` before the command so flags like -q are not parsed as cc-loop options)"
+    "(place `--` before the command so flags like -q are not parsed as cc-loop options; "
+    "put cc-loop flags before --test-command)"
 )
 
 SHELL_OPERATOR_RE = re.compile(r"(&&|\|\||[|;&<>])")
@@ -91,7 +92,13 @@ def _reject_shell_operators(text: str) -> None:
 
 
 def expand_test_command_in_argv(argv: list[str]) -> list[str]:
-    """Normalize ``--test-command`` sections so cc-loop flags may follow the command."""
+    """Normalize ``--test-command`` sections before argparse parses subcommands.
+
+    With an explicit ``--test-command --`` separator, every remaining token belongs to
+    the test command. Put cc-loop flags before ``--test-command`` in that form.
+    Legacy unseparated argv keeps the previous behavior and stops at known cc-loop
+    flags.
+    """
     subcommand = _find_subcommand(argv)
     if subcommand is None:
         return list(argv)
@@ -113,6 +120,8 @@ def expand_test_command_in_argv(argv: list[str]) -> list[str]:
         parts: list[str] = []
         if argv[i] == "--":
             i += 1
+            parts.extend(argv[i:])
+            i = len(argv)
         while i < len(argv) and not _is_cc_loop_flag(argv[i], subcommand):
             parts.append(argv[i])
             i += 1

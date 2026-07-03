@@ -56,7 +56,7 @@ class TestCommandParsingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_test_command(["pytest tests | tee out.log"])
 
-    def test_expand_allows_flags_after_test_command(self) -> None:
+    def test_expand_separator_consumes_remaining_test_command_tokens(self) -> None:
         expanded = expand_test_command_in_argv(
             [
                 "init",
@@ -84,11 +84,77 @@ class TestCommandParsingTests(unittest.TestCase):
                 "--repo",
                 "/tmp/r",
                 "--test-command",
-                "python -m pytest tests -q",
-                "--max-iterations",
-                "3",
+                "python -m pytest tests -q --max-iterations 3",
             ],
         )
+
+    def test_expand_flags_before_separator_remain_cc_loop_flags(self) -> None:
+        expanded = expand_test_command_in_argv(
+            [
+                "init",
+                "--goal",
+                "g",
+                "--repo",
+                "/tmp/r",
+                "--max-iterations",
+                "3",
+                "--test-command",
+                "--",
+                "python",
+                "-m",
+                "pytest",
+                "tests",
+                "-q",
+            ]
+        )
+        self.assertEqual(
+            expanded,
+            [
+                "init",
+                "--goal",
+                "g",
+                "--repo",
+                "/tmp/r",
+                "--max-iterations",
+                "3",
+                "--test-command",
+                "python -m pytest tests -q",
+            ],
+        )
+
+    def test_expand_separator_preserves_test_command_long_flags(self) -> None:
+        expanded = expand_test_command_in_argv(
+            [
+                "doctor",
+                "--repo",
+                "/tmp/r",
+                "--test-command",
+                "--",
+                "pytest",
+                "--json",
+                "tests",
+            ]
+        )
+        idx = expanded.index("--test-command")
+        self.assertEqual(expanded[idx + 1], "pytest --json tests")
+
+        expanded = expand_test_command_in_argv(
+            [
+                "init",
+                "--goal",
+                "g",
+                "--repo",
+                "/tmp/r",
+                "--test-command",
+                "--",
+                "pytest",
+                "--maxfail",
+                "1",
+                "tests",
+            ]
+        )
+        idx = expanded.index("--test-command")
+        self.assertEqual(expanded[idx + 1], "pytest --maxfail 1 tests")
 
     def test_expand_legacy_argv_includes_dash_q(self) -> None:
         expanded = expand_test_command_in_argv(
@@ -111,7 +177,7 @@ class TestCommandParsingTests(unittest.TestCase):
         self.assertEqual(expanded[idx + 1], "pytest tests -q")
         self.assertEqual(expanded[idx + 2], "--planner")
 
-    def test_init_test_command_before_other_flags(self) -> None:
+    def test_init_test_command_after_other_flags(self) -> None:
         env = TempEnv()
         try:
             result = _cli(
@@ -122,6 +188,8 @@ class TestCommandParsingTests(unittest.TestCase):
                 str(env.repo()),
                 "--task-id",
                 "tc-mixed",
+                "--max-iterations",
+                "7",
                 "--test-command",
                 "--",
                 "python",
@@ -129,8 +197,6 @@ class TestCommandParsingTests(unittest.TestCase):
                 "pytest",
                 "tests",
                 "-q",
-                "--max-iterations",
-                "7",
                 state_root=env.state_root(),
             )
             self.assertEqual(result.returncode, 0, result.stderr)

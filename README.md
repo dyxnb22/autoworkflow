@@ -71,11 +71,11 @@ cc-loop init \
   --goal "Implement the requested workflow" \
   --repo /path/to/repo \
   --task-id my-task \
-  --test-command -- python -m pytest tests/ -q \
   --planner claude-code \
   --reviewer claude-code \
   --implementer claude-code \
-  --claude-code-model sonnet
+  --claude-code-model sonnet \
+  --test-command -- python -m pytest tests/ -q
 
 cc-loop doctor --repo /path/to/repo
 cc-loop list --json
