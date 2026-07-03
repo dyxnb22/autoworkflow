@@ -22,6 +22,7 @@ When a task uses a task graph, recovery applies to the **current graph node** (`
 | `merge_branch_missing` | Missing branch/revision | terminal |
 | `merge_permission` | Permission denied | terminal |
 | `test_implementation` | Assertion/test logic failure | recoverable → implementer repair |
+| `test_gate_blocked` | Reviewer approved but tests block merge | terminal → inspect / manual decision |
 | `test_environment` | Import/module missing | terminal |
 | `provider_timeout` | Agent timed out | recoverable |
 | `provider_exit_error` | Agent non-zero exit | recoverable |
@@ -78,3 +79,23 @@ Additive fields:
 - **Fixable:** non-empty `retry_prompt` or code/test-oriented issues → implementer repair
 
 When ambiguous, default is **terminal** (conservative).
+
+## Reviewer approve gate (v0.9+)
+
+When the reviewer returns `decision=approve`, cc-loop treats that as the final quality gate for the current graph node or iteration:
+
+- `attempt.decision`, `attempt.review_json`, and `attempt.phase=approved` are persisted immediately.
+- Prior recoverable failures (for example `patch_not_captured`) are cleared from state and `failure.report.json` is removed so they cannot re-trigger auto repair.
+- Auto recovery will **not** re-enter test/review for an approved attempt.
+
+### Tests failed but reviewer approved
+
+If tests failed (or were skipped without `allow_merge_without_tests`) but the reviewer approved, merge is blocked and the task stops with `failure_type=test_gate_blocked` and `next_action=inspect`.
+
+This is intentional for graph nodes where later nodes own test coverage (for example a skeleton node before a dedicated test node). The loop does **not** spin on test/review; choose one of:
+
+- Fix tests and `cc-loop resume` (re-runs from the saved phase; approved attempts resume straight to finalize/merge retry).
+- Set `allow_merge_without_tests=true` when reviewer approval is sufficient.
+- Inspect artifacts (`test.output.txt`, `review.parsed.json`) and decide manually.
+
+Stale `failure.report.json` files from earlier recovery attempts are ignored in `status --json` / `report` once the attempt is approved, except when merge failed or the test gate is actively blocking merge.

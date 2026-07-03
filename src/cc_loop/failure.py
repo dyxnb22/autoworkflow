@@ -118,6 +118,62 @@ def clear_report_from_attempt(attempt: AttemptRecord) -> None:
     attempt.recovery_disposition = ""
     attempt.stop_reason = ""
     attempt.failure_details = {}
+    attempt.attempted_repairs = []
+
+
+def clear_failure_artifact(artifact_root: Path) -> None:
+    failure_report_path(artifact_root).unlink(missing_ok=True)
+
+
+def reviewer_gate_passed(attempt: AttemptRecord) -> bool:
+    return attempt.decision == "approve" or (
+        attempt.review_json is not None
+        and str(attempt.review_json.get("decision", "")) == "approve"
+    )
+
+
+def merge_blocked_by_test_gate(
+    attempt: AttemptRecord,
+    config: dict,
+    *,
+    state: TaskState | None = None,
+) -> bool:
+    """Return True when reviewer approved but test results block auto-merge."""
+    if not reviewer_gate_passed(attempt):
+        return False
+    if attempt.test_status in {"failed", "timed_out"}:
+        return True
+
+    allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
+    if state is not None and attempt.graph_node_id:
+        from cc_loop.task_graph import ensure_task_graph, get_node
+        from cc_loop.task_graph import effective_node_policy
+
+        graph = ensure_task_graph(state)
+        if graph is not None:
+            node = get_node(graph, attempt.graph_node_id)
+            if node is not None:
+                policy = effective_node_policy(node, config)
+                allow_merge_without_tests = bool(policy["allow_merge_without_tests"])
+
+    if attempt.test_status == "skipped" and not allow_merge_without_tests:
+        return True
+    return False
+
+
+def test_gate_blocked_report(attempt: AttemptRecord) -> FailureReport:
+    return FailureReport(
+        failure_type=FailureType.TEST_GATE_BLOCKED,
+        disposition=RecoveryDisposition.TERMINAL,
+        message="merge blocked because tests failed or were skipped",
+        stop_reason="test_gate_blocked",
+        details={"test_status": attempt.test_status},
+        suggested_actions=[
+            "Fix tests and cc-loop resume to re-run the test phase",
+            "Set allow_merge_without_tests=true in config if reviewer approval is sufficient",
+            "Inspect test.output.txt and review.parsed.json before continuing",
+        ],
+    )
 
 
 def extract_conflict_files(text: str) -> list[str]:
@@ -511,6 +567,15 @@ def classify_attempt_outcome(state: TaskState, attempt: AttemptRecord, artifact_
     if attempt.merge_error:
         return classify_merge_error_message(attempt.merge_error)
 
+    if reviewer_gate_passed(attempt):
+        if (
+            state.status == TaskStatus.STOPPED
+            and attempt.phase == AttemptPhase.APPROVED
+            and merge_blocked_by_test_gate(attempt, state.config, state=state)
+        ):
+            return test_gate_blocked_report(attempt)
+        return None
+
     if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
         art_root = artifact_paths.get("plan_prompt")
         if art_root is not None:
@@ -533,32 +598,12 @@ def classify_attempt_outcome(state: TaskState, attempt: AttemptRecord, artifact_
     if reviewer_report is not None:
         return reviewer_report
 
-    if attempt.test_status == "failed" and attempt.decision == "approve":
-        test_output = ""
-        test_path = artifact_paths.get("test_output")
-        if test_path is not None and test_path.is_file():
-            test_output = test_path.read_text(encoding="utf-8")
-        return classify_test_failure(test_output, attempt.test_status)
-
     if attempt.test_status in {"failed", "timed_out"} and not attempt.decision:
         test_output = ""
         test_path = artifact_paths.get("test_output")
         if test_path is not None and test_path.is_file():
             test_output = test_path.read_text(encoding="utf-8")
         return classify_test_failure(test_output, attempt.test_status)
-
-    if (
-        state.status == TaskStatus.STOPPED
-        and attempt.phase == AttemptPhase.APPROVED
-        and attempt.test_status == "failed"
-    ):
-        return FailureReport(
-            failure_type=FailureType.TEST_GATE_BLOCKED,
-            disposition=RecoveryDisposition.RECOVERABLE,
-            message="merge blocked because tests failed",
-            details={"test_status": attempt.test_status},
-            suggested_actions=["Fix implementation and re-run tests"],
-        )
 
     if state.status == TaskStatus.FAILED or attempt.phase == AttemptPhase.FAILED:
         return FailureReport(

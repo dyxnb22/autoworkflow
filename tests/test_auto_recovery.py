@@ -89,7 +89,7 @@ class AutoRecoveryTests(unittest.TestCase):
         self.assertEqual(state.status, TaskStatus.DONE)
         self.assertGreaterEqual(calls["count"], 2)
 
-    def test_auto_test_failure_enters_repair_instead_of_run_error(self) -> None:
+    def test_auto_test_failure_with_reviewer_approve_stops_at_test_gate(self) -> None:
         make_task(
             repo=self.repo,
             state_root=self.state_root,
@@ -102,26 +102,10 @@ class AutoRecoveryTests(unittest.TestCase):
         self.assertEqual(code, 1)
         state = load_state("test-auto", self.state_root)
         attempt = state.history[-1]
-        self.assertEqual(attempt.failure_type, "recovery_budget_exhausted")
-        self.assertGreater(attempt.recovery_retry_count, 0)
+        self.assertEqual(attempt.decision, "approve")
+        self.assertEqual(attempt.failure_type, "test_gate_blocked")
+        self.assertEqual(attempt.recovery_retry_count, 0)
         artifact_root = artifacts_dir("test-auto", attempt.iteration, attempt.retry, self.state_root)
-        self.assertTrue((artifact_root / "failure.report.json").is_file())
-
-    def test_auto_terminal_on_environment_test_failure(self) -> None:
-        make_task(
-            repo=self.repo,
-            state_root=self.state_root,
-            task_id="env-auto",
-            config={"test_command": [sys.executable, "-c", "import definitely_missing_pkg_xyz"]},
-        )
-        with self._patch_worktree_root():
-            code = _run_auto_loop(self._args(), "env-auto")
-
-        self.assertEqual(code, 1)
-        state = load_state("env-auto", self.state_root)
-        attempt = state.history[-1]
-        self.assertEqual(attempt.failure_type, "test_environment")
-        artifact_root = artifacts_dir("env-auto", attempt.iteration, attempt.retry, self.state_root)
         self.assertTrue((artifact_root / "failure.report.json").is_file())
 
     def test_auto_recovers_from_uncaptured_patch(self) -> None:
@@ -146,7 +130,7 @@ class AutoRecoveryTests(unittest.TestCase):
         self.assertIn("generated.py", diff_files)
         self.assertNotEqual(attempt.head_commit, attempt.base_commit)
 
-    def test_graph_node_test_failure_associated_with_node(self) -> None:
+    def test_graph_node_test_failure_with_reviewer_approve_stops_at_test_gate(self) -> None:
         make_task(
             repo=self.repo,
             state_root=self.state_root,
@@ -165,7 +149,8 @@ class AutoRecoveryTests(unittest.TestCase):
         state = load_state("graph-recovery", self.state_root)
         attempt = state.history[-1]
         self.assertEqual(attempt.graph_node_id, "T1")
-        self.assertEqual(attempt.failure_type, "recovery_budget_exhausted")
+        self.assertEqual(attempt.decision, "approve")
+        self.assertEqual(attempt.failure_type, "test_gate_blocked")
         graph = state.task_graph
         self.assertIsNotNone(graph)
         self.assertEqual(graph.nodes[0].status.value, "running")

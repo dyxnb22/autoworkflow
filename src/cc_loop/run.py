@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,12 @@ from cc_loop.failure import (
     classify_merge_failure,
     classify_provider_failure,
     classify_uncaptured_patch,
+    clear_failure_artifact,
     clear_report_from_attempt,
     failure_report_path,
+    merge_blocked_by_test_gate,
+    reviewer_gate_passed,
+    test_gate_blocked_report,
     write_failure_report,
 )
 from cc_loop.git import (
@@ -66,7 +71,7 @@ from cc_loop.provider_runtime import (
     write_command_argv_artifact,
     write_subprocess_result_artifact,
 )
-from cc_loop.runner_heartbeat import mark_heartbeat_terminal
+from cc_loop.runner_heartbeat import mark_heartbeat_terminal, read_heartbeat, refresh_heartbeat, write_heartbeat
 from cc_loop.trace import estimate_tokens_from_path, update_trace_phase
 from cc_loop.task_graph import (
     completed_dependency_labels,
@@ -495,6 +500,30 @@ def _aggregate_reviewer_decisions(reviews: list[dict[str, Any]]) -> dict[str, An
     return dict(reviews[-1]) if reviews else {"decision": "reject", "reason": "no reviewer output"}
 
 
+def _clear_failure_state(attempt: AttemptRecord, artifact_paths: dict[str, Path]) -> None:
+    clear_report_from_attempt(attempt)
+    clear_failure_artifact(artifact_paths["plan_prompt"].parent)
+
+
+def _clear_resolved_patch_not_captured(
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    *,
+    diff_metadata: dict[str, object],
+    worktree: Path,
+) -> None:
+    if attempt.failure_type != FailureType.PATCH_NOT_CAPTURED.value:
+        return
+    if classify_uncaptured_patch(
+        porcelain=list(diff_metadata.get("porcelain") or []),
+        base_commit=attempt.base_commit,
+        head_commit=str(diff_metadata.get("head_commit", attempt.head_commit)),
+        has_committed_changes=bool(diff_metadata.get("has_committed_changes")),
+        has_mergeable_patch=has_mergeable_patches(worktree, attempt.base_commit),
+    ) is None:
+        _clear_failure_state(attempt, artifact_paths)
+
+
 def execute_repair_recovery(
     state: TaskState,
     state_root: Path,
@@ -502,6 +531,12 @@ def execute_repair_recovery(
 ) -> tuple[TaskState, AttemptRecord, dict[str, Path]]:
     """Run implementer repair and continue test → review → finalize on the same attempt."""
     attempt = _current_attempt(state)
+    if (
+        attempt.phase == AttemptPhase.APPROVED
+        and attempt.decision == "approve"
+        and report.failure_type != FailureType.MERGE_CONFLICT
+    ):
+        raise RunError("cannot repair an attempt that already passed reviewer approval")
     artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
     repair_label = f"implementer_repair:{report.failure_type.value}"
     if repair_label not in report.attempted_repairs:
@@ -1277,6 +1312,12 @@ def run_implementer_phase(
         diff_metadata=diff_metadata,
         worktree=worktree,
     )
+    _clear_resolved_patch_not_captured(
+        attempt,
+        artifact_paths,
+        diff_metadata=diff_metadata,
+        worktree=worktree,
+    )
     save_state(state, state_root)
 
     if run_result.timed_out:
@@ -1675,6 +1716,18 @@ def run_review_phase(
 
     if attempt.decision == "approve":
         attempt.phase = AttemptPhase.APPROVED
+        _clear_failure_state(attempt, artifact_paths)
+        existing_hb = read_heartbeat(state_root, state.task_id)
+        refresh_heartbeat(
+            state_root,
+            task_id=state.task_id,
+            pid=existing_hb.pid if existing_hb else os.getpid(),
+            status=TaskStatus.STOPPED.value,
+            phase=AttemptPhase.APPROVED.value,
+            iteration=state.iteration,
+            graph_node_id=attempt.graph_node_id,
+            running_provider="",
+        )
     else:
         attempt.phase = AttemptPhase.REJECTED
 
@@ -1749,6 +1802,20 @@ def _run_finalize_phase(
 
     if not _can_auto_merge(attempt, config, state=state):
         state.status = TaskStatus.STOPPED
+        if reviewer_gate_passed(attempt) and merge_blocked_by_test_gate(attempt, config, state=state):
+            report = test_gate_blocked_report(attempt)
+            apply_report_to_attempt(attempt, report)
+            write_failure_report(artifact_paths["plan_prompt"].parent, report)
+        mark_heartbeat_terminal(
+            state_root,
+            state.task_id,
+            status=TaskStatus.STOPPED.value,
+            phase=attempt.phase.value,
+        )
+        existing_hb = read_heartbeat(state_root, state.task_id)
+        if existing_hb is not None:
+            existing_hb.running_provider = ""
+            write_heartbeat(state_root, existing_hb)
         _persist_state(state, state_root)
         return state, attempt, artifact_paths
 
@@ -2618,6 +2685,12 @@ def _run_implementer_with_prompt(
     attempt.diff_stat_path = str(artifact_paths["diff_stat"])
     _record_uncaptured_patch_if_needed(
         state,
+        attempt,
+        artifact_paths,
+        diff_metadata=diff_metadata,
+        worktree=worktree,
+    )
+    _clear_resolved_patch_not_captured(
         attempt,
         artifact_paths,
         diff_metadata=diff_metadata,

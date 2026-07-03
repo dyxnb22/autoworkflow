@@ -8,7 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from cc_loop import __version__
-from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, read_failure_report
+from cc_loop.failure import (
+    FailureReport,
+    FailureType,
+    RecoveryDisposition,
+    merge_blocked_by_test_gate,
+    read_failure_report,
+    reviewer_gate_passed,
+)
 from cc_loop.recovery import AutoStep, decide_auto_step, derive_next_action_from_step
 from cc_loop.prompt_cache import prompt_cache_snapshot
 from cc_loop.state import (
@@ -272,8 +279,6 @@ def _empty_failure_snapshot(attempt: AttemptRecord | None = None) -> dict:
 
 
 def _attempt_indicates_failure(attempt: AttemptRecord, state: TaskState) -> bool:
-    if attempt.failure_type:
-        return True
     if attempt.merge_error:
         return True
     if attempt.phase == AttemptPhase.FAILED:
@@ -283,6 +288,12 @@ def _attempt_indicates_failure(attempt: AttemptRecord, state: TaskState) -> bool
     if attempt.decision in {"reject", "stop"}:
         return True
     if attempt.phase == AttemptPhase.REJECTED:
+        return True
+    if reviewer_gate_passed(attempt) and attempt.phase == AttemptPhase.APPROVED:
+        if merge_blocked_by_test_gate(attempt, state.config, state=state):
+            return True
+        return False
+    if attempt.failure_type:
         return True
     return False
 
@@ -302,11 +313,26 @@ def build_failure_snapshot(
             return _empty_failure_snapshot(attempt)
         if attempt.phase == AttemptPhase.MERGED and not attempt.merge_error and not attempt.failure_type:
             return _empty_failure_snapshot(attempt)
+        if (
+            reviewer_gate_passed(attempt)
+            and attempt.phase == AttemptPhase.APPROVED
+            and not attempt.merge_error
+            and not merge_blocked_by_test_gate(attempt, state.config, state=state)
+        ):
+            return _empty_failure_snapshot(attempt)
         if not _attempt_indicates_failure(attempt, state):
             return _empty_failure_snapshot(attempt)
 
     artifact_root = artifacts_dir(task_id, attempt.iteration, attempt.retry, state_root)
     report = read_failure_report(artifact_root)
+    if report is not None and state is not None:
+        if (
+            reviewer_gate_passed(attempt)
+            and attempt.phase == AttemptPhase.APPROVED
+            and not attempt.merge_error
+            and report.failure_type == FailureType.PATCH_NOT_CAPTURED
+        ):
+            report = None
     if report is None and attempt.failure_type:
         try:
             failure_type = FailureType(attempt.failure_type)
@@ -430,6 +456,8 @@ def derive_current_message(
     if attempt.phase == AttemptPhase.REJECTED:
         return "Reviewer rejected — retry available"
     if attempt.phase == AttemptPhase.APPROVED:
+        if state is not None and merge_blocked_by_test_gate(attempt, state.config, state=state):
+            return "Approved — merge blocked by test gate"
         return "Approved — pending merge"
     provider_message = _provider_phase_message(phase, running_provider)
     if provider_message:
