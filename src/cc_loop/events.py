@@ -28,6 +28,8 @@ class EventType(StrEnum):
     REVIEWER_COMPLETED = "reviewer.completed"
     REPAIR_STARTED = "repair.started"
     REPAIR_COMPLETED = "repair.completed"
+    PATCH_CAPTURE_RECOVERED = "patch_capture.recovered"
+    RECOVERY_SKIPPED = "recovery.skipped"
     MERGE_STARTED = "merge.started"
     MERGE_COMPLETED = "merge.completed"
     FAILURE_RECORDED = "failure.recorded"

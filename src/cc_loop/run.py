@@ -22,7 +22,9 @@ from cc_loop.failure import (
     clear_failure_artifact,
     clear_report_from_attempt,
     failure_report_path,
+    is_patch_capture_resolved,
     merge_blocked_by_test_gate,
+    repair_uncaptured_patch_report,
     reviewer_gate_passed,
     test_gate_blocked_report,
     write_failure_report,
@@ -167,6 +169,24 @@ def execute_resume(state: TaskState, state_root: Path) -> tuple[TaskState, Attem
         )
 
     artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
+    if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
+        if reconcile_patch_not_captured(
+            state,
+            attempt,
+            artifact_paths,
+            state_root,
+            reason="resume_recheck",
+        ):
+            state.status = TaskStatus.RUNNING
+            save_state(state, state_root)
+            return _run_from_phase(
+                state,
+                state_root,
+                attempt,
+                artifact_paths,
+                start_phase=AttemptPhase.TESTING,
+            )
+
     state.status = TaskStatus.RUNNING
     save_state(state, state_root)
     return _run_from_phase(state, state_root, attempt, artifact_paths, start_phase=attempt.phase)
@@ -505,6 +525,91 @@ def _clear_failure_state(attempt: AttemptRecord, artifact_paths: dict[str, Path]
     clear_failure_artifact(artifact_paths["plan_prompt"].parent)
 
 
+def _refresh_worktree_diff_artifacts(
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    worktree: Path,
+) -> dict[str, object]:
+    diff_metadata = capture_worktree_diff_metadata(
+        worktree,
+        attempt.base_commit,
+        diff_stat_path=artifact_paths["diff_stat"],
+        diff_files_path=artifact_paths["diff_files"],
+    )
+    attempt.head_commit = str(diff_metadata["head_commit"])
+    attempt.diff_stat_path = str(artifact_paths["diff_stat"])
+    return diff_metadata
+
+
+def reconcile_patch_not_captured(
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    state_root: Path,
+    *,
+    reason: str,
+) -> bool:
+    """Clear stale patch_not_captured when the worktree already has captured changes."""
+    if attempt.failure_type != FailureType.PATCH_NOT_CAPTURED.value:
+        return False
+    worktree_path = str(attempt.worktree_path or "").strip()
+    if not worktree_path:
+        return False
+    worktree = Path(worktree_path)
+    if not worktree.is_dir():
+        return False
+
+    diff_metadata = _refresh_worktree_diff_artifacts(attempt, artifact_paths, worktree)
+    if not is_patch_capture_resolved(
+        worktree=worktree,
+        base_commit=attempt.base_commit,
+        diff_metadata=diff_metadata,
+    ):
+        return False
+
+    _clear_failure_state(attempt, artifact_paths)
+    attempt.running_provider = ""
+    if attempt.implementer_exit_code is None:
+        attempt.implementer_exit_code = 0
+    append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=EventType.PATCH_CAPTURE_RECOVERED,
+        iteration=attempt.iteration,
+        retry=attempt.retry,
+        graph_node_id=attempt.graph_node_id,
+        phase=attempt.phase.value,
+        message="patch capture recovered from worktree recheck",
+        details={"reason": reason, "head_commit": attempt.head_commit},
+    )
+    return True
+
+
+def _stop_for_patch_not_captured(
+    state: TaskState,
+    state_root: Path,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    *,
+    diff_metadata: dict[str, object],
+    worktree: Path,
+    after_repair: bool = False,
+) -> None:
+    attempt.running_provider = ""
+    if after_repair:
+        report = repair_uncaptured_patch_report(
+            porcelain=list(diff_metadata.get("porcelain") or []),
+            base_commit=attempt.base_commit,
+            head_commit=str(diff_metadata.get("head_commit", attempt.head_commit)),
+            has_committed_changes=bool(diff_metadata.get("has_committed_changes")),
+            has_mergeable_patch=has_mergeable_patches(worktree, attempt.base_commit),
+        )
+        persist_failure_state(state, attempt, report, artifact_paths)
+    state.status = TaskStatus.STOPPED
+    mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+    save_state(state, state_root)
+
+
 def _clear_resolved_patch_not_captured(
     attempt: AttemptRecord,
     artifact_paths: dict[str, Path],
@@ -538,6 +643,37 @@ def execute_repair_recovery(
     ):
         raise RunError("cannot repair an attempt that already passed reviewer approval")
     artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
+    worktree = Path(attempt.worktree_path)
+
+    if report.failure_type == FailureType.PATCH_NOT_CAPTURED:
+        if reconcile_patch_not_captured(
+            state,
+            attempt,
+            artifact_paths,
+            state_root,
+            reason="pre_repair_recheck",
+        ):
+            append_event(
+                state_root,
+                task_id=state.task_id,
+                event_type=EventType.RECOVERY_SKIPPED,
+                iteration=attempt.iteration,
+                retry=attempt.retry,
+                graph_node_id=attempt.graph_node_id,
+                phase=attempt.phase.value,
+                message="implementer repair skipped: patch already captured",
+                details={"failure_type": report.failure_type.value, "reason": "pre_repair_recheck"},
+            )
+            state.status = TaskStatus.RUNNING
+            save_state(state, state_root)
+            return _run_from_phase(
+                state,
+                state_root,
+                attempt,
+                artifact_paths,
+                start_phase=AttemptPhase.TESTING,
+            )
+
     repair_label = f"implementer_repair:{report.failure_type.value}"
     if repair_label not in report.attempted_repairs:
         report.attempted_repairs.append(repair_label)
@@ -548,9 +684,75 @@ def execute_repair_recovery(
     state.status = TaskStatus.RUNNING
     save_state(state, state_root)
 
+    append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=EventType.REPAIR_STARTED,
+        iteration=attempt.iteration,
+        retry=attempt.retry,
+        graph_node_id=attempt.graph_node_id,
+        phase=attempt.phase.value,
+        message=repair_label,
+        details={"failure_type": report.failure_type.value},
+    )
+
     prompt = build_repair_prompt(state=state, attempt=attempt, report=report)
     state = _run_implementer_with_prompt(state, state_root, artifact_paths, prompt)
     attempt = _current_attempt(state)
+
+    append_event(
+        state_root,
+        task_id=state.task_id,
+        event_type=EventType.REPAIR_COMPLETED,
+        iteration=attempt.iteration,
+        retry=attempt.retry,
+        graph_node_id=attempt.graph_node_id,
+        phase=attempt.phase.value,
+        message=repair_label,
+        details={"failure_type": report.failure_type.value},
+    )
+
+    if report.failure_type == FailureType.PATCH_NOT_CAPTURED:
+        diff_metadata = _refresh_worktree_diff_artifacts(attempt, artifact_paths, worktree)
+        if is_patch_capture_resolved(
+            worktree=worktree,
+            base_commit=attempt.base_commit,
+            diff_metadata=diff_metadata,
+        ):
+            _clear_failure_state(attempt, artifact_paths)
+            attempt.running_provider = ""
+            append_event(
+                state_root,
+                task_id=state.task_id,
+                event_type=EventType.PATCH_CAPTURE_RECOVERED,
+                iteration=attempt.iteration,
+                retry=attempt.retry,
+                graph_node_id=attempt.graph_node_id,
+                phase=attempt.phase.value,
+                message="patch capture recovered after implementer repair",
+                details={"reason": "post_repair_recheck", "head_commit": attempt.head_commit},
+            )
+            state.status = TaskStatus.RUNNING
+            save_state(state, state_root)
+            return _run_from_phase(
+                state,
+                state_root,
+                attempt,
+                artifact_paths,
+                start_phase=AttemptPhase.TESTING,
+            )
+        if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
+            _stop_for_patch_not_captured(
+                state,
+                state_root,
+                attempt,
+                artifact_paths,
+                diff_metadata=diff_metadata,
+                worktree=worktree,
+                after_repair=True,
+            )
+            return state, attempt, artifact_paths
+
     return _run_from_phase(
         state,
         state_root,
@@ -660,8 +862,16 @@ def _run_from_phase(
         state = run_implementer_phase(state, state_root, artifact_paths)
         attempt = _current_attempt(state)
         if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
-            state.status = TaskStatus.STOPPED
-            save_state(state, state_root)
+            worktree = Path(attempt.worktree_path)
+            diff_metadata = _refresh_worktree_diff_artifacts(attempt, artifact_paths, worktree)
+            _stop_for_patch_not_captured(
+                state,
+                state_root,
+                attempt,
+                artifact_paths,
+                diff_metadata=diff_metadata,
+                worktree=worktree,
+            )
             return state, attempt, artifact_paths
 
     if start_index <= phase_order.index(AttemptPhase.TESTING):
@@ -2021,13 +2231,91 @@ _IMPLEMENTER_STABLE_CONTRACT = (
     "- Keep changes scoped to the assigned work; do not expand scope.\n"
     "- Do not perform unrelated refactors or drive-by edits.\n"
     "- Do not undo user changes or completed dependency work.\n"
+    "- Preserve existing code patterns and conventions in this repository.\n"
+    "\n"
+    "## Execution Rules\n"
+    "- Work only inside the assigned worktree checkout.\n"
+    "- Implement the requested behavior completely before finishing.\n"
+    "- Focus on the assigned node or plan step; avoid expanding scope.\n"
+    "\n"
+    "## Git Commit Requirements (mandatory)\n"
+    "- You MUST stage all implementation changes with `git add`.\n"
+    "- You MUST create a git commit before finishing (`git commit -m \"...\"`).\n"
+    "- Do NOT only write files without committing; uncommitted changes fail patch capture.\n"
+    "- When finished, the worktree should be clean (`git status --porcelain` empty).\n"
+    "- Implementation changes must appear in base..HEAD commits.\n"
+    "- Use a concise commit message describing what was implemented.\n"
+    "- If you cannot commit, explain why before exiting.\n"
+    "\n"
+    "## Testing Requirements\n"
     "- Add or update tests when the change warrants them.\n"
     "- Do not weaken existing tests or documented contracts.\n"
-    "- Preserve existing code patterns and conventions in this repository.\n"
+    "- Ensure new modules are tracked files included in your commit.\n"
+    "\n"
+    "## Patch Capture Requirements\n"
+    "- cc-loop captures implementation via git commits between base and HEAD.\n"
+    "- Untracked or uncommitted files are not mergeable and trigger patch_not_captured failure.\n"
+    "- Include generated files with `git add` before committing.\n"
+    "\n"
+    "## Output Requirements\n"
+    "- Write files in the worktree; do not substitute partial file dumps for real edits.\n"
+    "- Finish only after changes are committed and the worktree is clean.\n"
     "\n"
     "## Dynamic Implementer Payload\n"
     "Everything below this line is task-specific context for this attempt.\n"
 )
+
+
+def _implementer_dynamic_payload(
+    state: TaskState,
+    *,
+    attempt: AttemptRecord | None = None,
+    plan_json: dict[str, Any] | None = None,
+    node_sections: list[str] | None = None,
+) -> str:
+    sections: list[str] = [
+        f"Task ID: {state.task_id}",
+        f"Goal: {state.goal}",
+        f"Target repo: {state.target_repo}",
+        f"Base branch: {state.base_branch}",
+        f"Iteration: {state.iteration}",
+    ]
+    if attempt is not None:
+        if attempt.branch:
+            sections.append(f"Branch: {attempt.branch}")
+        if attempt.worktree_path:
+            sections.append(f"Worktree path: {attempt.worktree_path}")
+        if attempt.graph_node_id:
+            sections.append(f"Graph node: {attempt.graph_node_id}")
+
+    retry_feedback = ""
+    for prev in reversed(state.history):
+        if prev.phase == AttemptPhase.REJECTED and prev.review_json:
+            rp = str(prev.review_json.get("retry_prompt", "")).strip()
+            if rp:
+                retry_feedback = f"Prior attempt was rejected. Reviewer's required changes:\n{rp}\n"
+                break
+    if retry_feedback:
+        sections.extend(["", retry_feedback.strip()])
+
+    if node_sections:
+        sections.extend(node_sections)
+    elif plan_json is not None:
+        sections.extend(
+            [
+                "",
+                "Implementation prompt:",
+                str(plan_json.get("prompt", "")).strip(),
+            ]
+        )
+        expected_changes = str(plan_json.get("expected_changes", "")).strip()
+        if expected_changes:
+            sections.extend(["", "Expected changes:", expected_changes])
+        acceptance_criteria = str(plan_json.get("acceptance_criteria", "")).strip()
+        if acceptance_criteria:
+            sections.extend(["", "Acceptance criteria:", acceptance_criteria])
+
+    return "\n".join(sections).strip() + "\n"
 
 
 def build_implementer_prompt(
@@ -2041,37 +2329,27 @@ def build_implementer_prompt(
     if graph is not None and attempt is not None and attempt.graph_node_id:
         node = get_node(graph, attempt.graph_node_id)
         if node is not None:
-            return _build_node_implementer_prompt(state, graph, node)
+            return _build_node_implementer_prompt(state, graph, node, attempt=attempt)
 
     sections = [
         _IMPLEMENTER_STABLE_CONTRACT,
-        "",
-        f"Task ID: {state.task_id}",
-        f"Goal: {state.goal}",
-        f"Iteration: {state.iteration}",
-        "",
-        "Implementation prompt:",
-        str(plan_json.get("prompt", "")).strip(),
+        _implementer_dynamic_payload(state, attempt=attempt, plan_json=plan_json),
     ]
-
-    expected_changes = str(plan_json.get("expected_changes", "")).strip()
-    if expected_changes:
-        sections.extend(["", "Expected changes:", expected_changes])
-
-    acceptance_criteria = str(plan_json.get("acceptance_criteria", "")).strip()
-    if acceptance_criteria:
-        sections.extend(["", "Acceptance criteria:", acceptance_criteria])
-
-    return "\n".join(sections).strip() + "\n"
+    return "\n".join(section for section in sections if section).strip() + "\n"
 
 
-def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
+def _build_node_implementer_prompt(
+    state: TaskState,
+    graph,
+    node,
+    *,
+    attempt: AttemptRecord | None = None,
+) -> str:
     dep_lines = completed_dependency_labels(graph, node.id)
     criteria = node.acceptance_criteria or ["(none specified)"]
     files_scope = node.files_scope or ["(not restricted)"]
 
-    sections = [
-        _IMPLEMENTER_STABLE_CONTRACT,
+    node_sections = [
         "",
         "You are implementing one node from a task graph.",
         "",
@@ -2097,9 +2375,9 @@ def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
     ]
 
     if dep_lines:
-        sections.extend(["", "Completed dependencies:", *[f"- {line}" for line in dep_lines]])
+        node_sections.extend(["", "Completed dependencies:", *[f"- {line}" for line in dep_lines]])
 
-    sections.extend(
+    node_sections.extend(
         [
             "",
             "Node instructions:",
@@ -2107,7 +2385,11 @@ def _build_node_implementer_prompt(state: TaskState, graph, node) -> str:
             "- Implement only this node's scope unless a small adjacent change is necessary.",
         ]
     )
-    return "\n".join(sections).strip() + "\n"
+
+    return (
+        _IMPLEMENTER_STABLE_CONTRACT
+        + _implementer_dynamic_payload(state, attempt=attempt, node_sections=node_sections)
+    )
 
 
 TASK_REVIEW_CONTEXT_MARKER = "## Task Review Context"

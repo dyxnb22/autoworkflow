@@ -11,7 +11,7 @@ from unittest import mock
 import tests.fake_providers  # noqa: F401
 from cc_loop.cli import _run_auto_loop
 from cc_loop.config import LoopConfig
-from cc_loop.git import GitCommandError, GitCommandResult
+from cc_loop.git import GitCommandError, GitCommandResult, commit_worktree_changes
 from cc_loop.providers.base import ProviderAdapter, ProviderRunResult, register_provider
 from cc_loop.state import TaskStatus, artifacts_dir, load_state
 from tests.helpers import TempEnv, make_task
@@ -36,6 +36,8 @@ class UntrackedOnlyImplementer(ProviderAdapter):
         print_only: bool = False,
     ) -> ProviderRunResult:
         (worktree_path / "generated.py").write_text("value = 1\n", encoding="utf-8")
+        if "uncaptured worktree" in prompt.lower() or "stage and commit" in prompt.lower():
+            commit_worktree_changes(worktree_path, "repair uncaptured patch")
         output_path.write_text('{"result":"ok"}\n', encoding="utf-8")
         return ProviderRunResult(provider=self.name, exit_code=0, raw_artifact_path=output_path)
 

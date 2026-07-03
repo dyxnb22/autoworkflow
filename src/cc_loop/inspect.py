@@ -12,6 +12,7 @@ from cc_loop.failure import (
     FailureReport,
     FailureType,
     RecoveryDisposition,
+    is_patch_capture_resolved,
     merge_blocked_by_test_gate,
     read_failure_report,
     reviewer_gate_passed,
@@ -333,7 +334,33 @@ def build_failure_snapshot(
             and report.failure_type == FailureType.PATCH_NOT_CAPTURED
         ):
             report = None
+        elif report.failure_type == FailureType.PATCH_NOT_CAPTURED:
+            worktree_path = str(attempt.worktree_path or "").strip()
+            artifact_paths = plan_artifact_paths(artifact_root)
+            if worktree_path:
+                worktree = Path(worktree_path)
+                if worktree.is_dir() and is_patch_capture_resolved(
+                    worktree=worktree,
+                    base_commit=attempt.base_commit,
+                    diff_stat_path=artifact_paths["diff_stat"],
+                    diff_files_path=artifact_paths["diff_files"],
+                ):
+                    report = None
     if report is None and attempt.failure_type:
+        stale_patch_resolved = False
+        if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
+            worktree_path = str(attempt.worktree_path or "").strip()
+            artifact_paths = plan_artifact_paths(artifact_root)
+            if worktree_path:
+                worktree = Path(worktree_path)
+                stale_patch_resolved = worktree.is_dir() and is_patch_capture_resolved(
+                    worktree=worktree,
+                    base_commit=attempt.base_commit,
+                    diff_stat_path=artifact_paths["diff_stat"],
+                    diff_files_path=artifact_paths["diff_files"],
+                )
+        if stale_patch_resolved:
+            return _empty_failure_snapshot(attempt)
         try:
             failure_type = FailureType(attempt.failure_type)
         except ValueError:
@@ -412,6 +439,13 @@ def build_attempt_snapshot(
     }
 
 
+def _patch_not_captured_status_message(attempt: AttemptRecord) -> str:
+    stop_reason = str(attempt.stop_reason or "")
+    if stop_reason == "repair_did_not_capture_patch":
+        return "Repair failed: generated files remain uncommitted"
+    return "Patch capture repair required"
+
+
 def derive_current_message(
     state: TaskState,
     attempt: AttemptRecord | None,
@@ -444,6 +478,8 @@ def derive_current_message(
         return "Replanning task graph"
     if attempt is None:
         return "Ready to run"
+    if not running and attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
+        return _patch_not_captured_status_message(attempt)
     if attempt.merge_error:
         return "Merge failed — recovery available"
     if attempt.phase == AttemptPhase.MERGED:
@@ -459,9 +495,6 @@ def derive_current_message(
         if state is not None and merge_blocked_by_test_gate(attempt, state.config, state=state):
             return "Approved — merge blocked by test gate"
         return "Approved — pending merge"
-    provider_message = _provider_phase_message(phase, running_provider)
-    if provider_message:
-        return provider_message
     return f"Phase: {phase or attempt.phase.value}"
 
 

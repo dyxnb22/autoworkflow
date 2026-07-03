@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from cc_loop.git import GitCommandError, GitError
+from cc_loop.git import GitCommandError, GitError, capture_worktree_diff_metadata
 from cc_loop.state import AttemptRecord, AttemptPhase, TaskStatus, TaskState
 
 
@@ -373,6 +373,84 @@ def _porcelain_untracked_paths(porcelain: list[str]) -> list[str]:
     return paths
 
 
+def is_patch_capture_resolved(
+    *,
+    worktree: Path,
+    base_commit: str,
+    diff_metadata: dict[str, object] | None = None,
+    diff_stat_path: Path | None = None,
+    diff_files_path: Path | None = None,
+) -> bool:
+    """Return True when base..HEAD or mergeable patches capture implementer output."""
+    from cc_loop.diff import has_mergeable_patches
+
+    if diff_metadata is None:
+        if diff_stat_path is None or diff_files_path is None:
+            return False
+        diff_metadata = capture_worktree_diff_metadata(
+            worktree,
+            base_commit,
+            diff_stat_path=diff_stat_path,
+            diff_files_path=diff_files_path,
+        )
+    has_committed_changes = bool(diff_metadata.get("has_committed_changes"))
+    has_mergeable_patch = has_mergeable_patches(worktree, base_commit)
+    if not has_committed_changes and not has_mergeable_patch:
+        return False
+    return (
+        classify_uncaptured_patch(
+            porcelain=list(diff_metadata.get("porcelain") or []),
+            base_commit=base_commit,
+            head_commit=str(diff_metadata.get("head_commit", "")),
+            has_committed_changes=has_committed_changes,
+            has_mergeable_patch=has_mergeable_patch,
+        )
+        is None
+    )
+
+
+def repair_uncaptured_patch_report(
+    *,
+    porcelain: list[str],
+    base_commit: str,
+    head_commit: str,
+    has_committed_changes: bool,
+    has_mergeable_patch: bool,
+) -> FailureReport:
+    """Build a patch_not_captured report after repair did not produce a commit."""
+    report = classify_uncaptured_patch(
+        porcelain=porcelain,
+        base_commit=base_commit,
+        head_commit=head_commit,
+        has_committed_changes=has_committed_changes,
+        has_mergeable_patch=has_mergeable_patch,
+    )
+    if report is None:
+        report = FailureReport(
+            failure_type=FailureType.PATCH_NOT_CAPTURED,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message="repair did not capture patch; generated files remain uncommitted",
+            stop_reason="repair_did_not_capture_patch",
+            details={
+                "porcelain": list(porcelain),
+                "head_commit": head_commit,
+                "base_commit": base_commit,
+            },
+            suggested_actions=[
+                "Stage and commit generated files so base..HEAD contains the implementation diff",
+                "Run implementer repair again or commit manually before resuming",
+            ],
+        )
+    else:
+        report.message = "repair did not capture patch; generated files remain uncommitted"
+        report.stop_reason = "repair_did_not_capture_patch"
+        report.suggested_actions = [
+            "Stage and commit generated files so base..HEAD contains the implementation diff",
+            "Run implementer repair again or commit manually before resuming",
+        ]
+    return report
+
+
 def classify_uncaptured_patch(
     *,
     porcelain: list[str],
@@ -577,6 +655,18 @@ def classify_attempt_outcome(state: TaskState, attempt: AttemptRecord, artifact_
         return None
 
     if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
+        worktree_path = str(attempt.worktree_path or "").strip()
+        diff_stat = artifact_paths.get("diff_stat")
+        diff_files = artifact_paths.get("diff_files")
+        if worktree_path and diff_stat is not None and diff_files is not None:
+            worktree = Path(worktree_path)
+            if worktree.is_dir() and is_patch_capture_resolved(
+                worktree=worktree,
+                base_commit=attempt.base_commit,
+                diff_stat_path=diff_stat,
+                diff_files_path=diff_files,
+            ):
+                return None
         art_root = artifact_paths.get("plan_prompt")
         if art_root is not None:
             report = read_failure_report(art_root.parent)
