@@ -8,6 +8,7 @@ import unittest
 from cc_loop.config import merge_config as merge_loop_config
 from cc_loop.state import TaskState
 from cc_loop.task_graph import (
+    GraphNodeKind,
     GraphNodeStatus,
     TaskGraph,
     build_graph_snapshot,
@@ -20,6 +21,7 @@ from cc_loop.task_graph import (
     mark_node_rejected,
     mark_node_running,
     next_runnable_node,
+    parse_graph_node_kind,
 )
 
 
@@ -56,6 +58,32 @@ class TaskGraphTests(unittest.TestCase):
         self.assertEqual(len(graph.nodes), 2)
         self.assertEqual(graph.current_node_id, "T1")
         self.assertEqual(graph.nodes[0].status, GraphNodeStatus.PENDING)
+
+    def test_graph_node_kind_aliases_normalize(self) -> None:
+        aliases = {
+            "testing": GraphNodeKind.TEST,
+            "tests": GraphNodeKind.TEST,
+            "documentation": GraphNodeKind.DOCS,
+            "doc": GraphNodeKind.DOCS,
+            "verification": GraphNodeKind.REVIEW,
+            "verify": GraphNodeKind.REVIEW,
+        }
+        for raw, expected in aliases.items():
+            self.assertEqual(parse_graph_node_kind(raw), expected)
+
+        plan = {
+            "mode": "task_graph",
+            "nodes": [{"id": "T1", "title": "Run tests", "description": "", "kind": "testing"}],
+        }
+        graph = graph_from_planner_json(plan)
+        self.assertEqual(graph.nodes[0].kind, GraphNodeKind.TEST)
+
+    def test_unknown_graph_node_kind_lists_allowed_and_aliases(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            parse_graph_node_kind("unsupported-kind")
+        message = str(ctx.exception)
+        self.assertIn("allowed kinds", message)
+        self.assertIn("testing -> test", message)
 
     def test_graph_from_planner_json_preserves_node_policy_fields(self) -> None:
         plan = {

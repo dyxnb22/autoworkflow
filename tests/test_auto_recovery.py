@@ -5,13 +5,48 @@ from __future__ import annotations
 import argparse
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import tests.fake_providers  # noqa: F401
 from cc_loop.cli import _run_auto_loop
+from cc_loop.config import LoopConfig
 from cc_loop.git import GitCommandError, GitCommandResult
+from cc_loop.providers.base import ProviderAdapter, ProviderRunResult, register_provider
 from cc_loop.state import TaskStatus, artifacts_dir, load_state
 from tests.helpers import TempEnv, make_task
+
+
+@register_provider
+class UntrackedOnlyImplementer(ProviderAdapter):
+    name = "untracked-only-implementer"
+
+    def build_args(self, *, worktree_path: Path, prompt: str, output_path: Path, config: LoopConfig) -> list[str]:
+        return ["true"]
+
+    def run(
+        self,
+        *,
+        worktree_path: Path,
+        prompt: str,
+        output_path: Path,
+        config: LoopConfig,
+        timeout_seconds: int,
+        raw_output_path: Path | None = None,
+        print_only: bool = False,
+    ) -> ProviderRunResult:
+        (worktree_path / "generated.py").write_text("value = 1\n", encoding="utf-8")
+        output_path.write_text('{"result":"ok"}\n', encoding="utf-8")
+        return ProviderRunResult(provider=self.name, exit_code=0, raw_artifact_path=output_path)
+
+    def parse_planner_output(self, last_message_path: Path):
+        raise NotImplementedError
+
+    def parse_reviewer_output(self, last_message_path: Path):
+        raise NotImplementedError
+
+    def preflight_check_argv(self) -> list[str]:
+        return ["true"]
 
 
 class AutoRecoveryTests(unittest.TestCase):
@@ -88,6 +123,28 @@ class AutoRecoveryTests(unittest.TestCase):
         self.assertEqual(attempt.failure_type, "test_environment")
         artifact_root = artifacts_dir("env-auto", attempt.iteration, attempt.retry, self.state_root)
         self.assertTrue((artifact_root / "failure.report.json").is_file())
+
+    def test_auto_recovers_from_uncaptured_patch(self) -> None:
+        make_task(
+            repo=self.repo,
+            state_root=self.state_root,
+            task_id="patch-auto",
+            config={
+                "implementer_provider": "untracked-only-implementer",
+                "max_recovery_attempts_per_iteration": 2,
+            },
+        )
+        with self._patch_worktree_root():
+            code = _run_auto_loop(self._args(), "patch-auto")
+
+        self.assertEqual(code, 0)
+        state = load_state("patch-auto", self.state_root)
+        attempt = state.history[-1]
+        self.assertGreater(attempt.recovery_retry_count, 0)
+        artifact_root = artifacts_dir("patch-auto", attempt.iteration, attempt.retry, self.state_root)
+        diff_files = (artifact_root / "diff.files.txt").read_text(encoding="utf-8")
+        self.assertIn("generated.py", diff_files)
+        self.assertNotEqual(attempt.head_commit, attempt.base_commit)
 
     def test_graph_node_test_failure_associated_with_node(self) -> None:
         make_task(

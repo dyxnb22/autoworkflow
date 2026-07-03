@@ -17,6 +17,7 @@ def build_repair_prompt(
         FailureType.MERGE_CONFLICT: _merge_repair_prompt,
         FailureType.TEST_IMPLEMENTATION: _test_repair_prompt,
         FailureType.TEST_GATE_BLOCKED: _test_repair_prompt,
+        FailureType.PATCH_NOT_CAPTURED: _patch_not_captured_repair_prompt,
         FailureType.PROVIDER_EXIT_ERROR: _provider_repair_prompt,
         FailureType.PROVIDER_TIMEOUT: _provider_repair_prompt,
         FailureType.REVIEWER_STOP_FIXABLE: _reviewer_stop_repair_prompt,
@@ -73,6 +74,8 @@ def _merge_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: Fa
 
 def _test_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: FailureReport) -> str:
     failed_tests = report.details.get("failed_tests") or []
+    collection_errors = report.details.get("collection_errors") or []
+    import_summary = str(report.details.get("import_error_summary", "")).strip()
     stderr_tail = report.details.get("stderr_tail", "")
     plan_prompt = ""
     if attempt.plan_json:
@@ -82,6 +85,11 @@ def _test_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: Fai
         node = get_node(graph, attempt.graph_node_id)
         if node is not None:
             plan_prompt = node.description or plan_prompt
+    import_block = ""
+    if import_summary:
+        import_block = f"Import/collection error summary:\n{import_summary}\n"
+    elif collection_errors:
+        import_block = f"Collection errors: {', '.join(collection_errors)}\n"
     return (
         "You are the cc-loop implementer running a test-failure repair.\n"
         f"{_safety_rules()}\n"
@@ -90,9 +98,30 @@ def _test_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: Fai
         f"Iteration: {attempt.iteration} retry: {attempt.retry}\n"
         f"{_graph_node_context(state, attempt)}"
         f"Failed tests: {', '.join(failed_tests) or '(see test.output.txt)'}\n"
+        f"{import_block}"
         f"Test output tail:\n{stderr_tail}\n"
         f"Original implementation prompt:\n{plan_prompt}\n"
         "Fix the implementation so the configured tests pass.\n"
+    )
+
+
+def _patch_not_captured_repair_prompt(*, state: TaskState, attempt: AttemptRecord, report: FailureReport) -> str:
+    porcelain = report.details.get("porcelain") or []
+    untracked = report.details.get("untracked_files") or []
+    return (
+        "You are the cc-loop implementer fixing uncaptured worktree changes.\n"
+        f"{_safety_rules()}\n"
+        f"Task ID: {state.task_id}\n"
+        f"Goal: {state.goal}\n"
+        f"Iteration: {attempt.iteration} retry: {attempt.retry}\n"
+        f"{_graph_node_context(state, attempt)}"
+        f"Failure: {report.message}\n"
+        f"Base commit: {report.details.get('base_commit', attempt.base_commit)}\n"
+        f"HEAD commit: {report.details.get('head_commit', attempt.head_commit)}\n"
+        f"Untracked files: {', '.join(untracked) or '(none)'}\n"
+        f"Git status porcelain:\n{chr(10).join(porcelain) or '(clean)'}\n"
+        "Stage and commit all implementation changes so base..HEAD contains a mergeable diff.\n"
+        "Include generated files with git add before finishing.\n"
     )
 
 

@@ -8,7 +8,7 @@ from typing import Any
 
 from cc_loop.budgets import count_changed_files
 from cc_loop.config import LoopConfig
-from cc_loop.diff import collect_bounded_review_patches, read_diff_stat_summary
+from cc_loop.diff import collect_bounded_review_patches, has_mergeable_patches, read_diff_stat_summary
 from cc_loop.failure import (
     FailureReport,
     FailureType,
@@ -16,6 +16,7 @@ from cc_loop.failure import (
     apply_report_to_attempt,
     classify_merge_failure,
     classify_provider_failure,
+    classify_uncaptured_patch,
     clear_report_from_attempt,
     failure_report_path,
     write_failure_report,
@@ -32,6 +33,7 @@ from cc_loop.preflight import PreflightResult, run_preflight
 from cc_loop.prompt_metadata import build_prompt_metadata, write_prompt_metadata
 from cc_loop.providers.base import ProviderRunResult, get_provider
 from cc_loop.repair_prompts import build_repair_prompt
+from cc_loop.recovery import persist_failure_state
 from cc_loop.events import EventType, append_event
 from cc_loop.graph_patch import GraphPatch, GraphPatchError, apply_patch
 from cc_loop.task_graph import effective_node_providers
@@ -435,6 +437,10 @@ def _run_from_phase(
     if start_index <= phase_order.index(AttemptPhase.EXECUTING):
         state = run_implementer_phase(state, state_root, artifact_paths)
         attempt = _current_attempt(state)
+        if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
+            state.status = TaskStatus.STOPPED
+            save_state(state, state_root)
+            return state, attempt, artifact_paths
 
     if start_index <= phase_order.index(AttemptPhase.TESTING):
         state = run_test_phase(state, state_root, artifact_paths)
@@ -698,6 +704,29 @@ def _run_graph_node_setup(
     return state
 
 
+def _record_uncaptured_patch_if_needed(
+    state: TaskState,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+    *,
+    diff_metadata: dict[str, object],
+    worktree: Path,
+) -> None:
+    """Persist a recoverable failure when implementer changes are not mergeable."""
+    if attempt.implementer_exit_code not in {0, None}:
+        return
+    report = classify_uncaptured_patch(
+        porcelain=list(diff_metadata.get("porcelain") or []),
+        base_commit=attempt.base_commit,
+        head_commit=str(diff_metadata.get("head_commit", attempt.head_commit)),
+        has_committed_changes=bool(diff_metadata.get("has_committed_changes")),
+        has_mergeable_patch=has_mergeable_patches(worktree, attempt.base_commit),
+    )
+    if report is None:
+        return
+    persist_failure_state(state, attempt, report, artifact_paths)
+
+
 def run_implementer_phase(
     state: TaskState,
     state_root: Path,
@@ -787,6 +816,13 @@ def run_implementer_phase(
     )
     attempt.head_commit = str(diff_metadata["head_commit"])
     attempt.diff_stat_path = str(artifact_paths["diff_stat"])
+    _record_uncaptured_patch_if_needed(
+        state,
+        attempt,
+        artifact_paths,
+        diff_metadata=diff_metadata,
+        worktree=worktree,
+    )
     save_state(state, state_root)
 
     if run_result.timed_out:
@@ -1769,6 +1805,13 @@ def _run_implementer_with_prompt(
     )
     attempt.head_commit = str(diff_metadata["head_commit"])
     attempt.diff_stat_path = str(artifact_paths["diff_stat"])
+    _record_uncaptured_patch_if_needed(
+        state,
+        attempt,
+        artifact_paths,
+        diff_metadata=diff_metadata,
+        worktree=worktree,
+    )
     save_state(state, state_root)
 
     if run_result.timed_out:

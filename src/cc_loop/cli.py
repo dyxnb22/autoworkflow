@@ -203,6 +203,12 @@ def _build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--json", action="store_true", default=False)
 
     report_parser = subparsers.add_parser("report", help="Show task report")
+    report_parser.add_argument(
+        "report_task_id",
+        nargs="?",
+        metavar="TASK_ID",
+        help="Task identifier (positional alternative to --task-id)",
+    )
     _task_id_arg(report_parser)
     report_parser.add_argument("--json", action="store_true", default=False)
 
@@ -465,7 +471,11 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    task_id = resolve_task_id(args.state_root, args.task_id)
+    task_id_arg = args.task_id or getattr(args, "report_task_id", None)
+    if args.task_id and getattr(args, "report_task_id", None) and args.task_id != args.report_task_id:
+        print("error: conflicting task id between --task-id and positional TASK_ID", file=sys.stderr)
+        return 1
+    task_id = resolve_task_id(args.state_root, task_id_arg)
     if task_id is None:
         return 1
     state = load_state(task_id, args.state_root)

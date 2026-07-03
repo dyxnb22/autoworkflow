@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cc_loop.diff import collect_bounded_review_patches
+from cc_loop.diff import collect_bounded_review_patches, has_mergeable_patches
 from tests.helpers import init_git_repo
 
 
@@ -73,6 +73,31 @@ class DiffCollectorTests(unittest.TestCase):
             )
             self.assertEqual(paths, [])
             self.assertIn("exceeds max_review_patch_bytes", body)
+
+    def test_untracked_file_has_no_mergeable_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_git_repo(repo)
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            (repo / "generated.py").write_text("print('new')\n", encoding="utf-8")
+            self.assertFalse(has_mergeable_patches(repo, base))
+            patches_dir = Path(tmp) / "patches"
+            paths, body, used = collect_bounded_review_patches(
+                repo,
+                base,
+                patches_dir=patches_dir,
+                max_bytes=10_000,
+            )
+            self.assertEqual(paths, [])
+            self.assertEqual(used, 0)
+            self.assertEqual(body, "")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,32 @@ class GraphNodeKind(StrEnum):
     INTEGRATION = "integration"
 
 
+GRAPH_NODE_KIND_ALIASES: dict[str, str] = {
+    "testing": GraphNodeKind.TEST.value,
+    "tests": GraphNodeKind.TEST.value,
+    "documentation": GraphNodeKind.DOCS.value,
+    "doc": GraphNodeKind.DOCS.value,
+    "verification": GraphNodeKind.REVIEW.value,
+    "verify": GraphNodeKind.REVIEW.value,
+}
+
+
+def parse_graph_node_kind(raw: str) -> GraphNodeKind:
+    """Normalize planner aliases and parse a graph node kind."""
+    normalized = str(raw).strip().lower()
+    if not normalized:
+        return GraphNodeKind.IMPLEMENTATION
+    canonical = GRAPH_NODE_KIND_ALIASES.get(normalized, normalized)
+    try:
+        return GraphNodeKind(canonical)
+    except ValueError:
+        allowed = ", ".join(kind.value for kind in GraphNodeKind)
+        aliases = ", ".join(f"{alias} -> {target}" for alias, target in sorted(GRAPH_NODE_KIND_ALIASES.items()))
+        raise ValueError(
+            f"unknown graph node kind {raw!r}; allowed kinds: {allowed}; known aliases: {aliases}"
+        ) from None
+
+
 _TERMINAL_FAILURE_STATUSES = {
     GraphNodeStatus.FAILED,
     GraphNodeStatus.BLOCKED,
@@ -75,7 +101,7 @@ class GraphNode:
             id=data["id"],
             title=data.get("title", ""),
             description=data.get("description", ""),
-            kind=GraphNodeKind(data.get("kind", GraphNodeKind.IMPLEMENTATION.value)),
+            kind=parse_graph_node_kind(str(data.get("kind", GraphNodeKind.IMPLEMENTATION.value))),
             owner=data.get("owner", "implementer"),
             dependencies=list(data.get("dependencies") or []),
             acceptance_criteria=_coerce_str_list(data.get("acceptance_criteria")),
@@ -153,7 +179,7 @@ def graph_node_from_planner_item(item: dict[str, Any], *, now: str | None = None
         id=node_id,
         title=str(item.get("title", node_id)).strip(),
         description=str(item.get("description", "")).strip(),
-        kind=GraphNodeKind(str(item.get("kind", GraphNodeKind.IMPLEMENTATION.value))),
+        kind=parse_graph_node_kind(str(item.get("kind", GraphNodeKind.IMPLEMENTATION.value))),
         owner=str(item.get("owner", "implementer")).strip(),
         dependencies=[str(dep).strip() for dep in item.get("dependencies") or [] if str(dep).strip()],
         acceptance_criteria=_coerce_str_list(item.get("acceptance_criteria")),

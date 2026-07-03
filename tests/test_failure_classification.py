@@ -10,6 +10,7 @@ from cc_loop.failure import (
     classify_merge_failure,
     classify_reviewer_outcome,
     classify_test_failure,
+    classify_uncaptured_patch,
 )
 from cc_loop.git import GitCommandError, GitCommandResult
 from cc_loop.state import AttemptRecord
@@ -34,10 +35,56 @@ class FailureClassificationTests(unittest.TestCase):
         self.assertEqual(report.disposition, RecoveryDisposition.RECOVERABLE)
 
     def test_test_environment_is_terminal(self) -> None:
-        output = "E   ModuleNotFoundError: No module named 'missing_pkg'"
+        output = "bash: pytest: command not found"
         report = classify_test_failure(output, "failed")
         self.assertEqual(report.failure_type, FailureType.TEST_ENVIRONMENT)
         self.assertEqual(report.disposition, RecoveryDisposition.TERMINAL)
+
+    def test_pytest_collection_import_error_is_recoverable(self) -> None:
+        output = (
+            "ERROR collecting tests/test_app.py\n"
+            "ImportError while importing test module 'tests/test_app.py'.\n"
+            "E   ImportError: cannot import name 'missing_symbol' from 'app'\n"
+        )
+        report = classify_test_failure(output, "failed")
+        self.assertEqual(report.failure_type, FailureType.TEST_IMPLEMENTATION)
+        self.assertEqual(report.disposition, RecoveryDisposition.RECOVERABLE)
+        self.assertEqual(report.details["error_kind"], "pytest_collection_error")
+        self.assertIn("cannot import name", report.details["import_error_summary"])
+
+    def test_module_not_found_in_collection_context_is_recoverable(self) -> None:
+        output = (
+            "ERROR collecting tests/test_app.py\n"
+            "E   ModuleNotFoundError: No module named 'missing_pkg'\n"
+        )
+        report = classify_test_failure(output, "failed")
+        self.assertEqual(report.failure_type, FailureType.TEST_IMPLEMENTATION)
+        self.assertEqual(report.disposition, RecoveryDisposition.RECOVERABLE)
+        self.assertEqual(report.details["error_kind"], "pytest_collection_error")
+
+    def test_uncaptured_patch_detects_untracked_without_commits(self) -> None:
+        report = classify_uncaptured_patch(
+            porcelain=["?? generated.py"],
+            base_commit="abc123",
+            head_commit="abc123",
+            has_committed_changes=False,
+            has_mergeable_patch=False,
+        )
+        assert report is not None
+        self.assertEqual(report.failure_type, FailureType.PATCH_NOT_CAPTURED)
+        self.assertEqual(report.disposition, RecoveryDisposition.RECOVERABLE)
+        self.assertEqual(report.details["untracked_files"], ["generated.py"])
+        self.assertIn("Stage and commit", report.suggested_actions[0])
+
+    def test_uncaptured_patch_skips_when_mergeable_patch_exists(self) -> None:
+        report = classify_uncaptured_patch(
+            porcelain=[" M tracked.py"],
+            base_commit="abc123",
+            head_commit="abc123",
+            has_committed_changes=False,
+            has_mergeable_patch=True,
+        )
+        self.assertIsNone(report)
 
     def test_test_implementation_is_recoverable(self) -> None:
         output = "FAILED tests/test_app.py::test_add - AssertionError"
