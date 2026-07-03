@@ -25,6 +25,7 @@ These commands and flags are the integration contract. Other commands exist for 
 | `cc-loop status [--task-id ID] [--json]` | Poll task state |
 | `cc-loop graph [--task-id ID] [--json] [--history]` | Inspect task graph progress (v0.4+); `--history` shows graph mutations (v0.7) |
 | `cc-loop report [--task-id ID] [--json] [--format json\|human]` | Task report with graph progress, failures, artifacts (v0.6) |
+| `cc-loop summary [--task-id ID] [--json]` | Luma-oriented single JSON summary (v0.10+) |
 | `cc-loop eval --task-id ID --suite PATH [--json]` | Run local eval suite against latest attempt artifacts (v0.10) |
 | `cc-loop export --task-id ID --format jsonl --output PATH` | Export analytics-compatible JSONL rows (v0.10) |
 | `cc-loop stop --task-id ID [--json]` | Stop detached runner (v0.5) |
@@ -57,6 +58,9 @@ cc-loop auto --detach --task-id "$TASK_ID"
 
 # Poll until done:
 cc-loop status --task-id "$TASK_ID" --json
+
+# Single-file recap for Luma (after terminal state or anytime):
+cc-loop summary --task-id "$TASK_ID" --json
 ```
 
 ## `status --json` schema (schema_version 1)
@@ -389,3 +393,57 @@ when available, and `timestamp`.
   }
 }
 ```
+
+### `summary --json` schema (v0.10+, additive)
+
+Luma-oriented single JSON object. Does not replace `report --json`.
+
+```bash
+cc-loop summary --task-id ID --json
+```
+
+Key fields:
+
+| Field | Description |
+|-------|-------------|
+| `schema_version` | Summary schema version (currently `1`) |
+| `task_id`, `goal`, `status`, `base_branch`, `target_repo` | Task identity |
+| `latest_attempt` | Iteration, retry, phase, decision, test status, artifact dir |
+| `providers` | Planner/implementer/reviewer provider names |
+| `prompt_cache` | Snapshot from latest attempt `prompt.cache.json` |
+| `reviewer_prompt_metrics` | Snapshot from `review.prompt.metrics.json` |
+| `subprocess_result` | Per-phase exit metadata from `subprocess.result.json` |
+| `command_argv_path`, `attempt_trace_path` | Latest attempt diagnostic paths |
+| `review` | Decision, reason, issues |
+| `failure` | Failure summary compatible with `status --json` |
+| `artifact_paths` | Latest attempt artifact path map |
+| `suggested_next_action` | Recovery hint |
+
+Human output (`cc-loop summary --task-id ID`) lists task/status/latest/test/review/cache/artifacts.
+
+### Task-level `run.summary.json` (v0.10+, additive)
+
+Written to `~/.cc-loop/tasks/<task-id>/run.summary.json` when a task reaches a terminal state (`done`, `failed`, `cancelled`, or non-recoverable `stopped`). Content matches `cc-loop summary --json` for that task.
+
+### Reviewer prompt layout (v0.10+)
+
+Reviewer prompts use three sections before per-attempt evidence:
+
+1. `## Stable Review Contract` / Rubric / JSON output contract
+2. `## Task Review Context` — goal, node criteria, files scope (stable across retries of the same node)
+3. `## Dynamic Review Payload` — iteration, commits, test output, diff/patch evidence
+
+When `review_context_mode` is `artifact_refs`, or `hybrid` with a large patch, the reviewer prompt omits the full `git diff --stat` body and instead includes a short summary plus paths to `diff.stat.txt` and `diff.files.txt`.
+
+### Auto direct planner (`auto_direct_planner`)
+
+Config keys (defaults):
+
+- `auto_direct_planner`: `true`
+- `auto_direct_max_goal_chars`: `500`
+
+When `planner_mode` is `auto` (default), cc-loop may skip the planner provider for short, simple goals (keywords like `fix`, `bug`, `cli`, `docs`, `typo`, `test`, or phrases like `minimal change`). Complex goals containing keywords like `architecture`, `migration`, or `redesign` always use the planner provider.
+
+`planner_mode: direct` still forces direct mode. `planner_mode: single|graph` is never overridden.
+
+`prompt.cache.json` planner phase records `planner_mode_resolved`, `planner_direct_reason`, and `provider_skipped`.

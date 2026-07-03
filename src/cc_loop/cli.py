@@ -16,6 +16,7 @@ from cc_loop.detach import spawn_detached_auto
 from cc_loop.git import resolve_base_commit_if_possible
 from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition, failure_report_path
 from cc_loop.report import build_report, format_report_human
+from cc_loop.summary import build_task_summary, format_task_summary_human
 from cc_loop.runner_control import cancel_task, cleanup_task, stop_runner
 from cc_loop.runner_heartbeat import mark_heartbeat_terminal, refresh_heartbeat, remove_heartbeat
 from cc_loop.evals import format_eval_human, run_eval_suite
@@ -287,6 +288,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _task_id_arg(export_parser)
     export_parser.add_argument("--format", choices=["jsonl"], default="jsonl", help="Export format")
     export_parser.add_argument("--output", required=True, type=Path, help="Output file path")
+
+    summary_parser = subparsers.add_parser("summary", help="Show Luma-oriented task summary")
+    _task_id_arg(summary_parser)
+    summary_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
 
     return parser
 
@@ -569,6 +574,19 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2))
     else:
         print(format_report_human(report))
+    return 0
+
+
+def cmd_summary(args: argparse.Namespace) -> int:
+    task_id = resolve_task_id(args.state_root, args.task_id)
+    if task_id is None:
+        return 1
+    state = load_state(task_id, args.state_root)
+    summary = build_task_summary(state, args.state_root)
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        print(format_task_summary_human(summary))
     return 0
 
 
@@ -1028,6 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
         "cancel": cmd_cancel,
         "cleanup": cmd_cleanup,
         "report": cmd_report,
+        "summary": cmd_summary,
         "eval": cmd_eval,
         "export": cmd_export,
     }
