@@ -946,6 +946,9 @@ def _handle_terminal_auto_stop(
         artifact_paths = _artifact_paths_for_attempt(state, attempt, state_root)
         persist_failure_state(state, attempt, report, artifact_paths)
         save_state(state, state_root)
+        from cc_loop.summary import finalize_terminal_task
+
+        finalize_terminal_task(state, state_root)
         artifact_dir = artifact_paths["plan_prompt"].parent
         print(
             f"error: task stopped (terminal): failure_type={report.failure_type.value}",

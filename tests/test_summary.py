@@ -11,8 +11,11 @@ from pathlib import Path
 from unittest import mock
 
 import tests.fake_providers  # noqa: F401
+from cc_loop.cli import _handle_terminal_auto_stop
+from cc_loop.execution_timeline import EXECUTION_TIMELINE_FILENAME
+from cc_loop.failure import FailureReport, FailureType, RecoveryDisposition
 from cc_loop.run import execute_run
-from cc_loop.state import AttemptPhase, TaskStatus, load_state
+from cc_loop.state import AttemptPhase, AttemptRecord, TaskStatus, artifacts_dir, load_state, save_state, utc_now_iso
 from cc_loop.summary import RUN_SUMMARY_FILENAME, build_task_summary, format_task_summary_human, write_run_summary_if_terminal
 from tests.helpers import TempEnv, make_task
 
@@ -88,6 +91,51 @@ class SummaryCommandTests(unittest.TestCase):
             assert path is not None
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "done")
+        finally:
+            env.close()
+
+    def test_terminal_auto_stop_writes_summary_and_timeline(self) -> None:
+        env = TempEnv()
+        try:
+            make_task(
+                repo=env.repo(),
+                state_root=env.state_root(),
+                task_id="terminal-stop-summary",
+                config={"max_retries_per_step": 1},
+            )
+            state = load_state("terminal-stop-summary", env.state_root())
+            attempt = AttemptRecord(
+                iteration=1,
+                retry=1,
+                created_at=utc_now_iso(),
+                base_commit=state.base_commit,
+                phase=AttemptPhase.REJECTED,
+                decision="reject",
+                test_status="passed",
+            )
+            state.history.append(attempt)
+            state.iteration = 1
+            state.status = TaskStatus.STOPPED
+            artifact_root = artifacts_dir(state.task_id, attempt.iteration, attempt.retry, env.state_root())
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            save_state(state, env.state_root())
+
+            report = FailureReport(
+                failure_type=FailureType.REVIEWER_REJECT,
+                disposition=RecoveryDisposition.TERMINAL,
+                message="reviewer rejected all attempts",
+                stop_reason="retry_exhausted",
+            )
+            result = _handle_terminal_auto_stop(state, attempt, env.state_root(), report)
+
+            self.assertEqual(result, 1)
+            task_dir = env.state_root() / "tasks" / "terminal-stop-summary"
+            summary_path = task_dir / RUN_SUMMARY_FILENAME
+            self.assertTrue(summary_path.is_file())
+            self.assertTrue((task_dir / EXECUTION_TIMELINE_FILENAME).is_file())
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "stopped")
+            self.assertEqual(payload["failure"]["stop_reason"], "retry_exhausted")
         finally:
             env.close()
 
