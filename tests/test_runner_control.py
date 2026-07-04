@@ -7,7 +7,14 @@ import unittest
 from unittest import mock
 
 from cc_loop.inspect import runner_pid_path
-from cc_loop.runner_control import cancel_task, cleanup_task, stop_runner, validate_pid_ownership
+from cc_loop.runner_control import (
+    _read_proc_cmdline,
+    cancel_task,
+    cleanup_task,
+    stop_runner,
+    validate_pid_ownership,
+)
+from cc_loop.runner_heartbeat import RunnerHeartbeat, write_heartbeat
 from cc_loop.state import TaskStatus, load_state, save_state, task_dir
 from tests.helpers import TempEnv, make_task
 
@@ -50,3 +57,41 @@ class RunnerControlTests(unittest.TestCase):
     def test_validate_pid_ownership_rejects_unrelated(self) -> None:
         with mock.patch("cc_loop.runner_control._read_proc_cmdline", return_value="bash -c sleep"):
             self.assertFalse(validate_pid_ownership(os.getpid(), "ctrl-task"))
+
+    def test_validate_pid_ownership_uses_ps_when_proc_missing(self) -> None:
+        cmdline = "python -m cc_loop.cli auto --task-id ctrl-task"
+        with mock.patch("cc_loop.runner_control._read_proc_cmdline", return_value=cmdline):
+            self.assertTrue(validate_pid_ownership(os.getpid(), "ctrl-task"))
+
+    def test_validate_pid_ownership_rejects_unrelated_ps_output(self) -> None:
+        with mock.patch("cc_loop.runner_control._read_proc_cmdline", return_value="sleep 999"):
+            self.assertFalse(validate_pid_ownership(os.getpid(), "ctrl-task"))
+
+    def test_validate_pid_ownership_falls_back_to_heartbeat_when_ps_fails(self) -> None:
+        write_heartbeat(
+            self.state_root,
+            RunnerHeartbeat(
+                task_id="ctrl-task",
+                pid=os.getpid(),
+                started_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                status="running",
+                phase="executing",
+                iteration=1,
+            ),
+        )
+        with mock.patch("cc_loop.runner_control._read_proc_cmdline", return_value=""):
+            self.assertTrue(validate_pid_ownership(os.getpid(), "ctrl-task", state_root=self.state_root))
+
+    def test_read_proc_cmdline_falls_back_to_ps_when_proc_unavailable(self) -> None:
+        with mock.patch("cc_loop.runner_control.Path.is_file", return_value=False):
+            with mock.patch("cc_loop.runner_control._read_ps_cmdline", return_value="python -m cc_loop.cli"):
+                self.assertIn("cc_loop.cli", _read_proc_cmdline(os.getpid()))
+
+    def test_read_proc_cmdline_prefers_proc_when_available(self) -> None:
+        with mock.patch("cc_loop.runner_control.Path.is_file", return_value=True):
+            with mock.patch(
+                "cc_loop.runner_control.Path.read_bytes",
+                return_value=b"python\x00-m\x00cc_loop.cli\x00",
+            ):
+                self.assertIn("cc_loop.cli", _read_proc_cmdline(os.getpid()))

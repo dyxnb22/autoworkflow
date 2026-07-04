@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from cc_loop.config import LoopConfig
+
+DEFAULT_GIT_TIMEOUT_SECONDS = 60
+
+_ARTIFACT_WARNING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(^|/)__pycache__(/|$)"), "__pycache__"),
+    (re.compile(r"\.pyc$"), "*.pyc"),
+    (re.compile(r"(^|/)\.DS_Store$"), ".DS_Store"),
+    (re.compile(r"\.egg-info(/|$)"), "*.egg-info"),
+    (re.compile(r"(^|/)\.pytest_cache(/|$)"), ".pytest_cache"),
+)
 
 
 class GitError(Exception):
@@ -27,14 +41,41 @@ class GitCommandError(GitError):
         self.result = result
 
 
-def _run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        shell=False,
-        check=False,
-    )
+def resolve_git_timeout_seconds(config: LoopConfig | dict | None = None) -> int:
+    if config is None:
+        return DEFAULT_GIT_TIMEOUT_SECONDS
+    try:
+        value = int(config.get("git_timeout_seconds", DEFAULT_GIT_TIMEOUT_SECONDS))
+    except (TypeError, ValueError):
+        return DEFAULT_GIT_TIMEOUT_SECONDS
+    return max(1, value)
+
+
+def _format_git_args(args: tuple[str, ...]) -> str:
+    return " ".join(("git", *args))
+
+
+def _run_git(
+    repo: Path,
+    *args: str,
+    check: bool = True,
+    timeout_seconds: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_GIT_TIMEOUT_SECONDS
+    git_args = ["git", "-C", str(repo), *args]
+    try:
+        completed = subprocess.run(
+            git_args,
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(
+            f"git command timed out after {timeout}s: {_format_git_args(args)}"
+        ) from exc
     if check and completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise GitError(stderr or f"git {' '.join(args)} failed")
@@ -145,8 +186,8 @@ def prune_worktrees(repo: Path) -> None:
     _run_git(repo, "worktree", "prune")
 
 
-def rev_parse(repo: Path, ref: str = "HEAD") -> str:
-    completed = _run_git(repo, "rev-parse", ref)
+def rev_parse(repo: Path, ref: str = "HEAD", *, timeout_seconds: int | None = None) -> str:
+    completed = _run_git(repo, "rev-parse", ref, timeout_seconds=timeout_seconds)
     return completed.stdout.strip()
 
 
@@ -203,13 +244,64 @@ def capture_worktree_diff_metadata(
     }
 
 
-def commit_worktree_changes(worktree: Path, message: str) -> str | None:
+def _artifact_warnings_for_paths(paths: list[str]) -> list[str]:
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        for pattern, label in _ARTIFACT_WARNING_PATTERNS:
+            if pattern.search(path) and label not in seen:
+                seen.add(label)
+                warnings.append(f"staged generated artifact: {label} ({path})")
+    return warnings
+
+
+def _write_commit_staging_report(
+    path: Path,
+    *,
+    porcelain_before: list[str],
+    staged_files: list[str],
+    artifact_warnings: list[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "porcelain_before": porcelain_before,
+        "staged_files": staged_files,
+        "artifact_warnings": artifact_warnings,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def commit_worktree_changes(
+    worktree: Path,
+    message: str,
+    *,
+    staging_report_path: Path | None = None,
+    timeout_seconds: int | None = None,
+) -> str | None:
     """Stage and commit all worktree changes when dirty; return new HEAD or None."""
     if is_clean(worktree):
-        return rev_parse(worktree, "HEAD")
-    _run_git(worktree, "add", "-A")
-    _run_git(worktree, "commit", "-m", message)
-    return rev_parse(worktree, "HEAD")
+        return rev_parse(worktree, "HEAD", timeout_seconds=timeout_seconds)
+    porcelain_before = dirty_files(worktree)
+    _run_git(worktree, "add", "-A", timeout_seconds=timeout_seconds)
+    staged_result = _run_git(
+        worktree,
+        "diff",
+        "--cached",
+        "--name-only",
+        check=False,
+        timeout_seconds=timeout_seconds,
+    )
+    staged_files = [line.strip() for line in staged_result.stdout.splitlines() if line.strip()]
+    artifact_warnings = _artifact_warnings_for_paths(staged_files)
+    if staging_report_path is not None:
+        _write_commit_staging_report(
+            staging_report_path,
+            porcelain_before=porcelain_before,
+            staged_files=staged_files,
+            artifact_warnings=artifact_warnings,
+        )
+    _run_git(worktree, "commit", "-m", message, timeout_seconds=timeout_seconds)
+    return rev_parse(worktree, "HEAD", timeout_seconds=timeout_seconds)
 
 
 def current_branch(repo: Path) -> str:

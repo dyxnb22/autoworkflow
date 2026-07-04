@@ -48,6 +48,7 @@ class LoopConfig(TypedDict, total=False):
     review_context_mode: str
     review_inline_patch_threshold: int
     provider_watchdog_grace_seconds: int
+    git_timeout_seconds: int
 
 
 DEFAULT_CONFIG: LoopConfig = {
@@ -91,6 +92,7 @@ DEFAULT_CONFIG: LoopConfig = {
     "review_context_mode": "hybrid",
     "review_inline_patch_threshold": 8000,
     "provider_watchdog_grace_seconds": 5,
+    "git_timeout_seconds": 60,
 }
 
 

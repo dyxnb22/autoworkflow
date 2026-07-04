@@ -53,6 +53,15 @@ _TERMINAL_STOP_KEYWORDS = (
     "cannot proceed",
 )
 
+_FIXABLE_TEST_MISSING_PHRASES = (
+    "tests missing",
+    "missing tests",
+    "add tests",
+    "no tests were added",
+    "cannot proceed without tests",
+    "test command missing",
+)
+
 _CONFLICT_FILE_RE = re.compile(r"CONFLICT.*?:\s*(?:Merge conflict in\s+)?(.+)$", re.MULTILINE)
 _PYTEST_FAILED_RE = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
 _PYTEST_COLLECTION_RE = re.compile(r"ERROR collecting\s+(\S+)", re.MULTILINE | re.IGNORECASE)
@@ -607,6 +616,19 @@ def classify_reviewer_outcome(attempt: AttemptRecord) -> FailureReport | None:
     retry_prompt = str(review_json.get("retry_prompt", "")).strip()
     issues = _issues_text(review_json)
     combined = f"{stop_reason}\n{issues}\n{retry_prompt}".lower()
+
+    if any(phrase in combined for phrase in _FIXABLE_TEST_MISSING_PHRASES):
+        return FailureReport(
+            failure_type=FailureType.TEST_IMPLEMENTATION,
+            disposition=RecoveryDisposition.RECOVERABLE,
+            message="reviewer stop due to missing or insufficient tests",
+            stop_reason=stop_reason or review_json.get("reason", ""),
+            details={"issues": review_json.get("issues", []), "retry_prompt": retry_prompt},
+            suggested_actions=[
+                "Add or update tests to cover the implementation",
+                "Run implementer repair using reviewer retry_prompt when provided",
+            ],
+        )
 
     if any(keyword in combined for keyword in _TERMINAL_STOP_KEYWORDS):
         return FailureReport(

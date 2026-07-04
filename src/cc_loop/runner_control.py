@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -37,15 +38,35 @@ class RunnerControlResult:
         return data
 
 
+_PS_CMDLINE_TIMEOUT_SECONDS = 5.0
+
+
 def _read_proc_cmdline(pid: int) -> str:
     proc_path = Path(f"/proc/{pid}/cmdline")
-    if not proc_path.is_file():
-        return ""
+    if proc_path.is_file():
+        try:
+            raw = proc_path.read_bytes()
+            return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        except OSError:
+            pass
+    return _read_ps_cmdline(pid)
+
+
+def _read_ps_cmdline(pid: int) -> str:
     try:
-        raw = proc_path.read_bytes()
-        return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
-    except OSError:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+            timeout=_PS_CMDLINE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
 
 
 def validate_pid_ownership(pid: int, task_id: str, *, state_root: Path | None = None) -> bool:

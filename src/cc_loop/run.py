@@ -1228,8 +1228,17 @@ def run_planning_phase(
     try:
         plan_json = provider.parse_planner_output(last_message_path)
     except (json.JSONDecodeError, KeyError, TypeError, NotImplementedError) as exc:
+        parse_error = f"planner output parse failed: {exc}"
+        report = classify_provider_failure(
+            phase=AttemptPhase.PLANNING.value,
+            provider=provider_name,
+            parse_error=parse_error,
+        )
+        persist_failure_state(state, attempt, report, artifact_paths)
+        mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+        save_state(state, state_root)
         _mark_planning_failed(state, state_root)
-        raise PlanningError(f"planner output parse failed: {exc}") from exc
+        raise PlanningError(parse_error) from exc
 
     artifact_paths["plan_parsed"].write_text(
         json.dumps(plan_json, indent=2) + "\n",
@@ -1551,6 +1560,36 @@ def run_implementer_phase(
         _mark_implementer_failed(state, state_root)
         raise ImplementingError(f"{provider_name} implementer timed out")
 
+    hung = bool(
+        getattr(run_result, "hung", False)
+        or (
+            run_result.killed
+            and not run_result.timed_out
+            and not run_result.interrupted
+            and run_result.exit_code != 0
+        )
+    )
+    if hung:
+        report = _provider_failure_report(
+            provider_name=provider_name,
+            phase=AttemptPhase.EXECUTING.value,
+            run_result=run_result,
+        )
+        persist_failure_state(state, attempt, report, artifact_paths)
+        mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+        save_state(state, state_root)
+        _update_implementer_trace(
+            state=state,
+            attempt=attempt,
+            artifact_paths=artifact_paths,
+            config=config,
+            status="hung",
+            exit_code=run_result.exit_code,
+            error=f"{provider_name} implementer hung",
+        )
+        _mark_implementer_failed(state, state_root)
+        raise ImplementingError(f"{provider_name} implementer hung and was force-killed")
+
     if run_result.interrupted:
         report = _provider_failure_report(
             provider_name=provider_name,
@@ -1564,6 +1603,14 @@ def run_implementer_phase(
         raise ImplementingError(f"{provider_name} implementer interrupted")
 
     if run_result.exit_code != 0:
+        report = _provider_failure_report(
+            provider_name=provider_name,
+            phase=AttemptPhase.EXECUTING.value,
+            run_result=run_result,
+        )
+        persist_failure_state(state, attempt, report, artifact_paths)
+        mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+        save_state(state, state_root)
         _update_implementer_trace(
             state=state,
             attempt=attempt,
@@ -1849,6 +1896,14 @@ def run_review_phase(
         review_last_message_paths.append(str(last_message_path))
 
         if run_result.timed_out:
+            report = _provider_failure_report(
+                provider_name=provider_name,
+                phase=AttemptPhase.REVIEWING.value,
+                run_result=run_result,
+            )
+            persist_failure_state(state, attempt, report, artifact_paths)
+            mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+            save_state(state, state_root)
             _update_review_trace(
                 state=state,
                 attempt=attempt,
@@ -1863,7 +1918,47 @@ def run_review_phase(
             _mark_review_failed(state, state_root, attempt=attempt)
             raise ReviewError(f"{provider_name} reviewer timed out")
 
+        hung = bool(
+            getattr(run_result, "hung", False)
+            or (
+                run_result.killed
+                and not run_result.timed_out
+                and not run_result.interrupted
+                and run_result.exit_code != 0
+            )
+        )
+        if hung:
+            report = _provider_failure_report(
+                provider_name=provider_name,
+                phase=AttemptPhase.REVIEWING.value,
+                run_result=run_result,
+            )
+            persist_failure_state(state, attempt, report, artifact_paths)
+            mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+            save_state(state, state_root)
+            _update_review_trace(
+                state=state,
+                attempt=attempt,
+                artifact_paths=artifact_paths,
+                config=config,
+                status="hung",
+                raw_paths=review_raw_paths,
+                last_message_paths=review_last_message_paths,
+                metrics=review_prompt_metrics,
+                error=f"{provider_name} reviewer hung",
+            )
+            _mark_review_failed(state, state_root, attempt=attempt)
+            raise ReviewError(f"{provider_name} reviewer hung and was force-killed")
+
         if run_result.exit_code != 0:
+            report = _provider_failure_report(
+                provider_name=provider_name,
+                phase=AttemptPhase.REVIEWING.value,
+                run_result=run_result,
+            )
+            persist_failure_state(state, attempt, report, artifact_paths)
+            mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+            save_state(state, state_root)
             _update_review_trace(
                 state=state,
                 attempt=attempt,
@@ -1896,6 +1991,15 @@ def run_review_phase(
         try:
             review_json = provider.parse_reviewer_output(last_message_path)
         except (json.JSONDecodeError, KeyError, TypeError, NotImplementedError) as exc:
+            parse_error = f"reviewer output parse failed: {exc}"
+            report = classify_provider_failure(
+                phase=AttemptPhase.REVIEWING.value,
+                provider=provider_name,
+                parse_error=parse_error,
+            )
+            persist_failure_state(state, attempt, report, artifact_paths)
+            mark_heartbeat_terminal(state_root, state.task_id, status="stopped", phase=attempt.phase.value)
+            save_state(state, state_root)
             _update_review_trace(
                 state=state,
                 attempt=attempt,
@@ -1905,10 +2009,10 @@ def run_review_phase(
                 raw_paths=review_raw_paths,
                 last_message_paths=review_last_message_paths,
                 metrics=review_prompt_metrics,
-                error=f"reviewer output parse failed: {exc}",
+                error=parse_error,
             )
             _mark_review_failed(state, state_root, attempt=attempt)
-            raise ReviewError(f"reviewer output parse failed: {exc}") from exc
+            raise ReviewError(parse_error) from exc
 
         review_artifact = artifact_paths["review_parsed"].parent / f"review.parsed.{idx}.json"
         review_artifact.write_text(json.dumps(review_json, indent=2) + "\n", encoding="utf-8")
@@ -2037,6 +2141,7 @@ def _run_finalize_phase(
         head = commit_worktree_changes(
             worktree,
             f"cc-loop: {state.task_id} {attempt.iteration:03d} retry {attempt.retry:02d}".strip(),
+            staging_report_path=artifact_paths["plan_prompt"].parent / "commit.staging.json",
         )
         if head:
             attempt.head_commit = head

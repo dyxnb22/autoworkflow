@@ -1,23 +1,36 @@
 # AGENTS.md
 
-Canonical agent reference for cc-loop. **Package 0.9.0.**
+Canonical agent reference for cc-loop. **Package 0.10.0.**
 
 ## Docs
 
 - [docs/INTEGRATION.md](docs/INTEGRATION.md) — external CLI/JSON contract
-- [docs/EVOLUTION.md](docs/EVOLUTION.md) — v0.4-v0.9 roadmap and implementation guidance
+- [docs/EVOLUTION.md](docs/EVOLUTION.md) — v0.4-v0.10 roadmap and implementation guidance
 - [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) — task graph orchestration (v0.4)
 - [docs/RECOVERY.md](docs/RECOVERY.md) — failure classification, repair budgets, auto dispatch
 - [docs/EXIT_CODES.md](docs/EXIT_CODES.md)
 - [CLAUDE.md](CLAUDE.md) — Claude Code entry
 - [.cursor/rules/cc-loop.mdc](.cursor/rules/cc-loop.mdc) — Cursor rules
 
+## v0.10 modules
+
+| Module | Role |
+|--------|------|
+| `prompt_cache.py` | Stable-prefix prompt caching for planner/reviewer/implementer |
+| `prompt_metadata.py` | Prompt layout metadata and cache-health artifacts |
+| `trace.py` | Provider phase trace records for status/report |
+| `execution_timeline.py` | Attempt timeline from artifacts and subprocess results |
+| `export.py` | Task export for offline inspection |
+| `evals.py` | Eval case runner and result aggregation |
+| `provider_runtime.py` | Provider subprocess wrapper with heartbeat + watchdog |
+| `subprocess_util.py` | Timeout-safe subprocess execution and process-group cleanup |
+
 ## v0.5–v0.9 modules
 
 | Module | Role |
 |--------|------|
 | `runner_heartbeat.py` | Detached runner heartbeat read/write/staleness |
-| `runner_control.py` | `stop`, `cancel`, `cleanup` |
+| `runner_control.py` | `stop`, `cancel`, `cleanup`; cross-platform PID ownership |
 | `events.py` | Append-only `events.jsonl` / `graph_events.jsonl` |
 | `report.py` | `cc-loop report` human + JSON |
 | `graph_patch.py` | Dynamic replanning patch model + validation |
@@ -52,4 +65,4 @@ Planner prefers `mode: task_graph` JSON; legacy single-step JSON auto-wraps to o
 python -m pytest tests/ -q
 ```
 
-Graph tests: `test_task_graph.py`. Recovery tests: `test_failure_classification.py`, `test_recovery_dispatch.py`, `test_auto_recovery.py`
+Graph tests: `test_task_graph.py`. Recovery tests: `test_failure_classification.py`, `test_recovery_dispatch.py`, `test_auto_recovery.py`. Provider/subprocess: `test_subprocess_util.py`, `test_provider_failure_paths.py`.

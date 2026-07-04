@@ -125,6 +125,42 @@ class FailureClassificationTests(unittest.TestCase):
         self.assertEqual(report.failure_type, FailureType.REVIEWER_STOP_FIXABLE)
         self.assertEqual(report.disposition, RecoveryDisposition.RECOVERABLE)
 
+    def test_reviewer_stop_missing_tests_is_not_terminal(self) -> None:
+        attempt = AttemptRecord(
+            iteration=1,
+            retry=0,
+            created_at="t",
+            base_commit="abc",
+            decision="stop",
+            review_json={
+                "stop_reason": "cannot proceed without tests",
+                "issues": [],
+                "retry_prompt": "Add unit tests for the new module",
+            },
+        )
+        report = classify_reviewer_outcome(attempt)
+        assert report is not None
+        self.assertEqual(report.failure_type, FailureType.TEST_IMPLEMENTATION)
+        self.assertEqual(report.disposition, RecoveryDisposition.RECOVERABLE)
+
+    def test_reviewer_stop_external_blocker_remains_terminal(self) -> None:
+        attempt = AttemptRecord(
+            iteration=1,
+            retry=0,
+            created_at="t",
+            base_commit="abc",
+            decision="stop",
+            review_json={
+                "stop_reason": "cannot proceed without API access",
+                "issues": ["external dependency blocked"],
+                "retry_prompt": "",
+            },
+        )
+        report = classify_reviewer_outcome(attempt)
+        assert report is not None
+        self.assertEqual(report.failure_type, FailureType.REVIEWER_STOP_TERMINAL)
+        self.assertEqual(report.disposition, RecoveryDisposition.TERMINAL)
+
 
 if __name__ == "__main__":
     unittest.main()
