@@ -62,6 +62,7 @@ class ReviewContextModeTests(unittest.TestCase):
         self.assertIn("### Patch artifact references", prompt)
         self.assertIn(str(paths["test_output"]), prompt)
         self.assertIn(str(paths["patches_dir"]), prompt)
+        self.assertIn(str(paths["patches_dir"] / "000-big.txt.patch"), prompt)
         self.assertIn("Omitted patch chars: 9000", prompt)
 
     def test_artifact_refs_mode_never_inlines_patch(self) -> None:

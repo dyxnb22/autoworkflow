@@ -36,6 +36,7 @@ from cc_loop.git import (
     capture_worktree_diff_metadata,
     commit_worktree_changes,
     merge_branch_into_base,
+    resolve_git_timeout_seconds,
 )
 from cc_loop.preflight import PreflightResult, run_preflight
 from cc_loop.prompt_cache import (
@@ -529,12 +530,15 @@ def _refresh_worktree_diff_artifacts(
     attempt: AttemptRecord,
     artifact_paths: dict[str, Path],
     worktree: Path,
+    *,
+    timeout_seconds: int | None = None,
 ) -> dict[str, object]:
     diff_metadata = capture_worktree_diff_metadata(
         worktree,
         attempt.base_commit,
         diff_stat_path=artifact_paths["diff_stat"],
         diff_files_path=artifact_paths["diff_files"],
+        timeout_seconds=timeout_seconds,
     )
     attempt.head_commit = str(diff_metadata["head_commit"])
     attempt.diff_stat_path = str(artifact_paths["diff_stat"])
@@ -559,7 +563,12 @@ def reconcile_patch_not_captured(
     if not worktree.is_dir():
         return False
 
-    diff_metadata = _refresh_worktree_diff_artifacts(attempt, artifact_paths, worktree)
+    diff_metadata = _refresh_worktree_diff_artifacts(
+        attempt,
+        artifact_paths,
+        worktree,
+        timeout_seconds=resolve_git_timeout_seconds(state.config),
+    )
     if not is_patch_capture_resolved(
         worktree=worktree,
         base_commit=attempt.base_commit,
@@ -713,7 +722,12 @@ def execute_repair_recovery(
     )
 
     if report.failure_type == FailureType.PATCH_NOT_CAPTURED:
-        diff_metadata = _refresh_worktree_diff_artifacts(attempt, artifact_paths, worktree)
+        diff_metadata = _refresh_worktree_diff_artifacts(
+            attempt,
+            artifact_paths,
+            worktree,
+            timeout_seconds=resolve_git_timeout_seconds(state.config),
+        )
         if is_patch_capture_resolved(
             worktree=worktree,
             base_commit=attempt.base_commit,
@@ -863,7 +877,12 @@ def _run_from_phase(
         attempt = _current_attempt(state)
         if attempt.failure_type == FailureType.PATCH_NOT_CAPTURED.value:
             worktree = Path(attempt.worktree_path)
-            diff_metadata = _refresh_worktree_diff_artifacts(attempt, artifact_paths, worktree)
+            diff_metadata = _refresh_worktree_diff_artifacts(
+                attempt,
+                artifact_paths,
+                worktree,
+                timeout_seconds=resolve_git_timeout_seconds(state.config),
+            )
             _stop_for_patch_not_captured(
                 state,
                 state_root,
@@ -1148,6 +1167,7 @@ def run_planning_phase(
                 path=worktree,
                 branch=attempt.branch,
                 base_commit=attempt.base_commit,
+                timeout_seconds=resolve_git_timeout_seconds(config),
             )
         except GitError as exc:
             _mark_planning_failed(state, state_root)
@@ -1359,6 +1379,7 @@ def _run_graph_node_setup(
                 path=worktree,
                 branch=attempt.branch,
                 base_commit=attempt.base_commit,
+                timeout_seconds=resolve_git_timeout_seconds(config),
             )
         except GitError as exc:
             if attempt.graph_node_id:
@@ -1521,6 +1542,7 @@ def run_implementer_phase(
         attempt.base_commit,
         diff_stat_path=artifact_paths["diff_stat"],
         diff_files_path=artifact_paths["diff_files"],
+        timeout_seconds=resolve_git_timeout_seconds(config),
     )
     attempt.head_commit = str(diff_metadata["head_commit"])
     attempt.diff_stat_path = str(artifact_paths["diff_stat"])
@@ -2142,6 +2164,7 @@ def _run_finalize_phase(
             worktree,
             f"cc-loop: {state.task_id} {attempt.iteration:03d} retry {attempt.retry:02d}".strip(),
             staging_report_path=artifact_paths["plan_prompt"].parent / "commit.staging.json",
+            timeout_seconds=resolve_git_timeout_seconds(config),
         )
         if head:
             attempt.head_commit = head
@@ -2152,6 +2175,7 @@ def _run_finalize_phase(
             configured_base_branch=str(config.get("base_branch", state.base_branch)),
             message=f"cc-loop: merge {attempt.branch}",
             merge_worktree_path=_merge_worktree_path(state, attempt),
+            timeout_seconds=resolve_git_timeout_seconds(config),
         )
         attempt.merge_error = ""
         artifact_paths["merge_output"].write_text(
@@ -2698,8 +2722,9 @@ def build_reviewer_prompt(
     diff_files_path = ""
     test_output_path = ""
     patches_dir = ""
-    selected_patch_paths = ""
+    selected_patch_path_lines = ""
     selected_patch_count = 0
+    selected_patches = list(patch_paths or [])
     omitted_patch_chars = 0 if inline_patch else patch_body_chars
     omitted_diff_stat_chars = 0 if inline_diff_stat else len(diff_stat)
     estimated_avoided_tokens = _estimated_tokens_from_chars(
@@ -2712,9 +2737,9 @@ def build_reviewer_prompt(
         diff_files_path = str(artifact_paths["diff_files"])
         test_output_path = str(artifact_paths["test_output"])
         patches_dir = str(artifact_paths["patches_dir"])
-        selected_patch_count = len(list(patch_paths or []))
-        if context_mode == "inline":
-            selected_patch_paths = format_patch_path_list(list(patch_paths or []))
+        selected_patch_count = len(selected_patches)
+        if not inline_patch:
+            selected_patch_path_lines = format_patch_path_list(selected_patches)
 
     allow_merge_without_tests = bool(config.get("allow_merge_without_tests", False))
     contract_prefix = (
@@ -2790,8 +2815,8 @@ def build_reviewer_prompt(
         f"- Patches directory: {patches_dir or '(unknown)'}",
         f"- Patch file count: {selected_patch_count}",
     ]
-    if selected_patch_paths:
-        dynamic_lines.extend(["- Selected patch paths:", selected_patch_paths])
+    if selected_patch_path_lines:
+        dynamic_lines.extend(["- Selected patch paths:", selected_patch_path_lines])
     dynamic_lines.extend(
         [
             f"- Omitted patch chars: {omitted_patch_chars}",
@@ -2826,7 +2851,7 @@ def build_reviewer_prompt(
     else:
         dynamic_payload += (
             "### Patch artifact references\n"
-            "Patch content is not inlined. Inspect patches_dir, diff.files.txt, or worktree git diff before approving.\n"
+            "Patch content is not inlined. Inspect selected patch paths, patches_dir, diff.files.txt, or worktree git diff before approving.\n"
         )
 
     return (contract_prefix + task_context + dynamic_payload).strip() + "\n"
@@ -3118,6 +3143,7 @@ def _run_implementer_with_prompt(
         attempt.base_commit,
         diff_stat_path=artifact_paths["diff_stat"],
         diff_files_path=artifact_paths["diff_files"],
+        timeout_seconds=resolve_git_timeout_seconds(config),
     )
     attempt.head_commit = str(diff_metadata["head_commit"])
     attempt.diff_stat_path = str(artifact_paths["diff_stat"])

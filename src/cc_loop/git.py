@@ -82,8 +82,12 @@ def _run_git(
     return completed
 
 
-def _run_git_detailed(repo: Path, *args: str) -> GitCommandResult:
-    completed = _run_git(repo, *args, check=False)
+def _run_git_detailed(
+    repo: Path,
+    *args: str,
+    timeout_seconds: int | None = None,
+) -> GitCommandResult:
+    completed = _run_git(repo, *args, check=False, timeout_seconds=timeout_seconds)
     return GitCommandResult(
         returncode=completed.returncode,
         stdout=completed.stdout,
@@ -106,14 +110,14 @@ def git_toplevel(repo: Path) -> Path:
     return Path(completed.stdout.strip()).resolve()
 
 
-def dirty_files(repo: Path) -> list[str]:
-    completed = _run_git(repo, "status", "--porcelain")
+def dirty_files(repo: Path, *, timeout_seconds: int | None = None) -> list[str]:
+    completed = _run_git(repo, "status", "--porcelain", timeout_seconds=timeout_seconds)
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     return lines
 
 
-def is_clean(repo: Path) -> bool:
-    return not dirty_files(repo)
+def is_clean(repo: Path, *, timeout_seconds: int | None = None) -> bool:
+    return not dirty_files(repo, timeout_seconds=timeout_seconds)
 
 
 def resolve_base_branch(repo: Path, branch: str) -> str:
@@ -158,6 +162,7 @@ def add_worktree(
     path: Path,
     branch: str,
     base_commit: str,
+    timeout_seconds: int | None = None,
 ) -> Path:
     """Create an isolated worktree branch at ``base_commit``.
 
@@ -168,17 +173,23 @@ def add_worktree(
     if path.exists():
         raise GitError(f"worktree path already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(repo, "worktree", "add", "-b", branch, str(path), base_commit)
+    _run_git(repo, "worktree", "add", "-b", branch, str(path), base_commit, timeout_seconds=timeout_seconds)
     return path
 
 
-def remove_worktree(repo: Path, path: Path, *, force: bool = False) -> None:
+def remove_worktree(
+    repo: Path,
+    path: Path,
+    *,
+    force: bool = False,
+    timeout_seconds: int | None = None,
+) -> None:
     """Remove a worktree registered against ``repo``."""
     args = ["worktree", "remove"]
     if force:
         args.append("--force")
     args.append(str(path))
-    _run_git(repo, *args)
+    _run_git(repo, *args, timeout_seconds=timeout_seconds)
 
 
 def prune_worktrees(repo: Path) -> None:
@@ -191,8 +202,8 @@ def rev_parse(repo: Path, ref: str = "HEAD", *, timeout_seconds: int | None = No
     return completed.stdout.strip()
 
 
-def _git_output(repo: Path, *args: str) -> str:
-    completed = _run_git(repo, *args, check=False)
+def _git_output(repo: Path, *args: str, timeout_seconds: int | None = None) -> str:
+    completed = _run_git(repo, *args, check=False, timeout_seconds=timeout_seconds)
     return completed.stdout
 
 
@@ -202,10 +213,11 @@ def capture_worktree_diff_metadata(
     *,
     diff_stat_path: Path,
     diff_files_path: Path,
+    timeout_seconds: int | None = None,
 ) -> dict[str, object]:
     """Capture porcelain status and diff summaries for later review phases."""
-    porcelain = dirty_files(repo)
-    head_commit = rev_parse(repo, "HEAD")
+    porcelain = dirty_files(repo, timeout_seconds=timeout_seconds)
+    head_commit = rev_parse(repo, "HEAD", timeout_seconds=timeout_seconds)
 
     status_section = "\n".join(porcelain) if porcelain else "(clean)"
     stat_sections: list[str] = []
@@ -216,10 +228,10 @@ def capture_worktree_diff_metadata(
         ("working tree vs HEAD", ("diff", "--stat", "HEAD"), ("diff", "--name-only", "HEAD")),
         ("staged vs HEAD", ("diff", "--cached", "--stat"), ("diff", "--cached", "--name-only")),
     ):
-        stat_text = _git_output(repo, *stat_args).strip()
+        stat_text = _git_output(repo, *stat_args, timeout_seconds=timeout_seconds).strip()
         if stat_text:
             stat_sections.append(f"## {label}\n{stat_text}")
-        name_text = _git_output(repo, *name_args).strip()
+        name_text = _git_output(repo, *name_args, timeout_seconds=timeout_seconds).strip()
         if name_text:
             file_sections.append(f"## {label}\n{name_text}")
 
@@ -233,7 +245,10 @@ def capture_worktree_diff_metadata(
         encoding="utf-8",
     )
 
-    has_committed_changes = bool(_git_output(repo, "rev-list", "--count", f"{base_commit}..HEAD").strip() not in {"", "0"})
+    has_committed_changes = bool(
+        _git_output(repo, "rev-list", "--count", f"{base_commit}..HEAD", timeout_seconds=timeout_seconds).strip()
+        not in {"", "0"}
+    )
     has_changes = bool(porcelain) or has_committed_changes or bool(stat_sections)
 
     return {
@@ -279,9 +294,9 @@ def commit_worktree_changes(
     timeout_seconds: int | None = None,
 ) -> str | None:
     """Stage and commit all worktree changes when dirty; return new HEAD or None."""
-    if is_clean(worktree):
+    if is_clean(worktree, timeout_seconds=timeout_seconds):
         return rev_parse(worktree, "HEAD", timeout_seconds=timeout_seconds)
-    porcelain_before = dirty_files(worktree)
+    porcelain_before = dirty_files(worktree, timeout_seconds=timeout_seconds)
     _run_git(worktree, "add", "-A", timeout_seconds=timeout_seconds)
     staged_result = _run_git(
         worktree,
@@ -304,14 +319,14 @@ def commit_worktree_changes(
     return rev_parse(worktree, "HEAD", timeout_seconds=timeout_seconds)
 
 
-def current_branch(repo: Path) -> str:
+def current_branch(repo: Path, *, timeout_seconds: int | None = None) -> str:
     """Return the short branch name for ``HEAD``, or ``HEAD`` when detached."""
-    completed = _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    completed = _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD", timeout_seconds=timeout_seconds)
     return completed.stdout.strip()
 
 
-def branch_ref_exists(repo: Path, ref: str) -> bool:
-    completed = _run_git(repo, "rev-parse", "--verify", ref, check=False)
+def branch_ref_exists(repo: Path, ref: str, *, timeout_seconds: int | None = None) -> bool:
+    completed = _run_git(repo, "rev-parse", "--verify", ref, check=False, timeout_seconds=timeout_seconds)
     return completed.returncode == 0
 
 
@@ -320,13 +335,14 @@ def resolve_merge_target_branch(
     *,
     resolved_base_branch: str,
     configured_base_branch: str,
+    timeout_seconds: int | None = None,
 ) -> str:
     """Return the local branch ref that should receive an auto-merge."""
     if not resolved_base_branch.startswith("origin/"):
         return resolved_base_branch
 
     local_name = configured_base_branch
-    if branch_ref_exists(repo, local_name):
+    if branch_ref_exists(repo, local_name, timeout_seconds=timeout_seconds):
         return local_name
 
     raise GitError(
@@ -348,8 +364,17 @@ def _merge_in_repo(
     source_branch: str,
     *,
     message: str,
+    timeout_seconds: int | None = None,
 ) -> GitCommandResult:
-    return _run_git_detailed(repo, "merge", "--no-ff", "-m", message, source_branch)
+    return _run_git_detailed(
+        repo,
+        "merge",
+        "--no-ff",
+        "-m",
+        message,
+        source_branch,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def merge_branch_into_base(
@@ -360,6 +385,7 @@ def merge_branch_into_base(
     configured_base_branch: str,
     message: str,
     merge_worktree_path: Path,
+    timeout_seconds: int | None = None,
 ) -> str:
     """Merge ``source_branch`` into the task's base branch without switching main checkout.
 
@@ -371,17 +397,18 @@ def merge_branch_into_base(
         target_repo,
         resolved_base_branch=resolved_base_branch,
         configured_base_branch=configured_base_branch,
+        timeout_seconds=timeout_seconds,
     )
-    checkout_branch = current_branch(target_repo)
+    checkout_branch = current_branch(target_repo, timeout_seconds=timeout_seconds)
 
     if checkout_branch == merge_target:
-        result = _merge_in_repo(target_repo, source_branch, message=message)
+        result = _merge_in_repo(target_repo, source_branch, message=message, timeout_seconds=timeout_seconds)
         if result.returncode != 0:
             raise GitCommandError(
                 _format_git_command_error("merge into base branch failed", result),
                 result=result,
             )
-        return rev_parse(target_repo, merge_target)
+        return rev_parse(target_repo, merge_target, timeout_seconds=timeout_seconds)
 
     if merge_worktree_path.exists():
         raise GitError(f"merge worktree path already exists: {merge_worktree_path}")
@@ -393,6 +420,7 @@ def merge_branch_into_base(
         "add",
         str(merge_worktree_path),
         merge_target,
+        timeout_seconds=timeout_seconds,
     )
     if add_result.returncode != 0:
         detail = add_result.stderr.strip() or add_result.stdout.strip()
@@ -408,13 +436,13 @@ def merge_branch_into_base(
         )
 
     try:
-        result = _merge_in_repo(merge_worktree_path, source_branch, message=message)
+        result = _merge_in_repo(merge_worktree_path, source_branch, message=message, timeout_seconds=timeout_seconds)
         if result.returncode != 0:
             raise GitCommandError(
                 _format_git_command_error("merge into base branch failed", result),
                 result=result,
             )
-        return rev_parse(target_repo, merge_target)
+        return rev_parse(target_repo, merge_target, timeout_seconds=timeout_seconds)
     finally:
         remove_result = _run_git_detailed(
             target_repo,
@@ -422,6 +450,7 @@ def merge_branch_into_base(
             "remove",
             "--force",
             str(merge_worktree_path),
+            timeout_seconds=timeout_seconds,
         )
         if remove_result.returncode != 0:
             prune_worktrees(target_repo)
