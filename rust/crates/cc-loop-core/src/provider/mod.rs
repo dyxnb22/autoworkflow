@@ -3,7 +3,8 @@
 mod fake;
 
 pub use fake::{
-    fake_providers_enabled, fake_reviewer_rejects_remaining, set_fake_reviewer_rejects, FakeProvider,
+    fake_providers_enabled, fake_reviewer_rejects_remaining, set_fake_reviewer_p0_approves,
+    set_fake_reviewer_rejects, FakeProvider,
 };
 
 use std::fs;

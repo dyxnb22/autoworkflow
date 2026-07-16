@@ -42,7 +42,7 @@ cc-loop summary --task-id ID --json
 | 测试门 | `auto`/`run`/`resume` 无 `test_command` → 拒绝启动（CLI + preflight error）；测试红/`skipped` → 不得 review 过关；红测走 repair/`resume` |
 | reject→实现 | `decision=reject` → `Stopped` + `next_action≈resume`；下一轮 implementer 带上拒绝原因 |
 
-**质量门（目标态）：** review issues 含 P0/P1 → 强制 reject 并返工；仅当 `blocking_counts.P0/P1 == 0` 且测试绿才 `ready_for_handoff`。
+**质量门：** review issues 含 P0/P1 → 强制 reject 并返工；仅当 `blocking_counts.P0/P1 == 0` 且测试绿才 `ready_for_handoff`。
 
 脏主仓默认阻断开跑（preflight）。不要在用户正在编辑的 main worktree 里直接改文件。
 

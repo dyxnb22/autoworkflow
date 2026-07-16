@@ -253,14 +253,14 @@ cc-loop summary --task-id status-json --json
 
 ## 落地顺序（实现指引）
 
-| 里程碑 | 内容 | 验收 |
+| 里程碑 | 内容 | 状态 |
 |--------|------|------|
-| **M1** | Reviewer 强制 structured issues + severity；引擎按 P0/P1 校正 decision | 有 P0 时无法 handoff；契约测试锁定 |
-| **M2** | `stop_policy` / `blocking_severities` 配置 + status/summary `quality` 块 | Luma 能展示阻断计数与 issues |
-| **M3** | Facet checklist 写入 reviewer 稳定前缀；`facets_covered` 落盘 | 摘要可见多维覆盖 |
-| **M4** | 可选 `review_mode=per_facet`（串行二次审查） | 默认仍 off；文档标 advanced |
+| **M1** | Reviewer structured issues + severity；引擎按 P0/P1 校正 decision | **已落地** |
+| **M2** | `stop_policy` / `blocking_severities` + status/summary `quality` | **已落地** |
+| **M3** | Facet checklist 写入 reviewer 稳定前缀；`facets_covered` | **已落地** |
+| **M4** | 可选 `review_mode=per_facet`（串行；默认 `structured_single`） | **已落地** |
 
-文档先行 → M1 起改代码；破坏 JSON 则升 `schema_version` 或按 INTEGRATION 做 minor 加法。
+破坏 JSON 则升 `schema_version` 或按 INTEGRATION 做 minor 加法。
 
 ---
 
@@ -271,12 +271,9 @@ cc-loop summary --task-id status-json --json
 - 分角色 plan / implement / test / review 闭环  
 - 写≠审、测试门、reject→实现  
 - `ready_for_handoff`、worktree、resume/stop、delivery JSON 卡  
+- **Severity 硬门禁**（`apply_quality_gate`；P0/P1 强制 reject）  
+- **`stop_policy=no_p0_p1`（默认）** + `blocking_severities`  
+- **多维 facet checklist**（structured_single）与可选 **`per_facet`**  
+- Luma **`quality.*`** / `delivery.quality`  
 
-**本文补齐的产品级缺口（待实现）：**
-
-- Severity 作为 **硬门禁**（不只靠 prompt）  
-- 可配置停止条件（默认无 P0/P1）  
-- 多维审查 checklist / 可选分 facet 再审  
-- Luma `quality.*` 字段  
-
-在引擎落地前：可用 reviewer prompt **约定** P0/P1 语义做软约束，但 **不以**「模型自觉」当作产品完成定义。
+引擎执行 severity，不以「模型口头说没问题」代替门禁。

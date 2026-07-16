@@ -25,7 +25,7 @@ goal → plan → implement（另一角色/CLI）→ test → review（多维 / 
 | **测试门不可关** | `auto`/`run`/`resume` 没有 `test_command` 直接拒绝；红测/`skipped` 不能当成功 |
 | **审核拒绝 → 重回实现** | `reject` 进入可恢复状态；带着原因再跑 implementer——状态机在转，不是聊完就散 |
 
-**产品级补齐中（见 WORKFLOW）：** 审查 issues 强制 P0/P1 分级 · 无 P0/P1 才 handoff · 多维 review checklist。
+**质量门：** 审查 issues 强制 P0/P1 分级 · 无 P0/P1 才 handoff · 多维 review checklist（可选 `per_facet`）。
 
 ## Install
 
@@ -47,7 +47,7 @@ make install                 # ~/.local/bin/cc-loop
 | `test_command`（`auto`/`run`/`resume`） | **必填** | 没测试命令不挂机 |
 | `allow_merge_without_tests` | `false` | 逃生口，绝非默认 |
 | Providers | planner/reviewer `codex`，implementer `cursor` | 开箱即跨 CLI |
-| `stop_policy`（目标态） | `no_p0_p1` | 无 P0/P1 + 测试绿才交付 |
+| `stop_policy` | `no_p0_p1` | 无 P0/P1 + 测试绿才交付 |
 
 **先做厚：** worktree · plan/implement/test/review · 质量门（测试 + severity）· resume/stop · `status`/`summary --json`  
 **后做或不做：** 大任务图、多 node 并行、动态 replan、通用多 agent 框架、默认合 main
@@ -82,7 +82,7 @@ cc-loop summary --task-id my-task --json
 | Implementer 改了什么 | `diff_stat` |
 | Tests | `tests` / `attempt.test_status` |
 | Review | `decision` + `reason`；reject 时 `latest_reject_reason` |
-| 质量门（目标态） | `quality.blocking_counts` · `open_blocking_issues` |
+| 质量门 | `quality.blocking_counts` · `open_blocking_issues` |
 | 第几次重试 | `attempt.retry` / `delivery.retry` |
 | 现在能否交付 | `success`（`ready_for_handoff`）· `next_action` |
 

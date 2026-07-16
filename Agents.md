@@ -16,7 +16,7 @@ goal → plan → implement（另一角色）→ test → review（多维 / 分�
 1. **跨 provider 角色锁定** — `require_distinct_reviewer=true`
 2. **测试门默认不可关** — `auto`/`run`/`resume` 必填 `test_command`；红测/`skipped` 不能当成功
 3. **reject → 重回实现** — 状态机闭环，不是聊完就散
-4. **（目标态）P0/P1 阻断交付** — `stop_policy=no_p0_p1`；见 [docs/WORKFLOW.md](docs/WORKFLOW.md)
+4. **P0/P1 阻断交付** — 默认 `stop_policy=no_p0_p1`；见 [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
 ## Docs
 

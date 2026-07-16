@@ -2,17 +2,22 @@
 
 ## Unreleased
 
-### Docs — quality loop（产品设计先行）
+### Quality loop engine（M1–M4）
 
-- 新增 [`docs/WORKFLOW.md`](docs/WORKFLOW.md)：现代工程对照、多维审查、P0/P1 停止条件、状态机、Luma `quality.*`、落地里程碑 M1–M4。
-- README / INTEGRATION / OPERATIONS / Agents 对齐「无 P0/P1 才交付」目标态；标明已上线 vs 待实现。
+- Severity 硬门禁：`apply_quality_gate`；P0/P1（可配）强制 reject，即使模型误写 approve。
+- 配置：`stop_policy` · `blocking_severities` · `review_facets` · `review_mode`（`structured_single` 默认 / `per_facet`）。
+- Reviewer 稳定前缀含 facet checklist + structured issues JSON 契约。
+- `status`/`summary`/`delivery` 暴露 `quality.*`。
+- CLI：`--stop-policy` · `--blocking-severities` · `--review-mode` · `--review-facets`。
+- 契约：P0 误 approve → 引擎 reject → 再实现 → handoff。
 
-### Engine（已合入 harden 分支能力）
+### Docs — quality loop
 
-- **Test gate:** `run` / `resume` / `auto` 均要求 `test_command`；`skipped` 不得进入 review / `ready_for_handoff`。
-- **Preflight:** 执行路径 `require_test_command=true`；`init`/`doctor` warning-only。
-- **Luma card:** `plan_summary` · `tests` · `review` · `delivery`。
-- **Contracts:** `cc-loop-cli/tests`；reject 闭环 / 红测 / skipped。
+- [`docs/WORKFLOW.md`](docs/WORKFLOW.md) 标 M1–M4 已落地；INTEGRATION quality 字段改为已上线。
+
+### Engine（harden）
+
+- Test gate / preflight / delivery card / contract-tests 迁入 CLI（既有）。
 
 ## v0.12.0 — 分角色交付引擎（Rust）
 

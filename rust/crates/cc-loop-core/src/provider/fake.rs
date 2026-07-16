@@ -15,6 +15,8 @@ use crate::provider::{ProviderAdapter, ProviderRunResult};
 thread_local! {
     /// How many reviewer calls should return `reject` before approving (per test thread).
     static REJECTS_REMAINING: Cell<u32> = const { Cell::new(0) };
+    /// How many reviewer calls should return approve+P0 (engine must force reject).
+    static P0_APPROVE_REMAINING: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Script the next N fake reviewer decisions as reject (then approve).
@@ -26,7 +28,33 @@ pub fn fake_reviewer_rejects_remaining() -> u32 {
     REJECTS_REMAINING.with(|c| c.get())
 }
 
+/// Script N fake reviews that claim approve but include a P0 issue.
+pub fn set_fake_reviewer_p0_approves(n: u32) {
+    P0_APPROVE_REMAINING.with(|c| c.set(n));
+}
+
 fn next_reviewer_decision() -> Value {
+    // P0-with-approve takes priority for quality-gate tests.
+    let p0_left = P0_APPROVE_REMAINING.with(|c| c.get());
+    if p0_left > 0 {
+        P0_APPROVE_REMAINING.with(|c| c.set(p0_left - 1));
+        return json!({
+            "decision": "approve",
+            "reason": "fake wrongly approved despite P0",
+            "retry_prompt": "Fix the P0 finding.",
+            "issues": [{
+                "id": "fake-p0",
+                "facet": "correctness",
+                "severity": "P0",
+                "title": "fake P0 defect",
+                "detail": "injected for quality gate test",
+                "blocking": true
+            }],
+            "facets_covered": ["correctness","tests","security","reliability","maintainability","ux_cli"],
+            "blocking_counts": {"P0": 1, "P1": 0, "P2": 0, "P3": 0}
+        });
+    }
+
     REJECTS_REMAINING.with(|c| {
         let left = c.get();
         if left > 0 {
@@ -35,10 +63,26 @@ fn next_reviewer_decision() -> Value {
                 "decision": "reject",
                 "reason": "fake reject: needs another pass",
                 "retry_prompt": "Address the fake reviewer rejection.",
-                "issues": ["fake issue"]
+                "issues": [{
+                    "id": "fake-p1",
+                    "facet": "correctness",
+                    "severity": "P1",
+                    "title": "fake issue",
+                    "detail": "needs fix",
+                    "blocking": true
+                }],
+                "facets_covered": ["correctness","tests","security","reliability","maintainability","ux_cli"],
+                "blocking_counts": {"P0": 0, "P1": 1, "P2": 0, "P3": 0}
             })
         } else {
-            json!({"decision": "approve", "reason": "fake ok", "issues": []})
+            json!({
+                "decision": "approve",
+                "reason": "fake ok",
+                "retry_prompt": "",
+                "issues": [],
+                "facets_covered": ["correctness","tests","security","reliability","maintainability","ux_cli"],
+                "blocking_counts": {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+            })
         }
     })
 }
@@ -93,7 +137,10 @@ impl ProviderAdapter for FakeProvider {
         }
         let payload = if prompt.contains("planner") || prompt.contains("Return ONLY a JSON object") {
             self.parse_planner_output("")?
-        } else if prompt.contains("reviewer") || prompt.contains("\"decision\"") {
+        } else if prompt.contains("reviewer")
+            || prompt.contains("Stable Review Contract")
+            || prompt.contains("\"decision\"")
+        {
             self.parse_reviewer_output("")?
         } else {
             // implementer: touch a file in worktree
@@ -102,6 +149,8 @@ impl ProviderAdapter for FakeProvider {
                 let marker = if prompt.contains("reviewer rejection")
                     || prompt.contains("Previous review reject")
                     || prompt.contains("fake reject")
+                    || prompt.contains("blocking")
+                    || prompt.contains("P0")
                 {
                     "FAKE_REPAIR.md"
                 } else {

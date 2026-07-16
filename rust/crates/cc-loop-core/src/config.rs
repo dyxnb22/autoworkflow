@@ -58,6 +58,28 @@ pub struct LoopConfig {
     pub review_inline_patch_threshold: usize,
     pub provider_watchdog_grace_seconds: u64,
     pub git_timeout_seconds: u64,
+    /// Stop policy: `no_p0_p1` (default) | `no_p0_only` | `approve_only`.
+    #[serde(default = "default_stop_policy")]
+    pub stop_policy: String,
+    /// Severities that block handoff (default P0,P1).
+    #[serde(default = "default_blocking_severities_cfg")]
+    pub blocking_severities: Vec<String>,
+    /// Review facets to cover (empty → engine default set).
+    #[serde(default)]
+    pub review_facets: Vec<String>,
+    /// `structured_single` (default) | `per_facet`.
+    #[serde(default = "default_review_mode")]
+    pub review_mode: String,
+}
+
+fn default_stop_policy() -> String {
+    "no_p0_p1".into()
+}
+fn default_blocking_severities_cfg() -> Vec<String> {
+    vec!["P0".into(), "P1".into()]
+}
+fn default_review_mode() -> String {
+    "structured_single".into()
 }
 
 pub fn default_config() -> LoopConfig {
@@ -105,6 +127,10 @@ pub fn default_config() -> LoopConfig {
         review_inline_patch_threshold: 8000,
         provider_watchdog_grace_seconds: 5,
         git_timeout_seconds: 60,
+        stop_policy: "no_p0_p1".into(),
+        blocking_severities: vec!["P0".into(), "P1".into()],
+        review_facets: Vec::new(),
+        review_mode: "structured_single".into(),
     }
 }
 
@@ -216,6 +242,9 @@ mod tests {
         assert!(c.require_distinct_reviewer);
         assert_eq!(c.planner_granularity, "single");
         assert!(!c.allow_merge_without_tests);
+        assert_eq!(c.stop_policy, "no_p0_p1");
+        assert_eq!(c.blocking_severities, vec!["P0".to_string(), "P1".to_string()]);
+        assert_eq!(c.review_mode, "structured_single");
     }
 
     #[test]

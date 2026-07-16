@@ -12,6 +12,7 @@ use crate::paths::{
     artifacts_dir, events_path, failure_report_path, runner_log_path, state_path, task_dir,
     ArtifactPaths,
 };
+use crate::quality::build_quality_snapshot;
 use crate::recovery::decide_auto_step;
 use crate::recovery::AutoStep;
 use crate::runner::{
@@ -398,6 +399,9 @@ pub fn review_card(attempt: Option<&AttemptRecord>) -> Value {
         "decision": decision,
         "reason": reason,
         "issues": review_json.get("issues").cloned().unwrap_or(json!([])),
+        "blocking_counts": review_json.get("blocking_counts").cloned().unwrap_or(json!({})),
+        "facets_covered": review_json.get("facets_covered").cloned().unwrap_or(json!([])),
+        "quality_override": review_json.get("quality_override").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -610,6 +614,7 @@ pub fn build_status_json(state: &TaskState, state_root: &Path) -> Value {
         "success": success.clone(),
         "next_action": next_action.clone(),
         "latest_reject_reason": reject_json.clone(),
+        "quality": build_quality_snapshot(&state.config, attempt),
     });
     let mut attempt_snap = build_attempt_snapshot(state, attempt, state_root);
     if let Some(obj) = attempt_snap.as_object_mut() {
@@ -642,6 +647,7 @@ pub fn build_status_json(state: &TaskState, state_root: &Path) -> Value {
         "review": review,
         "success": success,
         "latest_reject_reason": reject_json,
+        "quality": build_quality_snapshot(&state.config, attempt),
         "attempt": attempt_snap,
         "delivery": delivery,
         "failure": build_failure_snapshot(attempt, state_root, &state.task_id, Some(state)),

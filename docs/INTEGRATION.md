@@ -141,21 +141,22 @@ JSON **数组**：`{task_id, status, target_repo, phase, updated_at, goal, itera
 
 Luma 主合约。除 delivery card 字段外可含排障附加（`artifact_paths`、`execution_timeline`、`prompt_cache` 等）——**UI 可折叠，勿抢第一屏**。
 
-## Quality loop fields（目标态 / minor 加法）
+## Quality loop fields（已落地 / minor 加法）
 
-实现落地后，`status`/`summary` 增加可选对象 `quality`（缺省时 UI 按「尚未启用分级门」降级展示）：
+`status`/`summary` 含对象 `quality`（及 `delivery.quality`）：
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `quality.stop_policy` | string | 如 `no_p0_p1` · `approve_only` |
+| `quality.stop_policy` | string | 默认 `no_p0_p1`；亦支持 `no_p0_only` · `approve_only` |
 | `quality.blocking_severities` | string[] | 默认 `["P0","P1"]` |
+| `quality.review_mode` | string | `structured_single` \| `per_facet` |
 | `quality.blocking_counts` | object | `{P0,P1,P2,P3}` 计数 |
 | `quality.open_blocking_issues` | array | 当前仍阻断交付的 issues |
 | `quality.facets_covered` | string[] | 本轮审查覆盖的维 |
 | `review.issues[].severity` | string | `P0`\|`P1`\|`P2`\|`P3` |
 | `review.issues[].facet` | string | 如 `correctness` · `security` |
 
-引擎规则（目标态）：存在 P0/P1（或 `blocking:true`）时，即使模型输出 `approve`，也校正为 `reject` 并重回实现。详见 [WORKFLOW.md](WORKFLOW.md)。
+引擎规则：存在 P0/P1（或 `blocking:true`）时，即使模型输出 `approve`，也校正为 `reject` 并重回实现（见 `quality_override`）。详见 [WORKFLOW.md](WORKFLOW.md)。
 
 ## Exit codes
 
@@ -181,7 +182,7 @@ Luma 主合约。除 delivery card 字段外可含排障附加（`artifact_paths
 - `--auto-merge` / `--allow-merge-without-tests` — 显式逃生，勿当默认
 - `--task-id` · `--goal-file` · 各 provider model flag
 
-目标态（见 WORKFLOW）：`--stop-policy no_p0_p1` · `--blocking-severities P0,P1` · review facet 相关 flag。
+目标态（见 WORKFLOW）：`--stop-policy no_p0_p1` · `--blocking-severities P0,P1` · `--review-mode structured_single|per_facet` · `--review-facets correctness,tests,...`。
 
 Advanced（不必进第一屏）：`--planner-granularity graph` · 并行相关 · review context 调优。
 

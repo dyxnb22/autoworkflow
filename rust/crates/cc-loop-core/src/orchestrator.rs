@@ -31,11 +31,14 @@ use crate::parallel::{
     run_jobs_concurrently, schedule_ready_nodes, ParallelJob,
 };
 use crate::planner_direct::{direct_plan_json, should_skip_planner};
+use crate::quality::{
+    apply_quality_gate, merge_facet_reviews, resolve_review_facets, stop_conditions_met,
+};
 use crate::recovery::{decide_auto_step, AutoStep};
 use crate::repair::{
     provider_error_repair_prompt, reviewer_reject_repair_prompt, test_failure_repair_prompt,
 };
-use crate::review_context::build_reviewer_prompt;
+use crate::review_context::{build_reviewer_prompt, build_reviewer_prompt_for_facet};
 use crate::state::{
     load_state, save_state, with_state_mut, AttemptPhase, AttemptRecord, TaskState, TaskStatus,
 };
@@ -106,16 +109,22 @@ fn implementer_prompt(goal: &str, plan: &Value, reject_reason: &str) -> String {
     )
 }
 
-fn resolve_implementer_prompt(
+fn resolve_implementer_prompt_with_retry(
     goal: &str,
     plan: &Value,
     reject_reason: &str,
+    retry_prompt: &str,
     test_status: &str,
     test_output: &str,
     failure_type: &str,
 ) -> String {
-    if !reject_reason.is_empty() {
-        return reviewer_reject_repair_prompt(goal, reject_reason, "");
+    if !reject_reason.is_empty() || !retry_prompt.is_empty() {
+        let reason = if reject_reason.is_empty() {
+            "reviewer requested changes"
+        } else {
+            reject_reason
+        };
+        return reviewer_reject_repair_prompt(goal, reason, retry_prompt);
     }
     if test_status == "failed" || test_status == "timed_out" {
         return test_failure_repair_prompt(goal, test_output, test_status);
@@ -439,10 +448,20 @@ fn run_one_attempt(
         .latest_attempt()
         .map(|a| fs::read_to_string(&a.test_raw_path).unwrap_or_default())
         .unwrap_or_default();
-    let impl_prompt = resolve_implementer_prompt(
+    let prior_retry_prompt = state
+        .history
+        .iter()
+        .rev()
+        .find(|a| a.phase == AttemptPhase::Rejected || a.decision == "reject")
+        .and_then(|a| a.review_json.as_ref())
+        .and_then(|rj| rj.get("retry_prompt").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let impl_prompt = resolve_implementer_prompt_with_retry(
         node_goal,
         &plan_json,
         reject_reason,
+        &prior_retry_prompt,
         &prior_test,
         &prior_test_out,
         &prior_fail,
@@ -571,7 +590,7 @@ fn run_one_attempt(
         return Ok(());
     }
 
-    // Review
+    // Review (structured_single or per_facet)
     attempt.phase = AttemptPhase::Reviewing;
     let reviewer = state
         .providers
@@ -581,23 +600,6 @@ fn run_one_attempt(
     attempt.running_provider = reviewer.clone();
     attempt.review_provider = reviewer.clone();
     let plan_text = serde_json::to_string_pretty(&plan_json).unwrap_or_default();
-    let review_payload = build_reviewer_prompt(
-        node_goal,
-        &plan_text,
-        &stat,
-        &patch,
-        &state.config,
-        &paths.diff_stat.display().to_string(),
-        &paths.diff_files.display().to_string(),
-    );
-    fs::write(&paths.review_prompt, &review_payload.prompt)?;
-    let _ = record_reviewer_cache(
-        &paths,
-        &review_payload.prompt,
-        &review_payload.context_mode,
-        review_payload.inline_patch,
-        review_payload.omitted_patch_chars,
-    );
     let _ = append_event(
         state_root,
         &state.task_id,
@@ -607,45 +609,32 @@ fn run_one_attempt(
         node_id,
         "reviewing",
         "reviewer started",
-        json!({}),
+        json!({"mode": state.config.review_mode}),
     );
-    let rev_result = run_role(
-        "reviewer",
+
+    attempt.review_raw_path = paths.review_raw.display().to_string();
+    let review_json = match run_review_passes(
+        state,
         &reviewer,
         &wt,
-        &review_payload.prompt,
-        &paths.review_last_message,
-        &paths.review_raw,
-        &state.config,
-        true,
-    )?;
-    let _ = write_subprocess_result(
+        node_goal,
+        &plan_text,
+        &stat,
+        &patch,
         &paths,
-        "reviewer",
-        rev_result.exit_code,
-        rev_result.timed_out,
-        rev_result.duration_seconds,
-        rev_result.killed,
-        rev_result.hung,
-    );
-    fs::write(&paths.review_provider, &rev_result.provider)?;
-    attempt.review_raw_path = rev_result.raw_artifact_path.display().to_string();
-    if rev_result.timed_out || rev_result.exit_code != 0 {
-        attempt.phase = AttemptPhase::Failed;
-        attempt.failure_type = "reviewer_failed".into();
-        state.status = TaskStatus::Failed;
-        clear_running(state, node_id);
-        persist_attempt_and_reload(state, state_root, attempt)?;
-        return Err(CcError::execution("reviewer failed or timed out"));
-    }
-    let review_text = fs::read_to_string(&paths.review_last_message).unwrap_or_default();
-    let review_json = extract_json_object(&review_text).unwrap_or_else(|_| {
-        json!({
-            "decision": "stop",
-            "reason": "failed to parse reviewer output",
-            "parse_error": true,
-        })
-    });
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            attempt.phase = AttemptPhase::Failed;
+            attempt.failure_type = "reviewer_failed".into();
+            state.status = TaskStatus::Failed;
+            clear_running(state, node_id);
+            persist_attempt_and_reload(state, state_root, attempt)?;
+            return Err(e);
+        }
+    };
+
+    let review_json = apply_quality_gate(&review_json, &state.config);
     fs::write(
         &paths.review_parsed,
         serde_json::to_string_pretty(&review_json)?,
@@ -659,7 +648,19 @@ fn run_one_attempt(
     attempt.decision = decision.clone();
     attempt.running_provider.clear();
 
-    match decision.as_str() {
+    // Approve only when stop policy allows (tests already green here).
+    let can_handoff =
+        decision == "approve" && stop_conditions_met(&review_json, &state.config, &attempt.test_status);
+    let decision_for_match = if can_handoff {
+        "approve"
+    } else if decision == "approve" {
+        // Safety: should already be reject via apply_quality_gate
+        "reject"
+    } else {
+        decision.as_str()
+    };
+
+    match decision_for_match {
         "approve" => {
             if state.config.auto_merge {
                 let merge_out = merge_into_base(&repo, &state.config.base_branch, &branch, timeout)?;
@@ -714,11 +715,143 @@ fn run_one_attempt(
             "phase": attempt.phase.as_str(),
             "decision": attempt.decision,
             "test_status": attempt.test_status,
+            "quality": review_json.get("blocking_counts").cloned().unwrap_or(json!({})),
         })],
     );
     let _ = append_command_argv(&paths, "reviewer", &[]);
     persist_attempt_and_reload(state, state_root, attempt)?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_review_passes(
+    state: &TaskState,
+    reviewer: &str,
+    wt: &Path,
+    node_goal: &str,
+    plan_text: &str,
+    stat: &str,
+    patch: &str,
+    paths: &ArtifactPaths,
+) -> Result<Value> {
+    let per_facet = state.config.review_mode.trim().eq_ignore_ascii_case("per_facet");
+    if !per_facet {
+        let review_payload = build_reviewer_prompt(
+            node_goal,
+            plan_text,
+            stat,
+            patch,
+            &state.config,
+            &paths.diff_stat.display().to_string(),
+            &paths.diff_files.display().to_string(),
+        );
+        fs::write(&paths.review_prompt, &review_payload.prompt)?;
+        let _ = record_reviewer_cache(
+            paths,
+            &review_payload.prompt,
+            &review_payload.context_mode,
+            review_payload.inline_patch,
+            review_payload.omitted_patch_chars,
+        );
+        let rev_result = run_role(
+            "reviewer",
+            reviewer,
+            wt,
+            &review_payload.prompt,
+            &paths.review_last_message,
+            &paths.review_raw,
+            &state.config,
+            true,
+        )?;
+        let _ = write_subprocess_result(
+            paths,
+            "reviewer",
+            rev_result.exit_code,
+            rev_result.timed_out,
+            rev_result.duration_seconds,
+            rev_result.killed,
+            rev_result.hung,
+        );
+        fs::write(&paths.review_provider, &rev_result.provider)?;
+        if rev_result.timed_out || rev_result.exit_code != 0 {
+            return Err(CcError::execution("reviewer failed or timed out"));
+        }
+        let review_text = fs::read_to_string(&paths.review_last_message).unwrap_or_default();
+        return Ok(extract_json_object(&review_text).unwrap_or_else(|_| {
+            json!({
+                "decision": "stop",
+                "reason": "failed to parse reviewer output",
+                "parse_error": true,
+                "issues": [],
+            })
+        }));
+    }
+
+    // per_facet: serial passes, then merge
+    let facets = resolve_review_facets(&state.config);
+    let mut parts = Vec::new();
+    let mut combined_prompt = String::new();
+    for (i, facet) in facets.iter().enumerate() {
+        let payload = build_reviewer_prompt_for_facet(
+            node_goal,
+            plan_text,
+            stat,
+            patch,
+            &state.config,
+            &paths.diff_stat.display().to_string(),
+            &paths.diff_files.display().to_string(),
+            Some(facet),
+        );
+        combined_prompt.push_str(&format!("\n\n===== FACET {facet} =====\n"));
+        combined_prompt.push_str(&payload.prompt);
+        let last = paths.root.join(format!("review.facet.{facet}.last-message.txt"));
+        let raw = paths.root.join(format!("review.facet.{facet}.raw.json"));
+        let rev_result = run_role(
+            "reviewer",
+            reviewer,
+            wt,
+            &payload.prompt,
+            &last,
+            &raw,
+            &state.config,
+            true,
+        )?;
+        if rev_result.timed_out || rev_result.exit_code != 0 {
+            return Err(CcError::execution(format!(
+                "reviewer failed on facet {facet}"
+            )));
+        }
+        let text = fs::read_to_string(&last).unwrap_or_default();
+        let parsed = extract_json_object(&text).unwrap_or_else(|_| {
+            json!({
+                "decision": "reject",
+                "reason": format!("failed to parse facet {facet}"),
+                "issues": [{"severity":"P1","facet": facet, "title": "parse error", "blocking": true}],
+            })
+        });
+        parts.push(parsed);
+        if i == 0 {
+            let _ = record_reviewer_cache(
+                paths,
+                &payload.prompt,
+                &payload.context_mode,
+                payload.inline_patch,
+                payload.omitted_patch_chars,
+            );
+        }
+    }
+    fs::write(&paths.review_prompt, &combined_prompt)?;
+    // Mirror last facet message into canonical last-message for tooling.
+    if let Some(last_facet) = facets.last() {
+        let src = paths
+            .root
+            .join(format!("review.facet.{last_facet}.last-message.txt"));
+        if src.is_file() {
+            let _ = fs::copy(&src, &paths.review_last_message);
+        }
+    }
+    fs::write(&paths.review_provider, reviewer)?;
+    Ok(merge_facet_reviews(&parts, &facets))
 }
 
 fn merge_into_base(repo: &Path, base_branch: &str, branch: &str, timeout: u64) -> Result<String> {
@@ -962,7 +1095,13 @@ pub fn inject_fake_success_handoff(state: &mut TaskState, state_root: &Path) -> 
     attempt.decision = "approve".into();
     attempt.test_status = "passed".into();
     attempt.test_exit_code = Some(0);
-    attempt.review_json = Some(json!({"decision":"approve","reason":"ok"}));
+    attempt.review_json = Some(json!({
+        "decision":"approve",
+        "reason":"ok",
+        "issues": [],
+        "facets_covered": ["correctness","tests","security","reliability","maintainability","ux_cli"],
+        "blocking_counts": {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    }));
     attempt.branch = branch_name(&state.task_id, 1, 0);
     state.history.push(attempt);
     state.status = TaskStatus::Done;
