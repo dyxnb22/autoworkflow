@@ -525,6 +525,12 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(f"distinct_reviewer: {distinct_reviewer_satisfied(state.config, state.providers)}")
     print(f"success: {derive_success_outcome(state, attempt)}")
+    reject = None
+    from cc_loop.inspect import latest_reject_reason
+
+    reject = latest_reject_reason(state)
+    if reject:
+        print(f"latest_reject_reason: {reject}")
     if state.config.get("test_command"):
         print(f"test_command_argv: {format_test_command_display(state.config.get('test_command'))}")
     print(f"goal: {state.goal}")
@@ -835,6 +841,19 @@ def _print_run_summary(
     print(f"next: {summarize_attempt(attempt, state)}")
 
 
+def _warn_missing_test_command(state) -> None:
+    if list(state.config.get("test_command") or []):
+        return
+    if bool(state.config.get("allow_merge_without_tests", False)):
+        return
+    print(
+        "warning: no test_command configured; tests will be skipped and "
+        "cannot count as success unless allow_merge_without_tests is set. "
+        "`cc-loop auto` will refuse this task.",
+        file=sys.stderr,
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     task_id = resolve_task_id(args.state_root, args.task_id)
     if task_id is None:
@@ -844,15 +863,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     state = load_state(task_id, args.state_root)
-    if not list(state.config.get("test_command") or []) and not bool(
-        state.config.get("allow_merge_without_tests", False)
-    ):
-        print(
-            "warning: no test_command configured; tests will be skipped and "
-            "cannot count as success unless allow_merge_without_tests is set. "
-            "`cc-loop auto` will refuse this task.",
-            file=sys.stderr,
-        )
+    _warn_missing_test_command(state)
     try:
         state, attempt, artifact_paths = execute_run(state, args.state_root)
     except RunError as exc:
@@ -1158,6 +1169,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         return 1
 
     state = load_state(task_id, args.state_root)
+    _warn_missing_test_command(state)
     try:
         state, attempt, artifact_paths = execute_resume(state, args.state_root)
     except ResumeError as exc:

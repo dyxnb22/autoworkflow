@@ -17,12 +17,12 @@ from cc_loop.inspect import (
     derive_next_action,
     derive_success_outcome,
     is_runner_alive,
+    latest_reject_reason,
 )
 from cc_loop.prompt_cache import prompt_cache_snapshot
 from cc_loop.recovery import AutoStep, decide_auto_step
 from cc_loop.report import build_report
 from cc_loop.state import (
-    AttemptPhase,
     AttemptRecord,
     TaskState,
     TaskStatus,
@@ -164,18 +164,6 @@ def _tests_summary(attempt: AttemptRecord | None, report: dict[str, Any]) -> dic
     }
 
 
-def _latest_reject_reason(state: TaskState) -> str:
-    for prev in reversed(state.history):
-        if prev.phase == AttemptPhase.REJECTED and prev.review_json:
-            reason = str(prev.review_json.get("reason", "") or "").strip()
-            if reason:
-                return reason[:400]
-            retry_prompt = str(prev.review_json.get("retry_prompt", "") or "").strip()
-            if retry_prompt:
-                return retry_prompt[:400]
-    return ""
-
-
 def _artifact_key_paths(artifact_paths: dict[str, str]) -> dict[str, str]:
     preferred = (
         "plan_parsed",
@@ -242,7 +230,7 @@ def build_task_summary(state: TaskState, state_root: Path) -> dict[str, Any]:
     )
     phase = attempt.phase.value if attempt is not None else ""
     success = derive_success_outcome(state, attempt)
-    reject_reason = _latest_reject_reason(state)
+    reject_reason = latest_reject_reason(state)
 
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,

@@ -92,6 +92,58 @@ class ListAndStatusJsonTests(unittest.TestCase):
         self.assertEqual(payload["next_action"], "run")
         self.assertFalse(payload["running"])
         self.assertIn("attempt", payload)
+        # v0.11 delivery-facing fields for Luma / integrators
+        for key in (
+            "roles",
+            "distinct_reviewer",
+            "require_distinct_reviewer",
+            "auto_merge",
+            "success",
+            "latest_reject_reason",
+        ):
+            self.assertIn(key, payload)
+        self.assertIn("provider", payload["roles"]["implementer"])
+        self.assertIn("provider", payload["roles"]["reviewer"])
+        self.assertTrue(payload["require_distinct_reviewer"])
+        self.assertEqual(payload["success"], "initialized")
+        self.assertIsNone(payload["latest_reject_reason"])
+
+    def test_summary_json_delivery_contract(self) -> None:
+        make_task(repo=self.repo, state_root=self.state_root, task_id="summary-contract")
+        result = _cli("summary", "--task-id", "summary-contract", "--json", state_root=self.state_root)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        payload = json.loads(result.stdout)
+        for key in (
+            "schema_version",
+            "task_id",
+            "goal",
+            "status",
+            "phase",
+            "next_action",
+            "roles",
+            "distinct_reviewer",
+            "require_distinct_reviewer",
+            "auto_merge",
+            "plan_summary",
+            "latest_attempt",
+            "latest_reject_reason",
+            "tests",
+            "review",
+            "diff_stat",
+            "success",
+            "artifacts",
+        ):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["task_id"], "summary-contract")
+        self.assertEqual(payload["success"], "initialized")
+        self.assertIn("provider", payload["roles"]["planner"])
+        self.assertIn("status", payload["tests"])
+        self.assertIn("decision", payload["review"])
+
+        human = _cli("summary", "--task-id", "summary-contract", state_root=self.state_root)
+        self.assertEqual(human.returncode, 0)
+        self.assertIn("implementer (writes)", human.stdout)
+        self.assertIn("Handoff:", human.stdout)
 
     def test_status_json_mid_run_state(self) -> None:
         make_task(repo=self.repo, state_root=self.state_root, task_id="mid-task")

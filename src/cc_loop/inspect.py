@@ -107,6 +107,19 @@ def derive_success_outcome(state: TaskState, attempt: AttemptRecord | None) -> s
     return SUCCESS_STOPPED
 
 
+def latest_reject_reason(state: TaskState) -> str:
+    """Most recent reviewer reject reason / retry prompt, if any."""
+    for prev in reversed(state.history):
+        if prev.phase == AttemptPhase.REJECTED and prev.review_json:
+            reason = str(prev.review_json.get("reason", "") or "").strip()
+            if reason:
+                return reason[:400]
+            retry_prompt = str(prev.review_json.get("retry_prompt", "") or "").strip()
+            if retry_prompt:
+                return retry_prompt[:400]
+    return ""
+
+
 def _safe_read_json(path: Path) -> dict | None:
     if not path.is_file():
         return None
@@ -650,6 +663,7 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
         "require_distinct_reviewer": bool(state.config.get("require_distinct_reviewer", True)),
         "auto_merge": bool(state.config.get("auto_merge", False)),
         "success": derive_success_outcome(state, attempt),
+        "latest_reject_reason": latest_reject_reason(state) or None,
         "attempt": build_attempt_snapshot(state, attempt, state_root),
         "failure": build_failure_snapshot(attempt, state_root, state.task_id, state=state),
         "next_action": next_action,

@@ -361,7 +361,7 @@ class SummaryContractFieldsTests(unittest.TestCase):
             result = _cli("status", "--task-id", "status-delivery", "--json", state_root=env.state_root())
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             payload = json.loads(result.stdout)
-            for key in ("roles", "distinct_reviewer", "require_distinct_reviewer", "auto_merge", "success"):
+            for key in ("roles", "distinct_reviewer", "require_distinct_reviewer", "auto_merge", "success", "latest_reject_reason"):
                 self.assertIn(key, payload)
             self.assertTrue(payload["require_distinct_reviewer"])
             self.assertIn("provider", payload["roles"]["implementer"])

@@ -103,6 +103,7 @@ Stdout is a single JSON object. No extra prose.
   "require_distinct_reviewer": true,
   "auto_merge": false,
   "success": "stopped",
+  "latest_reject_reason": null,
   "attempt": {
     "iteration": 1,
     "retry": 0,
@@ -168,6 +169,7 @@ Stdout is a single JSON object. No extra prose.
 | `require_distinct_reviewer` | bool | Config flag (v0.11; default true) |
 | `auto_merge` | bool | Whether approved work merges into base (v0.11; default false) |
 | `success` | string | `ready_for_handoff` / `merged` / `stopped` / `failed` / … (v0.11) |
+| `latest_reject_reason` | string \| null | Most recent reviewer reject reason (v0.11) |
 | `running_node_ids` | array | Parallel running node ids when applicable (v0.9) |
 | `reviewer_prompt_metrics` | object \| omitted | Latest attempt reviewer cache metrics when `review.prompt.metrics.json` exists (v0.10 additive) |
 | `prompt_cache` | object \| omitted | Summary from `prompt.cache.json` when present: path, token totals, reviewer context mode, omitted patch chars (additive) |
@@ -418,6 +420,35 @@ Luma-oriented single JSON object. Does not replace `report --json`. One payload 
 
 ```bash
 cc-loop summary --task-id ID --json
+```
+
+Example (shape; fields may be null/empty before the first attempt):
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "abc123",
+  "goal": "...",
+  "status": "done",
+  "phase": "approved",
+  "next_action": "done",
+  "roles": {
+    "planner": {"provider": "codex", "model": ""},
+    "implementer": {"provider": "cursor", "model": ""},
+    "reviewer": {"provider": "codex", "model": ""}
+  },
+  "distinct_reviewer": true,
+  "require_distinct_reviewer": true,
+  "auto_merge": false,
+  "plan_summary": "…",
+  "latest_attempt": {"iteration": 1, "retry": 0, "phase": "approved", "test_status": "passed"},
+  "latest_reject_reason": null,
+  "tests": {"status": "passed", "pass": true, "fail": false, "skipped": false, "reason": "test_command passed"},
+  "review": {"decision": "approve", "reason": "…", "issues": []},
+  "diff_stat": {"path": "…/diff.stat.txt", "preview": "…", "branch": "cc-loop/…"},
+  "success": "ready_for_handoff",
+  "artifacts": {"diff_stat": "…", "test_output": "…", "review_parsed": "…"}
+}
 ```
 
 Key fields:

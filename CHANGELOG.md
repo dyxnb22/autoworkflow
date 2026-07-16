@@ -32,7 +32,16 @@ Positions cc-loop as a **role-separated delivery engine** and narrows the defaul
 
 Loading older `state.json` merges missing config keys onto current defaults (`auto_merge=false`, `require_distinct_reviewer=true`). See [INTEGRATION.md](docs/INTEGRATION.md).
 
+## v0.10.0 — observability and eval
+
+Additive observability surface (historical relative to v0.11 product sharpening):
+
+- Prompt metadata / cache artifacts, `attempt.trace.json`, `command.argv.json`, `subprocess.result.json`
+- `cc-loop summary`, `eval`, `export`, `run.summary.json`, `execution.timeline.json`
+- Status heartbeat / reviewer prompt metrics fields
+
 ## v0.9.0 — 2026-07-02
+
 
 Full evolution from v0.4 task graph through v0.9 parallel execution (historical).
 
