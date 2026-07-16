@@ -36,7 +36,7 @@ cc-loop summary --task-id ID --json
 | 差异 | 行为 |
 |------|------|
 | 角色锁定 | init/doctor/run/auto：implementer 与 reviewer 身份相同则失败（除非 `--allow-same-reviewer`） |
-| 测试门 | `auto` 无 `test_command` → 拒绝启动；测试红 → 停在可恢复路径，等 repair/`resume`，默认不能当成功 |
+| 测试门 | `auto`/`run`/`resume` 无 `test_command` → 拒绝启动；测试红/`skipped` → 不得 review 过关；红测走 repair/`resume` |
 | reject→实现 | `decision=reject` → `Stopped` + `next_action≈resume`；下一轮 implementer 带上拒绝原因 |
 
 脏主仓默认阻断开跑（preflight）。不要在用户正在编辑的 main worktree 里直接改文件。

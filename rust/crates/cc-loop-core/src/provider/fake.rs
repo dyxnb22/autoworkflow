@@ -4,12 +4,40 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::{json, Value};
 
 use crate::config::LoopConfig;
 use crate::error::Result;
 use crate::provider::{ProviderAdapter, ProviderRunResult};
+
+/// How many reviewer calls should return `reject` before approving.
+static REJECTS_REMAINING: AtomicU32 = AtomicU32::new(0);
+
+/// Script the next N fake reviewer decisions as reject (then approve).
+pub fn set_fake_reviewer_rejects(n: u32) {
+    REJECTS_REMAINING.store(n, Ordering::SeqCst);
+}
+
+pub fn fake_reviewer_rejects_remaining() -> u32 {
+    REJECTS_REMAINING.load(Ordering::SeqCst)
+}
+
+fn next_reviewer_decision() -> Value {
+    let left = REJECTS_REMAINING.load(Ordering::SeqCst);
+    if left > 0 {
+        REJECTS_REMAINING.fetch_sub(1, Ordering::SeqCst);
+        json!({
+            "decision": "reject",
+            "reason": "fake reject: needs another pass",
+            "retry_prompt": "Address the fake reviewer rejection.",
+            "issues": ["fake issue"]
+        })
+    } else {
+        json!({"decision": "approve", "reason": "fake ok", "issues": []})
+    }
+}
 
 pub struct FakeProvider;
 
@@ -38,7 +66,7 @@ impl ProviderAdapter for FakeProvider {
     }
 
     fn parse_reviewer_output(&self, _last_message: &str) -> Result<Value> {
-        Ok(json!({"decision": "approve", "reason": "fake ok", "issues": []}))
+        Ok(next_reviewer_decision())
     }
 
     fn preflight_check_argv(&self) -> Vec<String> {
@@ -67,10 +95,17 @@ impl ProviderAdapter for FakeProvider {
             // implementer: touch a file in worktree
             if !print_only {
                 fs::create_dir_all(worktree_path)?;
-                fs::write(worktree_path.join("FAKE_CHANGE.md"), "fake implementer\n")?;
-                // stage+commit so diff is non-empty
+                let marker = if prompt.contains("reviewer rejection")
+                    || prompt.contains("Previous review reject")
+                    || prompt.contains("fake reject")
+                {
+                    "FAKE_REPAIR.md"
+                } else {
+                    "FAKE_CHANGE.md"
+                };
+                fs::write(worktree_path.join(marker), "fake implementer\n")?;
                 let _ = std::process::Command::new("git")
-                    .args(["-C", &worktree_path.display().to_string(), "add", "FAKE_CHANGE.md"])
+                    .args(["-C", &worktree_path.display().to_string(), "add", marker])
                     .status();
                 let _ = std::process::Command::new("git")
                     .args([

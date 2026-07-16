@@ -41,6 +41,13 @@ use crate::state::{
 };
 use crate::summary::write_run_summary_if_terminal;
 
+const RECOVERABLE_TEST_ACTIONS: &[&str] =
+    &["resume for repair", "inspect test.output.txt"];
+const SKIPPED_TEST_ACTIONS: &[&str] = &[
+    "configure test_command before run/auto",
+    "or set allow_merge_without_tests only as explicit escape",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
     Success,
@@ -526,23 +533,38 @@ fn run_one_attempt(
     attempt.test_status = test_status.clone();
     attempt.test_raw_path = paths.test_output.display().to_string();
 
-    if (test_status == "failed" || test_status == "timed_out")
+    // Test gate: skipped/failed/timed_out cannot proceed to review unless escape hatch.
+    if matches!(test_status.as_str(), "skipped" | "failed" | "timed_out")
         && !state.config.allow_merge_without_tests
     {
+        let recoverable = test_status == "failed" || test_status == "timed_out";
         attempt.phase = AttemptPhase::Failed;
         attempt.failure_type = format!("test_{test_status}");
-        attempt.decision = "reject".into();
-        attempt.recovery_disposition = "recoverable".into();
+        attempt.decision = if recoverable {
+            "reject".into()
+        } else {
+            "stop".into()
+        };
+        attempt.recovery_disposition = if recoverable {
+            "recoverable".into()
+        } else {
+            "terminal".into()
+        };
         state.status = TaskStatus::Stopped;
         clear_running(state, node_id);
+        let suggestions: &[&str] = if recoverable {
+            RECOVERABLE_TEST_ACTIONS
+        } else {
+            SKIPPED_TEST_ACTIONS
+        };
         let report = write_failure_report(
             state_root,
             &state.task_id,
             &attempt,
             &attempt.failure_type,
-            "recoverable",
+            attempt.recovery_disposition.as_str(),
             &format!("tests {test_status}"),
-            &["resume for repair", "inspect test.output.txt"],
+            suggestions,
         )?;
         let _ = write_attempt_failure_report(&paths.root, &report);
         persist_attempt_and_reload(state, state_root, attempt)?;
@@ -909,13 +931,19 @@ fn current_retry_for_node(state: &TaskState, node_id: &str) -> u32 {
         .unwrap_or(0)
 }
 
-pub fn require_test_command_for_auto(config: &LoopConfig) -> Result<()> {
+/// Refuse run/resume/auto when the delivery test gate is unset.
+pub fn require_test_command_for_execution(config: &LoopConfig) -> Result<()> {
     if config.test_command.is_empty() && !config.allow_merge_without_tests {
         return Err(CcError::config(
-            "auto refused: test_command is not configured (set test_command or allow_merge_without_tests)",
+            "refused: test_command is not configured (set test_command on init, or allow_merge_without_tests as explicit escape)",
         ));
     }
     Ok(())
+}
+
+/// Backward-compatible alias for auto.
+pub fn require_test_command_for_auto(config: &LoopConfig) -> Result<()> {
+    require_test_command_for_execution(config)
 }
 
 pub fn warn_if_no_test_command(config: &LoopConfig) {

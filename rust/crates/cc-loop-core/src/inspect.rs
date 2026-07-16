@@ -339,6 +339,68 @@ pub fn build_attempt_snapshot(
     })
 }
 
+/// Plan one-liner for Luma delivery card (status + summary).
+pub fn plan_summary_text(state: &TaskState, attempt: Option<&AttemptRecord>) -> String {
+    if let Some(a) = attempt {
+        if let Some(ref plan) = a.plan_json {
+            for key in ["summary", "expected_changes", "title"] {
+                if let Some(v) = plan.get(key).and_then(|x| x.as_str()) {
+                    let t = v.trim();
+                    if !t.is_empty() {
+                        return t.chars().take(240).collect();
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ref g) = state.task_graph {
+        let s = g.summary.trim();
+        if !s.is_empty() {
+            return s.chars().take(240).collect();
+        }
+    }
+    state.goal.chars().take(240).collect()
+}
+
+/// Tests block for Luma delivery card.
+pub fn tests_card(attempt: Option<&AttemptRecord>) -> Value {
+    let status = attempt.map(|a| a.test_status.as_str()).unwrap_or("");
+    let reason = match status {
+        "skipped" => "test_command not configured",
+        "failed" => "test_command exited non-zero",
+        "timed_out" => "test_command timed out",
+        "passed" => "test_command passed",
+        _ => "",
+    };
+    json!({
+        "status": status,
+        "pass": status == "passed",
+        "fail": status == "failed" || status == "timed_out",
+        "skipped": status == "skipped",
+        "reason": reason,
+        "exit_code": attempt.and_then(|a| a.test_exit_code),
+    })
+}
+
+/// Review block for Luma delivery card.
+pub fn review_card(attempt: Option<&AttemptRecord>) -> Value {
+    let review_json = attempt.and_then(|a| a.review_json.clone()).unwrap_or(json!({}));
+    let decision = attempt
+        .map(|a| a.decision.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| review_json.get("decision").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let reason = review_json
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    json!({
+        "decision": decision,
+        "reason": reason,
+        "issues": review_json.get("issues").cloned().unwrap_or(json!([])),
+    })
+}
+
 pub fn empty_failure_snapshot(attempt: Option<&AttemptRecord>) -> Value {
     json!({
         "failure_type": "",
@@ -528,6 +590,27 @@ pub fn build_status_json(state: &TaskState, state_root: &Path) -> Value {
     let next_action = derive_next_action(state, attempt, running, &runner_state);
     let (can_stop, can_resume, can_cleanup) = capability_flags(state, running);
     let reject = latest_reject_reason(state);
+    let roles = build_roles_snapshot(state);
+    let plan_summary = plan_summary_text(state, attempt);
+    let tests = tests_card(attempt);
+    let review = review_card(attempt);
+    let success = derive_success_outcome(state, attempt);
+    let reject_json = if reject.is_empty() {
+        Value::Null
+    } else {
+        json!(reject)
+    };
+    let delivery = json!({
+        "roles": roles.clone(),
+        "distinct_reviewer": distinct_reviewer_satisfied(&state.config, Some(&state.providers)),
+        "plan_summary": plan_summary.clone(),
+        "tests": tests.clone(),
+        "review": review.clone(),
+        "retry": attempt.map(|a| a.retry).unwrap_or(0),
+        "success": success.clone(),
+        "next_action": next_action.clone(),
+        "latest_reject_reason": reject_json.clone(),
+    });
     let mut attempt_snap = build_attempt_snapshot(state, attempt, state_root);
     if let Some(obj) = attempt_snap.as_object_mut() {
         if !live_phase.is_empty() {
@@ -549,14 +632,18 @@ pub fn build_status_json(state: &TaskState, state_root: &Path) -> Value {
         "test_command_argv": state.config.test_command,
         "test_command_display": format_test_command_display(&state.config.test_command),
         "providers": state.providers,
-        "roles": build_roles_snapshot(state),
+        "roles": roles,
         "distinct_reviewer": distinct_reviewer_satisfied(&state.config, Some(&state.providers)),
         "require_distinct_reviewer": state.config.require_distinct_reviewer,
         "auto_merge": state.config.auto_merge,
         "planner_granularity": state.config.planner_granularity,
-        "success": derive_success_outcome(state, attempt),
-        "latest_reject_reason": if reject.is_empty() { Value::Null } else { json!(reject) },
+        "plan_summary": plan_summary,
+        "tests": tests,
+        "review": review,
+        "success": success,
+        "latest_reject_reason": reject_json,
         "attempt": attempt_snap,
+        "delivery": delivery,
         "failure": build_failure_snapshot(attempt, state_root, &state.task_id, Some(state)),
         "next_action": next_action,
         "running": running,

@@ -15,7 +15,7 @@ use cc_loop_core::git::resolve_repo_path;
 use cc_loop_core::graph::build_graph_cli_payload;
 use cc_loop_core::inspect::{build_status_json, list_tasks_json};
 use cc_loop_core::orchestrator::{
-    require_test_command_for_auto, run_loop, warn_if_no_test_command, RunOutcome,
+    require_test_command_for_execution, run_loop, RunOutcome,
 };
 use cc_loop_core::paths::{default_state_root, state_path};
 use cc_loop_core::preflight::{require_preflight_ok, run_preflight};
@@ -545,7 +545,7 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
         Commands::Run { task_id, .. } => {
             let id = resolve_task_id(state_root, task_id.as_deref())?;
             let mut state = load_state(&id, state_root)?;
-            warn_if_no_test_command(&state.config);
+            require_test_command_for_execution(&state.config)?;
             let pre = run_preflight(Path::new(&state.target_repo), &state.config, true, false)?;
             require_preflight_ok(&pre)?;
             Ok(match run_loop(&mut state, state_root, Some(1))? {
@@ -556,7 +556,7 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
         Commands::Resume { task_id, .. } => {
             let id = resolve_task_id(state_root, task_id.as_deref())?;
             let mut state = load_state(&id, state_root)?;
-            warn_if_no_test_command(&state.config);
+            require_test_command_for_execution(&state.config)?;
             if matches!(
                 state.status,
                 TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
@@ -578,7 +578,7 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
         } => {
             let id = resolve_task_id(state_root, task_id.as_deref())?;
             let mut state = load_state(&id, state_root)?;
-            require_test_command_for_auto(&state.config)?;
+            require_test_command_for_execution(&state.config)?;
             if detach {
                 let exe = std::env::current_exe()
                     .map_err(|e| CcError::execution(format!("current_exe: {e}")))?;

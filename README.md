@@ -39,7 +39,7 @@ make install                 # ~/.local/bin/cc-loop
 | `planner_granularity` | `single` | 单切片闭环 |
 | `require_distinct_reviewer` | `true` | 写≠审 |
 | `auto_merge` | `false` | 成功 = 可交接，不合 main |
-| `test_command`（`auto`） | **必填** | 没测试命令不挂机 |
+| `test_command`（`auto`/`run`/`resume`） | **必填** | 没测试命令不挂机 |
 | `allow_merge_without_tests` | `false` | 逃生口，绝非默认 |
 | Providers | planner/reviewer `codex`，implementer `cursor` | 开箱即跨 CLI |
 

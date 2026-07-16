@@ -32,6 +32,10 @@ pub fn decide_auto_step(state: &TaskState) -> AutoStep {
                 {
                     return AutoStep::Done;
                 }
+                if attempt.test_status == "skipped" {
+                    // Missing test_command is not an implementer repair — configure tests.
+                    return AutoStep::Stop;
+                }
                 if attempt.test_status == "failed" || attempt.test_status == "timed_out" {
                     if state.config.auto_recover_tests
                         && attempt.retry < state.config.max_retries_per_step
