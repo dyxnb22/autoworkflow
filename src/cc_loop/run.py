@@ -2311,44 +2311,83 @@ def build_planner_prompt(state: TaskState) -> str:
     granularity_section = planner_granularity_prompt_section(granularity).strip()
     dynamic_marker = "## Dynamic Planner Payload"
 
+    if granularity == "single":
+        shape_section = (
+            "## Preferred Single-Loop Shape\n"
+            "{\n"
+            '  "prompt": "Detailed implementation prompt for the implementer provider",\n'
+            '  "expected_changes": "Expected files or areas",\n'
+            '  "acceptance_criteria": "How this step will be judged",\n'
+            '  "is_final_step": true\n'
+            "}\n"
+            "\n"
+            "## Optional Single-Node Task Graph\n"
+            "{\n"
+            '  "mode": "task_graph",\n'
+            '  "summary": "Short summary of the implementation strategy",\n'
+            '  "nodes": [\n'
+            "    {\n"
+            '      "id": "T1",\n'
+            '      "title": "Implement the requested change",\n'
+            '      "description": "Scoped implementation for this goal.",\n'
+            '      "kind": "implementation",\n'
+            '      "owner": "implementer",\n'
+            '      "dependencies": [],\n'
+            '      "acceptance_criteria": ["change works as requested"],\n'
+            '      "files_scope": ["relevant/paths"]\n'
+            "    }\n"
+            "  ],\n"
+            '  "is_final_step": true\n'
+            "}\n"
+            "\n"
+            "## Planning Rules\n"
+            "- Prefer one closed loop: one implementation step, then stop.\n"
+            "- Do not decompose into multiple nodes unless explicitly asked.\n"
+            "- Do not duplicate completed steps or existing repo functionality.\n"
+        )
+    else:
+        shape_section = (
+            "## Preferred Task Graph Shape\n"
+            "{\n"
+            '  "mode": "task_graph",\n'
+            '  "summary": "Short summary of the implementation strategy",\n'
+            '  "nodes": [\n'
+            "    {\n"
+            '      "id": "T1",\n'
+            '      "title": "Set up project structure",\n'
+            '      "description": "Create the package skeleton and baseline docs.",\n'
+            '      "kind": "implementation",\n'
+            '      "owner": "implementer",\n'
+            '      "dependencies": [],\n'
+            '      "acceptance_criteria": ["pyproject.toml exists"],\n'
+            '      "files_scope": ["pyproject.toml", "src/"]\n'
+            "    }\n"
+            "  ],\n"
+            '  "is_final_step": false\n'
+            "}\n"
+            "\n"
+            "## Legacy Single-Step Shape\n"
+            "{\n"
+            '  "prompt": "Detailed implementation prompt for the implementer provider",\n'
+            '  "expected_changes": "Expected files or areas",\n'
+            '  "acceptance_criteria": "How this step will be judged",\n'
+            '  "is_final_step": false\n'
+            "}\n"
+            "\n"
+            "## Task Graph Rules\n"
+            "- Prefer task_graph mode when decomposition reduces risk or clarifies ownership.\n"
+            "- Each node must have a unique id, title, description, and acceptance_criteria.\n"
+            "- Use dependencies to order work; do not duplicate completed steps or existing repo functionality.\n"
+            "- Set is_final_step true only when the entire goal is complete after this plan.\n"
+        )
+
     stable_prefix = (
         "You are the cc-loop planner. Analyze the task goal and repository checkout.\n"
         "\n"
         "## Output Format\n"
         "Return raw JSON only. Do not wrap in markdown fences. Do not add commentary.\n"
         "\n"
-        "## Preferred Task Graph Shape\n"
-        "{\n"
-        '  "mode": "task_graph",\n'
-        '  "summary": "Short summary of the implementation strategy",\n'
-        '  "nodes": [\n'
-        "    {\n"
-        '      "id": "T1",\n'
-        '      "title": "Set up project structure",\n'
-        '      "description": "Create the package skeleton and baseline docs.",\n'
-        '      "kind": "implementation",\n'
-        '      "owner": "implementer",\n'
-        '      "dependencies": [],\n'
-        '      "acceptance_criteria": ["pyproject.toml exists"],\n'
-        '      "files_scope": ["pyproject.toml", "src/"]\n'
-        "    }\n"
-        "  ],\n"
-        '  "is_final_step": false\n'
-        "}\n"
-        "\n"
-        "## Legacy Single-Step Shape\n"
-        "{\n"
-        '  "prompt": "Detailed implementation prompt for the implementer provider",\n'
-        '  "expected_changes": "Expected files or areas",\n'
-        '  "acceptance_criteria": "How this step will be judged",\n'
-        '  "is_final_step": false\n'
-        "}\n"
-        "\n"
-        "## Task Graph Rules\n"
-        "- Prefer task_graph mode when decomposition reduces risk or clarifies ownership.\n"
-        "- Each node must have a unique id, title, description, and acceptance_criteria.\n"
-        "- Use dependencies to order work; do not duplicate completed steps or existing repo functionality.\n"
-        "- Set is_final_step true only when the entire goal is complete after this plan.\n"
+        f"{shape_section}"
         "\n"
         "## Planner Granularity\n"
         f"{granularity_section}\n"

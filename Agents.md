@@ -20,7 +20,7 @@ cc-loop is a **role-separated delivery engine**: planner/reviewer vs implementer
 
 | Config | Default | Role |
 |--------|---------|------|
-| `require_distinct_reviewer` | `false` | When true, implementer/reviewer provider+model must differ |
+| `require_distinct_reviewer` | `true` | Default on; implementer/reviewer provider+model must differ |
 | `auto_merge` | `false` | Opt-in merge; default success = `ready_for_handoff` |
 | `planner_granularity` | `single` | Default single closed loop |
 | `allow_merge_without_tests` | `false` | Explicit only |

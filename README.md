@@ -18,7 +18,7 @@ This repo is the workflow tooling itself. It is not a general multi-agent framew
 
 - Fixed roles: `planner` / `reviewer` and `implementer` (writer ≠ reviewer).
 - Providers are swappable (`codex`, `cursor`, `claude-code`), but the loop and gates belong to cc-loop.
-- Recommended: `--require-distinct-reviewer` so implementer and reviewer provider/model identities must differ.
+- Recommended: distinct implementer/reviewer (`require_distinct_reviewer=true` by default; escape with `--allow-same-reviewer`).
 - Required for `auto`: a real `--test-command`. Skipping tests is never the default path.
 
 Default providers (still changeable):
@@ -63,17 +63,16 @@ cc-loop init \
   --planner claude-code \
   --reviewer claude-code \
   --implementer cursor \
-  --require-distinct-reviewer \
   --test-command -- python -m pytest tests/ -q
 
-cc-loop doctor --repo /path/to/repo --require-distinct-reviewer \
+cc-loop doctor --repo /path/to/repo \
   --test-command -- python -m pytest tests/ -q
 cc-loop auto --detach --task-id my-task
 cc-loop status --task-id my-task --json
 cc-loop summary --task-id my-task --json   # Luma / TUI single-file recap
 ```
 
-Opt into merging approved work into the base branch only when you mean it:
+Default providers already separate writer (`cursor`) from reviewer (`codex`). Opt into merging only when you mean it:
 
 ```bash
 cc-loop init ... --auto-merge --test-command -- pytest -q

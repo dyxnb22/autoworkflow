@@ -50,12 +50,10 @@ Environment:
 ```bash
 cc-loop doctor --repo "$PROJECT_PATH" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --require-distinct-reviewer \
   --test-command -- python -m pytest tests/ -q
 
 cc-loop init --goal "..." --repo "$PROJECT_PATH" --task-id "$TASK_ID" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --require-distinct-reviewer \
   --test-command -- python -m pytest tests/ -q
 
 cc-loop auto --detach --task-id "$TASK_ID"
@@ -73,11 +71,13 @@ cc-loop summary --task-id "$TASK_ID" --json
 |---------|---------|-------|
 | `auto_merge` | `false` | Success leaves work on the attempt branch (`success=ready_for_handoff`). Pass `--auto-merge` / set `auto_merge=true` to merge into the base branch. |
 | `planner_granularity` | `single` | Default path is a single closed loop. Use `auto`/`graph` for advanced multi-node plans. |
-| `require_distinct_reviewer` | `false` | Strongly recommended. When `true`, init/doctor/run/auto fail if implementer and reviewer share the same provider+model identity. |
+| `require_distinct_reviewer` | `true` | Default on. init/doctor/run/auto fail if implementer and reviewer share provider+model. Escape hatch: `--allow-same-reviewer`. |
 | `allow_merge_without_tests` | `false` | Must be explicit. |
 | `test_command` for `auto` | required | `cc-loop auto` exits `1` when `test_command` is empty unless `allow_merge_without_tests=true`. |
 
-Old state files without `task_graph` still load. Existing tasks that relied on default `auto_merge=true` should set `auto_merge` explicitly when re-initing.
+Old state files without `task_graph` still load. Loading old `state.json` merges missing config keys onto current defaults, so:
+- tasks without `auto_merge` become handoff-default (`false`)
+- tasks without `require_distinct_reviewer` become enforced (`true`); use `--allow-same-reviewer` on a new init or set the config key false if a legacy same-role setup must continue
 
 ## `status --json` schema (schema_version 1)
 
@@ -175,6 +175,11 @@ Stdout is a single JSON object. No extra prose.
 | `can_cleanup` | bool | Whether cleanup is safe (v0.5) |
 | `log_path` | string | Path to `runner.log` (v0.5) |
 | `current_message` | string | Short UI-friendly status message (v0.6) |
+| `roles` | object | `{planner,implementer,reviewer}` with `provider`/`model` (v0.11) |
+| `distinct_reviewer` | bool | Whether writer/reviewer identities differ (v0.11) |
+| `require_distinct_reviewer` | bool | Config flag (v0.11; default true) |
+| `auto_merge` | bool | Whether approved work merges into base (v0.11; default false) |
+| `success` | string | `ready_for_handoff` / `merged` / `stopped` / `failed` / … (v0.11) |
 | `running_node_ids` | array | Parallel running node ids when applicable (v0.9) |
 | `reviewer_prompt_metrics` | object \| omitted | Latest attempt reviewer cache metrics when `review.prompt.metrics.json` exists (v0.10 additive) |
 | `prompt_cache` | object \| omitted | Summary from `prompt.cache.json` when present: path, token totals, reviewer context mode, omitted patch chars (additive) |
@@ -293,7 +298,8 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 In addition to goal/repo/providers/test-command:
 
 - `--test-command -- ARG ...` — **required for `auto`** unless `allow_merge_without_tests` is set. Place `--` before the command so pytest/cargo flags are not parsed as cc-loop options.
-- `--require-distinct-reviewer` — fail init/doctor/run/auto when implementer and reviewer share the same provider+model identity (strongly recommended).
+- `--require-distinct-reviewer` — enforce distinct identities (default already on).
+- `--allow-same-reviewer` — escape hatch to disable distinct-reviewer enforcement (not recommended).
 - `--auto-merge` — opt in to merge approved work into the base branch (default off; success is handoff-ready on the attempt branch).
 - `--allow-merge-without-tests` — explicit escape hatch only; never the default.
 - `--planner-granularity single|auto|graph` — default `single` (simple closed loop). `graph` is advanced.
@@ -311,7 +317,7 @@ In addition to goal/repo/providers/test-command:
 ```
 cc-loop doctor --repo PATH [--base-branch main]
   [--planner NAME] [--reviewer NAME] [--implementer NAME]
-  [--require-distinct-reviewer]
+  [--require-distinct-reviewer | --allow-same-reviewer]
   [--test-command ARG ...] [--json]
 ```
 

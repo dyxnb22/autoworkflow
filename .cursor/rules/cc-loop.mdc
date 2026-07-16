@@ -1,5 +1,5 @@
 ---
-description: cc-loop v0.4.0 — local agent orchestrator (Python 3.11+)
+description: cc-loop v0.11 — role-separated delivery engine (Python 3.11+)
 globs:
   - "src/cc_loop/**/*.py"
   - "tests/**/*.py"
@@ -8,9 +8,11 @@ alwaysApply: true
 
 # cc-loop
 
-Orchestrator only — not a coding agent. Loop: `state → planner → task graph → worktree → implementer → tests → reviewer → merge/retry/stop` (sequential graph nodes in v0.4).
+Delivery engine only — not a coding agent and not a general multi-agent framework.
 
-**Version:** 0.11.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Task graph:** [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md)
+Default loop: `goal → plan → implement → test → review → (approve: handoff | reject/fail: retry implement)`.
+
+**Version:** 0.11.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Task graph (advanced):** [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md)
 
 ## Tests
 
@@ -18,25 +20,28 @@ Orchestrator only — not a coding agent. Loop: `state → planner → task grap
 python -m pytest tests/ -q
 ```
 
-Real git in `TempEnv`; do not mock git. Contract tests: `tests/test_cli_contract.py`. Graph tests: `tests/test_task_graph.py`.
+Real git in `TempEnv`; do not mock git. Contract tests: `tests/test_cli_contract.py`. Product gates: `tests/test_product_sharpening.py`.
 
 ## Layout
 
-`inspect.py` · `list_tasks.py` · `detach.py` · `failure.py` · `recovery.py` · `repair_prompts.py` · `task_graph.py`
+`inspect.py` · `summary.py` · `list_tasks.py` · `detach.py` · `failure.py` · `recovery.py` · `repair_prompts.py` · `task_graph.py`
 
 ## CLI surface (do not break without INTEGRATION.md update)
 
-`init` `doctor` `list` `status --json` `graph --json` `auto --detach` · `--task-id` on run/resume/status/auto/graph · `CC_LOOP_STATE_ROOT`
+`init` `doctor` `list` `status --json` `summary --json` `auto --detach` · `--task-id` on run/resume/status/auto/graph · `CC_LOOP_STATE_ROOT`
 
 Global `--state-root` must precede subcommand.
 
-New commands (v0.5+): `stop`, `cancel`, `cleanup`, `report`. Graph: `--history`. Parallel: `max_parallel_nodes` in config.
+Operational extras: `stop`, `cancel`, `cleanup`, `report`. Advanced: `graph --history`, parallel config.
 
 ## Invariants
 
 - `shell=False`; never `pkill -f`
 - `os.killpg` for timeout cleanup
 - No merge on failed/skipped tests (unless `allow_merge_without_tests`)
+- Default success is handoff (`auto_merge=false`); merge is opt-in
+- `require_distinct_reviewer=true` by default; writer ≠ reviewer
+- `auto` requires `test_command` unless `allow_merge_without_tests`
 - Never switch user's main checkout
 - Dirty repo blocks run; bounded `max_review_patch_bytes` for reviewer
 - `claude-code` planner/reviewer: `print_only=True` in `run.py`

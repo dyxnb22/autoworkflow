@@ -70,8 +70,8 @@ DEFAULT_CONFIG: LoopConfig = {
     # Merging into the user's base branch is opt-in.
     "auto_merge": False,
     "allow_merge_without_tests": False,
-    # Strongly recommended; default false preserves compatibility for existing configs.
-    "require_distinct_reviewer": False,
+    # Strongly recommended product gate; default true (escape hatch: allow_same_reviewer).
+    "require_distinct_reviewer": True,
     "max_review_patch_bytes": 60000,
     "cursor_force": False,
     "cursor_sandbox": "",

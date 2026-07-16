@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from cc_loop import __version__
+from cc_loop.config import distinct_reviewer_satisfied
 from cc_loop.failure import (
     FailureReport,
     FailureType,
@@ -17,6 +18,7 @@ from cc_loop.failure import (
     read_failure_report,
     reviewer_gate_passed,
 )
+from cc_loop.prompt_metadata import resolve_provider_model
 from cc_loop.recovery import AutoStep, decide_auto_step, derive_next_action_from_step
 from cc_loop.prompt_cache import prompt_cache_snapshot
 from cc_loop.state import (
@@ -30,9 +32,79 @@ from cc_loop.state import (
 )
 from cc_loop.budgets import wall_clock_elapsed_seconds
 from cc_loop.runner_heartbeat import RunnerHeartbeat, is_heartbeat_stale, read_heartbeat
-from cc_loop.task_graph import build_graph_snapshot, ensure_task_graph, graph_status_summary, sync_graph_node_with_attempt
+from cc_loop.task_graph import (
+    build_graph_snapshot,
+    ensure_task_graph,
+    graph_complete,
+    graph_status_summary,
+    sync_graph_node_with_attempt,
+)
 
 INTEGRATION_SCHEMA_VERSION = 1
+
+# Stable delivery outcome vocabulary shared by status/summary (Luma).
+SUCCESS_READY_FOR_HANDOFF = "ready_for_handoff"
+SUCCESS_MERGED = "merged"
+SUCCESS_STOPPED = "stopped"
+SUCCESS_FAILED = "failed"
+SUCCESS_CANCELLED = "cancelled"
+SUCCESS_RUNNING = "running"
+SUCCESS_INITIALIZED = "initialized"
+
+
+def build_roles_snapshot(state: TaskState) -> dict[str, dict[str, str]]:
+    """Planner/implementer/reviewer provider+model snapshot."""
+    providers = dict(state.providers) or {
+        "planner": str(state.config.get("planner_provider", "")),
+        "implementer": str(state.config.get("implementer_provider", "")),
+        "reviewer": str(state.config.get("reviewer_provider", "")),
+    }
+    roles: dict[str, dict[str, str]] = {}
+    for role in ("planner", "implementer", "reviewer"):
+        provider = str(providers.get(role, "") or "")
+        roles[role] = {
+            "provider": provider,
+            "model": resolve_provider_model(provider, state.config) if provider else "",
+        }
+    return roles
+
+
+def derive_success_outcome(state: TaskState, attempt: AttemptRecord | None) -> str:
+    """Map task state to a stable success/outcome enum for Luma."""
+    if state.status == TaskStatus.CANCELLED:
+        return SUCCESS_CANCELLED
+    if state.status == TaskStatus.FAILED:
+        return SUCCESS_FAILED
+    if state.status == TaskStatus.INITIALIZED:
+        return SUCCESS_INITIALIZED
+    if state.status in {TaskStatus.RUNNING, TaskStatus.INTERRUPTED, TaskStatus.REPLANNING}:
+        return SUCCESS_RUNNING
+
+    if attempt is not None and attempt.phase == AttemptPhase.MERGED:
+        return SUCCESS_MERGED
+
+    if state.status == TaskStatus.DONE:
+        if attempt is not None and attempt.phase == AttemptPhase.APPROVED:
+            if not bool(state.config.get("auto_merge", False)):
+                return SUCCESS_READY_FOR_HANDOFF
+        if attempt is not None and attempt.phase == AttemptPhase.MERGED:
+            return SUCCESS_MERGED
+        if not bool(state.config.get("auto_merge", False)):
+            return SUCCESS_READY_FOR_HANDOFF
+        return SUCCESS_MERGED
+
+    if (
+        state.status == TaskStatus.STOPPED
+        and attempt is not None
+        and attempt.phase == AttemptPhase.APPROVED
+        and attempt.decision == "approve"
+        and not bool(state.config.get("auto_merge", False))
+    ):
+        graph = ensure_task_graph(state)
+        if graph is None or graph_complete(graph):
+            return SUCCESS_READY_FOR_HANDOFF
+
+    return SUCCESS_STOPPED
 
 
 def _safe_read_json(path: Path) -> dict | None:
@@ -573,6 +645,11 @@ def build_status_snapshot(state: TaskState, state_root: Path) -> dict:
         "iteration": state.iteration,
         "test_command_argv": list(state.config.get("test_command") or []),
         "test_command_display": format_test_command_display(state.config.get("test_command")),
+        "roles": build_roles_snapshot(state),
+        "distinct_reviewer": distinct_reviewer_satisfied(state.config, state.providers),
+        "require_distinct_reviewer": bool(state.config.get("require_distinct_reviewer", True)),
+        "auto_merge": bool(state.config.get("auto_merge", False)),
+        "success": derive_success_outcome(state, attempt),
         "attempt": build_attempt_snapshot(state, attempt, state_root),
         "failure": build_failure_snapshot(attempt, state_root, state.task_id, state=state),
         "next_action": next_action,

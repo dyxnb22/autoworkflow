@@ -33,7 +33,7 @@ def _cli(*args: str, state_root: Path) -> subprocess.CompletedProcess:
 class DefaultConfigSharpeningTests(unittest.TestCase):
     def test_defaults_favor_handoff_and_single_loop(self) -> None:
         self.assertFalse(DEFAULT_CONFIG["auto_merge"])
-        self.assertFalse(DEFAULT_CONFIG["require_distinct_reviewer"])
+        self.assertTrue(DEFAULT_CONFIG["require_distinct_reviewer"])
         self.assertFalse(DEFAULT_CONFIG["allow_merge_without_tests"])
         self.assertEqual(DEFAULT_CONFIG["planner_granularity"], "single")
         self.assertFalse(DEFAULT_CONFIG["allow_parallel_execution"])
@@ -95,7 +95,6 @@ class DistinctReviewerTests(unittest.TestCase):
                 "fake-implementer",
                 "--reviewer",
                 "fake-implementer",
-                "--require-distinct-reviewer",
                 "--test-command",
                 "--",
                 "true",
@@ -103,6 +102,35 @@ class DistinctReviewerTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("require_distinct_reviewer", result.stderr)
+        finally:
+            env.close()
+
+    def test_init_allow_same_reviewer_escape_hatch(self) -> None:
+        env = TempEnv()
+        try:
+            result = _cli(
+                "init",
+                "--goal",
+                "demo",
+                "--repo",
+                str(env.repo()),
+                "--task-id",
+                "same-ok",
+                "--planner",
+                "fake-planner",
+                "--implementer",
+                "fake-implementer",
+                "--reviewer",
+                "fake-implementer",
+                "--allow-same-reviewer",
+                "--test-command",
+                "--",
+                "true",
+                state_root=env.state_root(),
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            state = load_state("same-ok", env.state_root())
+            self.assertFalse(state.config["require_distinct_reviewer"])
         finally:
             env.close()
 
@@ -226,6 +254,27 @@ class SummaryContractFieldsTests(unittest.TestCase):
             self.assertIn("reviewer (reviews)", human.stdout)
             self.assertIn("Tests:", human.stdout)
             self.assertIn("Handoff:", human.stdout)
+        finally:
+            env.close()
+
+    def test_status_json_includes_delivery_fields(self) -> None:
+        env = TempEnv()
+        try:
+            make_task(repo=env.repo(), state_root=env.state_root(), task_id="status-delivery")
+            result = _cli("status", "--task-id", "status-delivery", "--json", state_root=env.state_root())
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            payload = json.loads(result.stdout)
+            for key in ("roles", "distinct_reviewer", "require_distinct_reviewer", "auto_merge", "success"):
+                self.assertIn(key, payload)
+            self.assertTrue(payload["require_distinct_reviewer"])
+            self.assertIn("provider", payload["roles"]["implementer"])
+            self.assertEqual(payload["success"], "initialized")
+
+            human = _cli("status", "--task-id", "status-delivery", state_root=env.state_root())
+            self.assertEqual(human.returncode, 0)
+            self.assertIn("roles: write=", human.stdout)
+            self.assertIn("distinct_reviewer:", human.stdout)
+            self.assertIn("success:", human.stdout)
         finally:
             env.close()
 

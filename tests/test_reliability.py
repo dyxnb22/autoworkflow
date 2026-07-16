@@ -352,6 +352,8 @@ class PlannerGranularityTests(unittest.TestCase):
             state.config["planner_granularity"] = "single"
             prompt = build_planner_prompt(state)
             self.assertIn("SINGLE NODE", prompt)
+            self.assertIn("Preferred Single-Loop Shape", prompt)
+            self.assertNotIn("Prefer task_graph mode when decomposition", prompt)
         finally:
             env.close()
 

@@ -46,7 +46,7 @@ def _verify_test_command(config: LoopConfig) -> None:
 
 def verify_distinct_reviewer(config: LoopConfig, providers: dict[str, str]) -> None:
     """Fail when require_distinct_reviewer is set and writer/reviewer identities match."""
-    if not bool(config.get("require_distinct_reviewer", False)):
+    if not bool(config.get("require_distinct_reviewer", True)):
         return
     if distinct_reviewer_satisfied(config, providers):
         return
@@ -54,17 +54,17 @@ def verify_distinct_reviewer(config: LoopConfig, providers: dict[str, str]) -> N
 
 
 def distinct_reviewer_recommendation(config: LoopConfig, providers: dict[str, str]) -> str | None:
-    """Return a strong recommendation string when write/review separation is weak."""
-    if bool(config.get("require_distinct_reviewer", False)):
+    """Return a strong recommendation string when write/review separation is weak or disabled."""
+    if bool(config.get("require_distinct_reviewer", True)):
         return None
     if distinct_reviewer_satisfied(config, providers):
         return (
-            "recommendation: set require_distinct_reviewer=true to enforce "
-            "writer/reviewer separation (already satisfied by current providers)"
+            "recommendation: re-enable require_distinct_reviewer "
+            "(writer/reviewer identities already differ)"
         )
     return (
-        "recommendation: set require_distinct_reviewer=true and use different "
-        "implementer/reviewer providers (and/or models); the writer must not review their own work"
+        "warning: require_distinct_reviewer is disabled and implementer/reviewer match; "
+        "the writer can review their own work — prefer distinct providers/models"
     )
 
 

@@ -180,7 +180,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--require-distinct-reviewer",
         action="store_true",
         default=False,
-        help="Require implementer and reviewer provider/model identities to differ (strongly recommended)",
+        help="Enforce distinct implementer/reviewer identities (default: already on)",
+    )
+    init_parser.add_argument(
+        "--allow-same-reviewer",
+        action="store_true",
+        default=False,
+        help="Escape hatch: allow implementer and reviewer to share provider+model (not recommended)",
     )
     init_parser.add_argument("--max-iterations", type=int, default=None, help="Override max_iterations")
     init_parser.add_argument("--max-retries", type=int, default=None, help="Override max_retries_per_step")
@@ -189,12 +195,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--claude-code-model", default=None, help="Claude Code model override")
     init_parser.add_argument("--cursor-force", action="store_true", default=False, help="Pass --force to cursor agent")
     init_parser.add_argument("--cursor-sandbox", default=None, help="Cursor sandbox mode override")
-    init_parser.add_argument("--max-parallel-nodes", type=int, default=None, help="Max concurrent graph nodes (default: 1)")
+    init_parser.add_argument("--max-parallel-nodes", type=int, default=None, help="Advanced: max concurrent graph nodes")
     init_parser.add_argument(
         "--allow-parallel-execution",
         action="store_true",
         default=False,
-        help="Enable experimental parallel graph node execution (requires max_parallel_nodes > 1)",
+        help="Advanced: enable experimental parallel graph node execution",
     )
     init_parser.add_argument(
         "--max-wall-clock-seconds",
@@ -273,11 +279,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--require-distinct-reviewer",
         action="store_true",
         default=False,
-        help="Fail when implementer and reviewer provider/model identities match",
+        help="Enforce distinct implementer/reviewer identities (default: already on)",
+    )
+    doctor_parser.add_argument(
+        "--allow-same-reviewer",
+        action="store_true",
+        default=False,
+        help="Escape hatch: skip distinct-reviewer enforcement for this check",
     )
     doctor_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
 
-    graph_parser = subparsers.add_parser("graph", help="Show task graph progress")
+    graph_parser = subparsers.add_parser("graph", help="Advanced: show task graph progress")
     _task_id_arg(graph_parser)
     graph_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
     graph_parser.add_argument("--history", action="store_true", default=False, help="Show graph mutation history")
@@ -389,7 +401,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["allow_merge_without_tests"] = True
     if args.auto_merge:
         overrides["auto_merge"] = True
-    if args.require_distinct_reviewer:
+    if args.allow_same_reviewer and args.require_distinct_reviewer:
+        print("error: use either --require-distinct-reviewer or --allow-same-reviewer", file=sys.stderr)
+        return 1
+    if args.allow_same_reviewer:
+        overrides["require_distinct_reviewer"] = False
+    elif args.require_distinct_reviewer:
         overrides["require_distinct_reviewer"] = True
     if args.max_iterations is not None:
         overrides["max_iterations"] = args.max_iterations
@@ -464,6 +481,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"implementer: {config['implementer_provider']}"
     )
     print(f"auto_merge: {bool(config.get('auto_merge', False))}")
+    print(f"require_distinct_reviewer: {bool(config.get('require_distinct_reviewer', True))}")
     if config.get("test_command"):
         print(f"test_command: {format_test_command_argv(config['test_command'])}")
         print(f"test_command_argv: {format_test_command_display(config['test_command'])}")
@@ -494,20 +512,31 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
 
     attempt = state.history[-1] if state.history else None
+    roles = state.providers
     print(f"task_id: {state.task_id}")
     print(f"status: {state.status.value}")
+    print(
+        f"roles: write={roles.get('implementer', '-')}  "
+        f"review={roles.get('reviewer', '-')}  "
+        f"plan={roles.get('planner', '-')}"
+    )
+    from cc_loop.config import distinct_reviewer_satisfied
+    from cc_loop.inspect import derive_success_outcome
+
+    print(f"distinct_reviewer: {distinct_reviewer_satisfied(state.config, state.providers)}")
+    print(f"success: {derive_success_outcome(state, attempt)}")
     if state.config.get("test_command"):
         print(f"test_command_argv: {format_test_command_display(state.config.get('test_command'))}")
     print(f"goal: {state.goal}")
     print(f"target_repo: {state.target_repo}")
     print(f"iteration: {state.iteration}")
     graph = ensure_task_graph(state)
-    if graph is not None:
+    if graph is not None and len(graph.nodes) > 1:
         from cc_loop.task_graph import graph_status_summary
 
         summary = graph_status_summary(graph)
         current = graph.current_node_id or "(none)"
-        print(f"task_graph: {summary['passed']}/{summary['total']} passed (current node: {current})")
+        print(f"task_graph (advanced): {summary['passed']}/{summary['total']} passed (current node: {current})")
     if attempt is not None:
         artifact_root = artifacts_dir(state.task_id, attempt.iteration, attempt.retry, args.state_root)
         print(f"attempt: iter-{attempt.iteration:03d} retry-{attempt.retry:02d}")
@@ -691,6 +720,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"hint: {TEST_COMMAND_HINT}", file=sys.stderr)
             return 1
     try:
+        require_flag: bool | None = None
+        if args.allow_same_reviewer and args.require_distinct_reviewer:
+            print("error: use either --require-distinct-reviewer or --allow-same-reviewer", file=sys.stderr)
+            return 1
+        if args.allow_same_reviewer:
+            require_flag = False
+        elif args.require_distinct_reviewer:
+            require_flag = True
         run_doctor_preflight(
             target_repo=repo,
             base_branch=args.base_branch,
@@ -698,7 +735,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             reviewer=args.reviewer,
             implementer=args.implementer,
             test_command=test_command,
-            require_distinct_reviewer=True if args.require_distinct_reviewer else None,
+            require_distinct_reviewer=require_flag,
         )
     except PreflightError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -715,7 +752,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         overrides["implementer_provider"] = args.implementer
     if test_command is not None:
         overrides["test_command"] = test_command
-    if args.require_distinct_reviewer:
+    if args.allow_same_reviewer:
+        overrides["require_distinct_reviewer"] = False
+    elif args.require_distinct_reviewer:
         overrides["require_distinct_reviewer"] = True
     config = merge_config(overrides)
     providers = {

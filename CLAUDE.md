@@ -53,7 +53,7 @@ claude --dangerously-skip-permissions [-m MODEL] -p "<prompt>"
 
 Orchestrator must pass `print_only=True` for planner/reviewer in `run.py`.
 
-Planner should prefer task graph JSON (`mode: task_graph`); legacy single-step JSON still works.
+Planner prefers a **single closed loop** by default (`planner_granularity=single`). Multi-node `mode: task_graph` is advanced; legacy single-step JSON still works.
 
 ## Invariants
 

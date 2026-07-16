@@ -10,13 +10,15 @@ from cc_loop import __version__
 from cc_loop.config import distinct_reviewer_satisfied
 from cc_loop.inspect import (
     INTEGRATION_SCHEMA_VERSION,
+    SUCCESS_READY_FOR_HANDOFF,
     build_attempt_snapshot,
     build_failure_snapshot,
+    build_roles_snapshot,
     derive_next_action,
+    derive_success_outcome,
     is_runner_alive,
 )
 from cc_loop.prompt_cache import prompt_cache_snapshot
-from cc_loop.prompt_metadata import resolve_provider_model
 from cc_loop.recovery import AutoStep, decide_auto_step
 from cc_loop.report import build_report
 from cc_loop.state import (
@@ -32,21 +34,25 @@ from cc_loop.execution_timeline import (
     build_execution_timeline,
     execution_timeline_path,
 )
-from cc_loop.task_graph import ensure_task_graph, graph_complete
+from cc_loop.task_graph import ensure_task_graph
 from cc_loop.trace import trace_file_path
 
 
 SUMMARY_SCHEMA_VERSION = 1
 RUN_SUMMARY_FILENAME = "run.summary.json"
 
-# Clear success/outcome vocabulary for Luma and human summary consumers.
-SUCCESS_READY_FOR_HANDOFF = "ready_for_handoff"
-SUCCESS_MERGED = "merged"
-SUCCESS_STOPPED = "stopped"
-SUCCESS_FAILED = "failed"
-SUCCESS_CANCELLED = "cancelled"
-SUCCESS_RUNNING = "running"
-SUCCESS_INITIALIZED = "initialized"
+# Re-export for tests/importers that previously imported from summary.
+__all__ = [
+    "RUN_SUMMARY_FILENAME",
+    "SUMMARY_SCHEMA_VERSION",
+    "SUCCESS_READY_FOR_HANDOFF",
+    "build_task_summary",
+    "format_task_summary_human",
+    "should_write_run_summary",
+    "write_run_summary_if_terminal",
+    "finalize_terminal_task",
+    "derive_success_outcome",
+]
 
 
 def _safe_read_json(path: Path) -> dict[str, Any] | None:
@@ -95,22 +101,6 @@ def _reviewer_metrics_summary(metrics: dict[str, Any] | None) -> dict[str, Any] 
         "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
         "estimated_avoidable_miss_tokens": metrics.get("estimated_avoidable_miss_tokens"),
     }
-
-
-def _role_snapshot(state: TaskState) -> dict[str, dict[str, str]]:
-    providers = dict(state.providers) or {
-        "planner": str(state.config.get("planner_provider", "")),
-        "implementer": str(state.config.get("implementer_provider", "")),
-        "reviewer": str(state.config.get("reviewer_provider", "")),
-    }
-    roles: dict[str, dict[str, str]] = {}
-    for role in ("planner", "implementer", "reviewer"):
-        provider = str(providers.get(role, "") or "")
-        roles[role] = {
-            "provider": provider,
-            "model": resolve_provider_model(provider, state.config) if provider else "",
-        }
-    return roles
 
 
 def _plan_summary(state: TaskState, attempt: AttemptRecord | None) -> str:
@@ -186,44 +176,6 @@ def _latest_reject_reason(state: TaskState) -> str:
     return ""
 
 
-def derive_success_outcome(state: TaskState, attempt: AttemptRecord | None) -> str:
-    """Map task state to a stable success/outcome enum for Luma."""
-    if state.status == TaskStatus.CANCELLED:
-        return SUCCESS_CANCELLED
-    if state.status == TaskStatus.FAILED:
-        return SUCCESS_FAILED
-    if state.status == TaskStatus.INITIALIZED:
-        return SUCCESS_INITIALIZED
-    if state.status in {TaskStatus.RUNNING, TaskStatus.INTERRUPTED, TaskStatus.REPLANNING}:
-        return SUCCESS_RUNNING
-
-    if attempt is not None and attempt.phase == AttemptPhase.MERGED:
-        return SUCCESS_MERGED
-
-    if state.status == TaskStatus.DONE:
-        if attempt is not None and attempt.phase == AttemptPhase.APPROVED:
-            if not bool(state.config.get("auto_merge", False)):
-                return SUCCESS_READY_FOR_HANDOFF
-        if attempt is not None and attempt.phase == AttemptPhase.MERGED:
-            return SUCCESS_MERGED
-        if not bool(state.config.get("auto_merge", False)):
-            return SUCCESS_READY_FOR_HANDOFF
-        return SUCCESS_MERGED
-
-    if (
-        state.status == TaskStatus.STOPPED
-        and attempt is not None
-        and attempt.phase == AttemptPhase.APPROVED
-        and attempt.decision == "approve"
-        and not bool(state.config.get("auto_merge", False))
-    ):
-        graph = ensure_task_graph(state)
-        if graph is None or graph_complete(graph):
-            return SUCCESS_READY_FOR_HANDOFF
-
-    return SUCCESS_STOPPED
-
-
 def _artifact_key_paths(artifact_paths: dict[str, str]) -> dict[str, str]:
     preferred = (
         "plan_parsed",
@@ -280,7 +232,7 @@ def build_task_summary(state: TaskState, state_root: Path) -> dict[str, Any]:
     if prompt_cache is None and artifact_paths.get("prompt_cache"):
         prompt_cache = prompt_cache_snapshot(Path(artifact_paths["prompt_cache"]))
 
-    roles = _role_snapshot(state)
+    roles = build_roles_snapshot(state)
     running, _ = is_runner_alive(state_root, state.task_id)
     next_action = derive_next_action(
         state,
@@ -306,7 +258,7 @@ def build_task_summary(state: TaskState, state_root: Path) -> dict[str, Any]:
         "providers": dict(state.providers),
         "roles": roles,
         "distinct_reviewer": distinct_reviewer_satisfied(state.config, state.providers),
-        "require_distinct_reviewer": bool(state.config.get("require_distinct_reviewer", False)),
+        "require_distinct_reviewer": bool(state.config.get("require_distinct_reviewer", True)),
         "auto_merge": bool(state.config.get("auto_merge", False)),
         "plan_summary": _plan_summary(state, attempt),
         "latest_attempt": latest_attempt,
