@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prefer Rust cc-loop when built; fall back to Python module.
+# Run the Rust cc-loop binary (release preferred, then debug).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_BIN="$ROOT/rust/target/release/cc-loop"
@@ -11,5 +11,7 @@ elif [[ -x "$RUST_DBG" ]]; then
 elif command -v cc-loop >/dev/null 2>&1 && [[ "$(command -v cc-loop)" != "$0" ]]; then
   exec "$(command -v cc-loop)" "$@"
 else
-  exec python -m cc_loop.cli "$@"
+  echo "cc-loop: Rust binary not found. Build with: make release && make install" >&2
+  echo "  (expected $RUST_BIN or $RUST_DBG)" >&2
+  exit 127
 fi

@@ -12,7 +12,7 @@ goal → plan → implement → test → review
 
 Merge into your base branch is **opt-in** (`--auto-merge`). Success means tests green + review approve + changes sitting on an attempt branch you can hand off.
 
-This repo is the workflow tooling itself. It is not a general multi-agent framework and does not compete with Cursor/Claude built-in subagents on “who splits tasks better.”
+This repo is the workflow tooling itself (Rust). It is not a general multi-agent framework and does not compete with Cursor/Claude built-in subagents on “who splits tasks better.”
 
 ## Positioning
 
@@ -35,18 +35,16 @@ Default providers (still changeable):
 4. Reviewer approves or rejects; reject → resume implementer with the rejection reason.
 5. On approve + green tests: **ready for handoff** on the attempt branch (`auto_merge=false` by default).
 
-## Rust rewrite (v0.12)
-
-The delivery engine is rewritten in Rust under [`rust/`](rust/). Integration schema stays **1** ([INTEGRATION.md](docs/INTEGRATION.md)).
+## Install / build (v0.12 Rust)
 
 ```bash
-make rust-test && make rust-release
-make install-rust-bin          # ~/.local/bin/cc-loop
+make test && make release
+make install                 # ~/.local/bin/cc-loop
 # or without install:
 ./scripts/cc-loop --version
 ```
 
-See [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md). Rust is the default implementation; the Python package remains a fallback (`CC_LOOP_FORCE_PYTHON=1`).
+Implementation lives under [`rust/`](rust/). Integration schema stays **1** ([INTEGRATION.md](docs/INTEGRATION.md)). See [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md).
 
 ### Advanced (explicit)
 
@@ -54,9 +52,9 @@ Multi-node task graphs, parallel nodes (`allow_parallel_execution`), and auto-me
 
 ## Current status
 
-Status: **v0.11 product sharpening** (package 0.11.0).
+Status: **v0.12 Rust** (package 0.12.0) — role-separated delivery engine with v0.11 product gates.
 
-v1 core loop + integration contract + recovery + task graphs + runner control + events/reports + replanning + multi-role routing + parallel (advanced) + observability + **v0.11: distinct-reviewer gate, hard auto test gate, handoff-default success, Luma summary contract**.
+v1 core loop + integration contract + recovery + task graphs + runner control + events/reports + replanning + multi-role routing + parallel (advanced) + observability + distinct-reviewer gate, hard auto test gate, handoff-default success, Luma summary contract.
 
 References:
 
@@ -77,10 +75,10 @@ cc-loop init \
   --planner claude-code \
   --reviewer claude-code \
   --implementer cursor \
-  --test-command -- python -m pytest tests/ -q
+  --test-command -- cargo test -q
 
 cc-loop doctor --repo /path/to/repo \
-  --test-command -- python -m pytest tests/ -q
+  --test-command -- cargo test -q
 cc-loop auto --detach --task-id my-task
 cc-loop status --task-id my-task --json
 cc-loop summary --task-id my-task --json   # Luma / TUI single-file recap
@@ -89,7 +87,7 @@ cc-loop summary --task-id my-task --json   # Luma / TUI single-file recap
 Default providers already separate writer (`cursor`) from reviewer (`codex`). Opt into merging only when you mean it:
 
 ```bash
-cc-loop init ... --auto-merge --test-command -- pytest -q
+cc-loop init ... --auto-merge --test-command -- cargo test -q
 ```
 
 Set `CC_LOOP_STATE_ROOT` to override the default `~/.cc-loop` state directory without passing `--state-root` on every command.
@@ -103,6 +101,7 @@ Global flags such as `--state-root` must appear **before** the subcommand, e.g. 
 | `codex` | planner, reviewer | `codex exec` CLI; JSON output |
 | `cursor` | implementer | `cursor agent` CLI; edits in worktree |
 | `claude-code` | planner, reviewer, implementer | `claude` CLI; `--print` for planning/review, direct edits for implementation |
+| `fake` | all (offline) | `CC_LOOP_FAKE_PROVIDERS=1` for local contract loops |
 
 ## Non-goals
 
@@ -110,4 +109,4 @@ Global flags such as `--state-root` must appear **before** the subcommand, e.g. 
 - No general multi-agent framework or LangGraph-style graph runtime as the product.
 - No automatic merge when tests fail; no default merge into the user’s main checkout.
 - No edits in the user’s main working tree; dirty repos block runs.
-- No `pkill -f`; subprocess cleanup uses process groups (`shell=False`).
+- No `pkill -f`; subprocess cleanup uses process groups (`shell=false`).

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Canonical agent reference for cc-loop. **Package 0.11.0.**
+Canonical agent reference for cc-loop. **Package 0.12.0 (Rust).**
 
 ## Product positioning
 
@@ -19,11 +19,12 @@ goal → plan → implement → test → review → (approve: handoff | reject/f
 - [docs/EXIT_CODES.md](docs/EXIT_CODES.md)
 - [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) — task graphs (**advanced**)
 - [docs/EVOLUTION.md](docs/EVOLUTION.md) — historical v0.4–v0.10 roadmap (superseded for product positioning by README / this file)
+- [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md) — Rust rewrite status
 - [CLAUDE.md](CLAUDE.md) — Claude Code entry
 - [.cursor/rules/cc-loop.mdc](.cursor/rules/cc-loop.mdc) — Cursor rules
 - [CHANGELOG.md](CHANGELOG.md)
 
-## v0.11 product gates
+## Product gates
 
 | Config | Default | Role |
 |--------|---------|------|
@@ -40,25 +41,28 @@ goal → plan → implement → test → review → (approve: handoff | reject/f
 
 Advanced / operational: `graph` · `report` · `stop` · `cancel` · `cleanup` · `eval` · `export`
 
-## Key modules
+## Key modules (`rust/crates/cc-loop-core`)
 
 | Module | Role |
 |--------|------|
-| `cli.py` | argparse, command handlers |
-| `config.py` | defaults and distinct-reviewer helpers |
-| `preflight.py` | dirty-repo / provider / distinct-reviewer gates |
-| `run.py` | phase loop; handoff finalize; planner/reviewer `print_only` for claude-code |
-| `recovery.py` | `decide_auto_step` (reject→resume, repair, handoff done) |
-| `inspect.py` | `status --json` including roles/success |
-| `summary.py` | Luma `summary --json` / `run.summary.json` |
-| `state.py` | persistence; old state without `task_graph` still loads |
-| `task_graph.py` | advanced multi-node graphs |
-| `failure.py` / `repair_prompts.py` | classification and repair prompts |
-| `providers/*.py` | codex, cursor, claude_code |
+| `orchestrator` | phase loop; handoff finalize; parallel dispatch |
+| `config` | defaults and distinct-reviewer helpers |
+| `preflight` | dirty-repo / provider / distinct-reviewer gates |
+| `recovery` | `decide_auto_step` (reject→resume, repair, handoff done) |
+| `inspect` | `status --json` including roles/success |
+| `summary` | Luma `summary --json` / `run.summary.json` |
+| `state` | persistence; old state without `task_graph` still loads |
+| `graph` | advanced multi-node graphs |
+| `parallel` | concurrent ready-node execution + merge queue |
+| `failure` / `repair` | classification and repair prompts |
+| `prompt_cache` | stable/dynamic prefix health scoring |
+| `provider/*` | codex, cursor, claude_code, fake |
+
+CLI binary: `rust/crates/cc-loop-cli`.
 
 ## Invariants
 
-- `shell=False`; never `pkill -f`; process-group timeout cleanup
+- `shell=false`; never `pkill -f`; process-group timeout cleanup
 - Dirty repo blocks run; never switch user’s main checkout
 - No success on failed/skipped tests unless `allow_merge_without_tests`
 - Default success is handoff; merge is opt-in
@@ -69,7 +73,8 @@ Advanced / operational: `graph` · `report` · `stop` · `cancel` · `cleanup` �
 ## Tests
 
 ```bash
-python -m pytest tests/ -q
+make test
+# or: cd rust && cargo test --workspace
 ```
 
-Product gates: `tests/test_product_sharpening.py`. Contract: `tests/test_cli_contract.py`. Loop: `tests/test_run_flow.py`. Recovery: `tests/test_recovery_dispatch.py`, `tests/test_auto_recovery.py`.
+Contract: `rust/crates/cc-loop-contract-tests`. Clippy: `make clippy`.

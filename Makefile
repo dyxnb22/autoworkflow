@@ -1,6 +1,12 @@
-# Rust build helpers
+# cc-loop — Rust delivery engine
 
-.PHONY: rust-build rust-test rust-clippy rust-release install-rust-bin
+.PHONY: build test clippy release install rust-build rust-test rust-clippy rust-release install-rust-bin
+
+build: rust-build
+test: rust-test
+clippy: rust-clippy
+release: rust-release
+install: install-rust-bin
 
 rust-build:
 	cd rust && cargo build

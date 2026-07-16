@@ -188,7 +188,8 @@ Check `test.output.txt` for the test output. The worktree is still intact at `wo
 
 ```bash
 cd <worktree_path>
-pytest tests/ -v
+# run the project's configured tests, e.g.:
+cargo test
 ```
 
 After manual fixes (if any), stage and commit in the worktree, then `cc-loop resume`. The reviewer will still run and can produce a `retry_prompt` for the next attempt.

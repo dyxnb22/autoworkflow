@@ -8,3 +8,5 @@ dist/
 build/
 *.egg-info/
 *.pyc
+rust/target/
+/tmp/

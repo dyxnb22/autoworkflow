@@ -1,11 +1,11 @@
 # cc-loop integration contract (v1)
 
-This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps / Luma must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or private delivery-loop internals.
+This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps / Luma must depend only on the CLI subset and JSON schemas here—not on internal modules, artifact layouts, or private delivery-loop internals.
 
-**Package version:** 0.12.0 (Rust default) / 0.11.0 (Python fallback)  
+**Package version:** 0.12.0 (Rust)  
 **Integration schema version:** 1
 
-> Prefer the Rust binary (`make install-rust-bin`, `./scripts/cc-loop`, or `rust/target/release/cc-loop`). The Python CLI delegates to Rust when a binary is present; use `CC_LOOP_FORCE_PYTHON=1` only for fallback. See [rust/docs/MIGRATION.md](../rust/docs/MIGRATION.md).
+> Spawn the `cc-loop` binary (`make install`, `./scripts/cc-loop`, or `rust/target/release/cc-loop`). See [rust/docs/MIGRATION.md](../rust/docs/MIGRATION.md).
 
 ## Purpose
 
@@ -13,7 +13,7 @@ cc-loop is a **role-separated delivery engine** (not a general multi-agent frame
 
 1. Spawn documented commands with `subprocess`
 2. Parse `status --json` and `summary --json` (and optionally `list --json`, `doctor --json`)
-3. Never embed cc-loop Python code or duplicate its state machine
+3. Never embed cc-loop internals or duplicate its state machine
 
 Default success = tests green + review approve + changes ready for handoff on an attempt branch. Merging into the user’s base branch is opt-in (`auto_merge`).
 
@@ -52,11 +52,11 @@ Environment:
 ```bash
 cc-loop doctor --repo "$PROJECT_PATH" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --test-command -- python -m pytest tests/ -q
+  --test-command -- cargo test -q
 
 cc-loop init --goal "..." --repo "$PROJECT_PATH" --task-id "$TASK_ID" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --test-command -- python -m pytest tests/ -q
+  --test-command -- cargo test -q
 
 cc-loop auto --detach --task-id "$TASK_ID"
 
@@ -88,7 +88,7 @@ Stdout is a single JSON object. No extra prose.
 ```json
 {
   "schema_version": 1,
-  "cc_loop_version": "0.11.0",
+  "cc_loop_version": "0.12.0",
   "task_id": "abc123",
   "goal": "...",
   "target_repo": "/absolute/path",
@@ -282,7 +282,7 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 
 - Parse artifact directories or internal prompt files
 - Block on foreground `auto` for long-running tasks (use `--detach`)
-- Import `cc_loop` Python modules from another application
+- Import or link against cc-loop internals from another application (use the CLI only)
 - Depend on undocumented CLI flags or exit-code nuances without reading `status --json`
 
 ## `init` flags (integration-relevant)

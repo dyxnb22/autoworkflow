@@ -1,40 +1,34 @@
 # Rust rewrite migration (v0.12) — complete
 
-## Status: Rust is the default implementation
+## Status: Rust is the sole implementation
+
+The Python package (`src/cc_loop/`, `pyproject.toml`, pytest suite) has been removed. All runtime behavior lives under `rust/`.
 
 | Area | Status |
 |------|--------|
 | CLI surface (all INTEGRATION commands) | Done |
-| `status --json` flat fields (`attempt`, `running`, `runner_*`, `can_*`, …) | Done |
+| `status --json` flat fields | Done |
 | `list --json` as array | Done |
 | `graph --json` `{task_graph:…}` wrapper | Done |
 | `summary --json` + observability paths | Done |
 | Config/state/git/locks/legacy load | Done |
-| Providers argv parity (codex stdin, cursor agent, claude --print/--model) | Done |
+| Providers (codex, cursor, claude, fake) | Done |
 | Single-loop + reject/repair + handoff | Done |
-| auto_direct planner, review_context, budgets | Done |
-| Events / failure.report / trace / timeline / prompt_cache (real health scoring) | Done |
-| Sequential graph + merge_queue + replan | Done |
-| True concurrent parallel node execution (`allow_parallel_execution` + `max_parallel_nodes>1`) | Done |
+| Prompt-cache health scoring | Done |
+| Concurrent parallel nodes (opt-in) | Done |
 | Detach / stop / cancel / cleanup | Done |
 | Eval / export | Done |
-| Contract tests | Done |
-| Default entry | Rust binary (`scripts/cc-loop`, `make install-rust-bin`, or Python CLI delegates to Rust) |
+| Contract tests | `cargo test` in `cc-loop-contract-tests` |
 
 ## Build / test / install
 
 ```bash
-make rust-test
-make rust-clippy
-make rust-release
-make install-rust-bin   # ~/.local/bin/cc-loop
-# or:
+make test
+make clippy
+make release
+make install   # ~/.local/bin/cc-loop
 ./scripts/cc-loop --version
 ```
-
-Python `cc-loop` / `python -m cc_loop.cli` execs the Rust binary when found.
-Force the Python implementation with `CC_LOOP_FORCE_PYTHON=1`.
-Override binary path with `CC_LOOP_BIN=/path/to/cc-loop`.
 
 ## Fake offline loop
 
@@ -45,7 +39,6 @@ export CC_LOOP_FAKE_PROVIDERS=1
   --test-command true --task-id t1
 ./scripts/cc-loop --state-root /tmp/s auto --task-id t1
 ./scripts/cc-loop --state-root /tmp/s status --task-id t1 --json
-./scripts/cc-loop --state-root /tmp/s summary --task-id t1 --json
 ```
 
 ## Invariants
