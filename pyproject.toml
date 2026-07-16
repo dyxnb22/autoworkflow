@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cc-loop"
-version = "0.10.0"
-description = "Local orchestrator for planner, implementer, and reviewer coding agents"
+version = "0.11.0"
+description = "Role-separated delivery engine: planner/reviewer vs implementer, with a hard test gate"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []

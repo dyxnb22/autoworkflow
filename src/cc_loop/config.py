@@ -22,6 +22,7 @@ class LoopConfig(TypedDict, total=False):
     base_branch: str
     auto_merge: bool
     allow_merge_without_tests: bool
+    require_distinct_reviewer: bool
     max_review_patch_bytes: int
     cursor_force: bool
     cursor_sandbox: str
@@ -65,8 +66,12 @@ DEFAULT_CONFIG: LoopConfig = {
     "cursor_model": "",
     "claude_code_model": "",
     "base_branch": "main",
-    "auto_merge": True,
+    # Default success = tests green + review approve + branch ready for handoff.
+    # Merging into the user's base branch is opt-in.
+    "auto_merge": False,
     "allow_merge_without_tests": False,
+    # Strongly recommended; default false preserves compatibility for existing configs.
+    "require_distinct_reviewer": False,
     "max_review_patch_bytes": 60000,
     "cursor_force": False,
     "cursor_sandbox": "",
@@ -85,7 +90,8 @@ DEFAULT_CONFIG: LoopConfig = {
     "max_parallel_nodes": 1,
     "allow_parallel_execution": False,
     "allow_node_policy_weakening": False,
-    "planner_granularity": "auto",
+    # Default path is a single closed loop; multi-node graphs are advanced.
+    "planner_granularity": "single",
     "planner_mode": "auto",
     "auto_direct_planner": True,
     "auto_direct_max_goal_chars": 500,
@@ -102,3 +108,41 @@ def merge_config(overrides: dict[str, Any] | None = None) -> LoopConfig:
     if overrides:
         config.update(overrides)
     return config
+
+
+def role_provider_identity(provider: str, config: LoopConfig) -> tuple[str, str]:
+    """Return (provider, model) identity used for distinct-reviewer checks."""
+    from cc_loop.prompt_metadata import resolve_provider_model
+
+    name = str(provider or "").strip()
+    model = resolve_provider_model(name, config) if name else ""
+    return name, model
+
+
+def distinct_reviewer_satisfied(config: LoopConfig, providers: dict[str, str] | None = None) -> bool:
+    """True when implementer and reviewer identities differ (provider and/or model)."""
+    roles = providers or {
+        "implementer": str(config.get("implementer_provider", "")),
+        "reviewer": str(config.get("reviewer_provider", "")),
+    }
+    implementer = role_provider_identity(str(roles.get("implementer", "")), config)
+    reviewer = role_provider_identity(str(roles.get("reviewer", "")), config)
+    if not implementer[0] or not reviewer[0]:
+        return False
+    return implementer != reviewer
+
+
+def format_distinct_reviewer_error(config: LoopConfig, providers: dict[str, str] | None = None) -> str:
+    roles = providers or {
+        "implementer": str(config.get("implementer_provider", "")),
+        "reviewer": str(config.get("reviewer_provider", "")),
+    }
+    impl_name, impl_model = role_provider_identity(str(roles.get("implementer", "")), config)
+    rev_name, rev_model = role_provider_identity(str(roles.get("reviewer", "")), config)
+    impl_label = impl_name + (f" model={impl_model}" if impl_model else "")
+    rev_label = rev_name + (f" model={rev_model}" if rev_model else "")
+    return (
+        "require_distinct_reviewer=true but implementer and reviewer are the same "
+        f"({impl_label}); configure a different reviewer provider (and/or model) so the "
+        "writer cannot review their own work"
+    )

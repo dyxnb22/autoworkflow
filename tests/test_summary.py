@@ -48,6 +48,12 @@ class SummaryCommandTests(unittest.TestCase):
             self.assertIn("artifact_paths", payload)
             self.assertIn("schema_version", payload)
             self.assertIn("execution_timeline", payload)
+            self.assertIn("roles", payload)
+            self.assertIn("distinct_reviewer", payload)
+            self.assertIn("tests", payload)
+            self.assertIn("success", payload)
+            self.assertIn("next_action", payload)
+            self.assertIn("phase", payload)
         finally:
             env.close()
 
@@ -59,6 +65,8 @@ class SummaryCommandTests(unittest.TestCase):
             text = format_task_summary_human(summary)
             self.assertIn("summary-human", text)
             self.assertIn("Status:", text)
+            self.assertIn("implementer (writes)", text)
+            self.assertIn("distinct_reviewer:", text)
         finally:
             env.close()
 

@@ -1,17 +1,19 @@
 # cc-loop integration contract (v1)
 
-This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
+This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps / Luma must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
 
-**Package version:** 0.10.0  
+**Package version:** 0.11.0  
 **Integration schema version:** 1
 
 ## Purpose
 
-cc-loop is a local CLI orchestrator. External apps should:
+cc-loop is a **role-separated delivery engine** (not a general multi-agent framework). External apps should:
 
 1. Spawn documented commands with `subprocess`
-2. Parse `status --json` (and optionally `list --json`, `doctor --json`)
+2. Parse `status --json` and `summary --json` (and optionally `list --json`, `doctor --json`)
 3. Never embed cc-loop Python code or duplicate its state machine
+
+Default success = tests green + review approve + changes ready for handoff on an attempt branch. Merging into the user’s base branch is opt-in (`auto_merge`).
 
 ## Stable CLI subset
 
@@ -23,9 +25,9 @@ These commands and flags are the integration contract. Other commands exist for 
 | `cc-loop doctor --repo PATH` | Preflight without creating a task |
 | `cc-loop list [--repo PATH] [--json]` | Enumerate tasks |
 | `cc-loop status [--task-id ID] [--json]` | Poll task state |
-| `cc-loop graph [--task-id ID] [--json] [--history]` | Inspect task graph progress (v0.4+); `--history` shows graph mutations (v0.7) |
+| `cc-loop graph [--task-id ID] [--json] [--history]` | Inspect task graph progress (advanced / v0.4+); `--history` shows graph mutations (v0.7) |
 | `cc-loop report [--task-id ID] [--json] [--format json\|human]` | Task report with graph progress, failures, artifacts (v0.6) |
-| `cc-loop summary [--task-id ID] [--json]` | Luma-oriented single JSON summary (v0.10+) |
+| `cc-loop summary [--task-id ID] [--json]` | Luma-oriented single JSON summary (v0.10+; sharpened in v0.11) |
 | `cc-loop eval --task-id ID --suite PATH [--json]` | Run local eval suite against latest attempt artifacts (v0.10) |
 | `cc-loop export --task-id ID --format jsonl --output PATH` | Export analytics-compatible JSONL rows (v0.10) |
 | `cc-loop stop --task-id ID [--json]` | Stop detached runner (v0.5) |
@@ -48,10 +50,12 @@ Environment:
 ```bash
 cc-loop doctor --repo "$PROJECT_PATH" \
   --planner claude-code --reviewer claude-code --implementer cursor \
+  --require-distinct-reviewer \
   --test-command -- python -m pytest tests/ -q
 
 cc-loop init --goal "..." --repo "$PROJECT_PATH" --task-id "$TASK_ID" \
   --planner claude-code --reviewer claude-code --implementer cursor \
+  --require-distinct-reviewer \
   --test-command -- python -m pytest tests/ -q
 
 cc-loop auto --detach --task-id "$TASK_ID"
@@ -63,6 +67,18 @@ cc-loop status --task-id "$TASK_ID" --json
 cc-loop summary --task-id "$TASK_ID" --json
 ```
 
+### v0.11 default behavior (compatibility notes)
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `auto_merge` | `false` | Success leaves work on the attempt branch (`success=ready_for_handoff`). Pass `--auto-merge` / set `auto_merge=true` to merge into the base branch. |
+| `planner_granularity` | `single` | Default path is a single closed loop. Use `auto`/`graph` for advanced multi-node plans. |
+| `require_distinct_reviewer` | `false` | Strongly recommended. When `true`, init/doctor/run/auto fail if implementer and reviewer share the same provider+model identity. |
+| `allow_merge_without_tests` | `false` | Must be explicit. |
+| `test_command` for `auto` | required | `cc-loop auto` exits `1` when `test_command` is empty unless `allow_merge_without_tests=true`. |
+
+Old state files without `task_graph` still load. Existing tasks that relied on default `auto_merge=true` should set `auto_merge` explicitly when re-initing.
+
 ## `status --json` schema (schema_version 1)
 
 Stdout is a single JSON object. No extra prose.
@@ -70,7 +86,7 @@ Stdout is a single JSON object. No extra prose.
 ```json
 {
   "schema_version": 1,
-  "cc_loop_version": "0.10.0",
+  "cc_loop_version": "0.11.0",
   "task_id": "abc123",
   "goal": "...",
   "target_repo": "/absolute/path",
@@ -276,12 +292,15 @@ New and saved `state.json` files include top-level `"schema_version": 1`. Older 
 
 In addition to goal/repo/providers/test-command:
 
-- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. With this separator, every following token belongs to the test command; put cc-loop flags before `--test-command`. cc-loop emits a **stderr warning** (non-fatal) when known cc-loop flags appear after `--test-command --`. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
-- `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`; still invokes the planner provider)
-- `--planner-mode auto|graph|single|direct` — planner execution mode (default `auto`). `direct` skips the planner provider and synthesizes a single-node task graph from the goal; `graph`/`single`/`auto` still run the planner unless `direct` is set.
-- `--review-context-mode hybrid|inline|artifact_refs` — reviewer prompt context (default `hybrid`). `inline` always embeds patch text; `artifact_refs` references patch/test/diff artifact paths only; `hybrid` inlines patches up to the threshold below.
+- `--test-command -- ARG ...` — **required for `auto`** unless `allow_merge_without_tests` is set. Place `--` before the command so pytest/cargo flags are not parsed as cc-loop options.
+- `--require-distinct-reviewer` — fail init/doctor/run/auto when implementer and reviewer share the same provider+model identity (strongly recommended).
+- `--auto-merge` — opt in to merge approved work into the base branch (default off; success is handoff-ready on the attempt branch).
+- `--allow-merge-without-tests` — explicit escape hatch only; never the default.
+- `--planner-granularity single|auto|graph` — default `single` (simple closed loop). `graph` is advanced.
+- `--planner-mode auto|graph|single|direct` — planner execution mode (default `auto`). `direct` skips the planner provider and synthesizes a single-node task graph from the goal.
+- `--review-context-mode hybrid|inline|artifact_refs` — reviewer prompt context (default `hybrid`).
 - `--review-inline-patch-threshold N` — hybrid reviewer inline patch character limit (default `8000`)
-- `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (config key `provider_watchdog_grace_seconds`, default `5`)
+- `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (default `5`)
 - `--task-id ID` — explicit task id (recommended for integrations)
 - `--codex-model`, `--cursor-model`, `--claude-code-model`
 - `--cursor-force`, `--cursor-sandbox`
@@ -292,10 +311,13 @@ In addition to goal/repo/providers/test-command:
 ```
 cc-loop doctor --repo PATH [--base-branch main]
   [--planner NAME] [--reviewer NAME] [--implementer NAME]
+  [--require-distinct-reviewer]
   [--test-command ARG ...] [--json]
 ```
 
-Success: exit 0, prints `ok` or `{"ok": true}`. Failure: exit 1, message on stderr.
+Success: exit 0, prints `ok` or `{"ok": true, "warnings": [...], "distinct_reviewer": bool}`. Failure: exit 1, message on stderr.
+
+Even when checks pass, doctor prints strong recommendations when `require_distinct_reviewer` is off or `test_command` is missing.
 
 ## v0.10 artifacts and observability (additive)
 
@@ -394,9 +416,9 @@ when available, and `timestamp`.
 }
 ```
 
-### `summary --json` schema (v0.10+, additive)
+### `summary --json` schema (v0.10+, sharpened in v0.11)
 
-Luma-oriented single JSON object. Does not replace `report --json`.
+Luma-oriented single JSON object. Does not replace `report --json`. One payload should tell the delivery story.
 
 ```bash
 cc-loop summary --task-id ID --json
@@ -407,19 +429,30 @@ Key fields:
 | Field | Description |
 |-------|-------------|
 | `schema_version` | Summary schema version (currently `1`) |
-| `task_id`, `goal`, `status`, `base_branch`, `target_repo` | Task identity |
-| `latest_attempt` | Iteration, retry, phase, decision, test status, artifact dir |
-| `providers` | Planner/implementer/reviewer provider names |
-| `prompt_cache` | Snapshot from latest attempt `prompt.cache.json` |
-| `reviewer_prompt_metrics` | Snapshot from `review.prompt.metrics.json` |
-| `subprocess_result` | Per-phase exit metadata from `subprocess.result.json` |
-| `command_argv_path`, `attempt_trace_path` | Latest attempt diagnostic paths |
+| `task_id`, `goal`, `status`, `phase`, `next_action` | Task identity and dispatcher hint |
+| `roles` | `{planner,implementer,reviewer}` each with `provider` and `model` |
+| `providers` | Legacy flat planner/implementer/reviewer provider map |
+| `distinct_reviewer` | `true` when implementer and reviewer identities differ |
+| `require_distinct_reviewer` | Config flag |
+| `auto_merge` | Whether approved work auto-merges into the base branch |
+| `plan_summary` | Short plan / graph summary |
+| `latest_attempt` | Iteration, retry, phase, decision, test status, branch, worktree, artifact dir |
+| `latest_reject_reason` | Most recent reviewer reject reason (or null) |
+| `tests` | `{status, pass, fail, skipped, reason, exit_code}` |
 | `review` | Decision, reason, issues |
+| `diff_stat` | `{path, preview, branch, worktree_path, head_commit}` |
+| `success` | Stable enum: `ready_for_handoff`, `merged`, `stopped`, `failed`, `cancelled`, `running`, `initialized` |
+| `artifacts` | Small key-path map (plan/diff/test/review/merge) |
+| `artifact_paths` | Full latest-attempt artifact path map |
+| `prompt_cache` / `reviewer_prompt_metrics` / `subprocess_result` | Observability snapshots |
 | `failure` | Failure summary compatible with `status --json` |
-| `artifact_paths` | Latest attempt artifact path map |
 | `suggested_next_action` | Recovery hint |
 
-Human output (`cc-loop summary --task-id ID`) lists task/status/latest/test/review/cache/artifacts.
+Human output (`cc-loop summary --task-id ID`) shows who writes, who reviews, tests, review decision, and whether the work is handoff-ready.
+
+### Reviewer reject → implement retry
+
+On reviewer `reject`, `auto` / `resume` return to the implementer (`AutoStep.RESUME` / `_begin_retry_attempt`) with rejection feedback in the implementer prompt, until `max_retries_per_step` is exhausted. `summary --json` exposes `latest_attempt.retry` and `latest_reject_reason`.
 
 ### Task-level `run.summary.json` (v0.10+, additive)
 

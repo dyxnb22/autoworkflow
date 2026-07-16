@@ -2137,11 +2137,28 @@ def _run_finalize_phase(
         return state, attempt, artifact_paths
 
     if not _can_auto_merge(attempt, config, state=state):
-        state.status = TaskStatus.STOPPED
         if reviewer_gate_passed(attempt) and merge_blocked_by_test_gate(attempt, config, state=state):
+            state.status = TaskStatus.STOPPED
             report = test_gate_blocked_report(attempt)
             apply_report_to_attempt(attempt, report)
             write_failure_report(artifact_paths["plan_prompt"].parent, report)
+            mark_heartbeat_terminal(
+                state_root,
+                state.task_id,
+                status=TaskStatus.STOPPED.value,
+                phase=attempt.phase.value,
+            )
+            existing_hb = read_heartbeat(state_root, state.task_id)
+            if existing_hb is not None:
+                existing_hb.running_provider = ""
+                write_heartbeat(state_root, existing_hb)
+            _persist_state(state, state_root)
+            return state, attempt, artifact_paths
+        if reviewer_gate_passed(attempt) and not bool(config.get("auto_merge", False)):
+            return _finalize_handoff_without_merge(
+                state, state_root, attempt, artifact_paths
+            )
+        state.status = TaskStatus.STOPPED
         mark_heartbeat_terminal(
             state_root,
             state.task_id,
@@ -2953,13 +2970,89 @@ def build_reviewer_prompt_metrics(
     }
 
 
+def _finalize_handoff_without_merge(
+    state: TaskState,
+    state_root: Path,
+    attempt: AttemptRecord,
+    artifact_paths: dict[str, Path],
+) -> tuple[TaskState, AttemptRecord, dict[str, Path]]:
+    """Mark approved+tested work ready for handoff without merging into the base branch."""
+    clear_report_from_attempt(attempt)
+    failure_report_path(artifact_paths["plan_prompt"].parent).unlink(missing_ok=True)
+    attempt.merge_error = ""
+    attempt.merge_output_path = str(artifact_paths["merge_output"])
+    artifact_paths["merge_output"].write_text(
+        (
+            f"merge_target: {state.base_branch}\n"
+            f"source_branch: {attempt.branch}\n"
+            f"worktree_path: {attempt.worktree_path}\n"
+            f"head_commit: {attempt.head_commit}\n"
+            "result: ready_for_handoff\n"
+            "note: auto_merge=false; changes remain on the attempt branch/worktree\n"
+        ),
+        encoding="utf-8",
+    )
+    _emit_run_event(
+        state_root,
+        state,
+        attempt,
+        EventType.MERGE_COMPLETED,
+        message="ready_for_handoff",
+    )
+    update_trace_phase(
+        state=state,
+        attempt=attempt,
+        artifact_paths=artifact_paths,
+        config=state.config,
+        phase="merge",
+        status="ready_for_handoff",
+        output_path=str(artifact_paths["merge_output"]),
+        error="",
+    )
+
+    if attempt.head_commit:
+        state.base_commit = attempt.head_commit
+
+    graph = ensure_task_graph(state)
+    if graph is not None and attempt.graph_node_id:
+        mark_node_passed(graph, attempt.graph_node_id, attempt.iteration)
+        _emit_run_event(
+            state_root,
+            state,
+            attempt,
+            EventType.GRAPH_NODE_COMPLETED,
+            message=attempt.graph_node_id,
+        )
+        if graph_complete(graph):
+            state.status = TaskStatus.DONE
+        else:
+            state.status = TaskStatus.STOPPED
+    elif attempt.plan_json and not attempt.plan_json.get("is_final_step", True):
+        state.status = TaskStatus.STOPPED
+    else:
+        state.status = TaskStatus.DONE
+
+    mark_heartbeat_terminal(
+        state_root,
+        state.task_id,
+        status=state.status.value,
+        phase=attempt.phase.value,
+    )
+    existing_hb = read_heartbeat(state_root, state.task_id)
+    if existing_hb is not None:
+        existing_hb.running_provider = ""
+        write_heartbeat(state_root, existing_hb)
+    _persist_state(state, state_root)
+    return state, attempt, artifact_paths
+
+
 def _can_auto_merge(
     attempt: AttemptRecord,
     config: LoopConfig,
     *,
     state: TaskState | None = None,
 ) -> bool:
-    if not config.get("auto_merge", True):
+    if not config.get("auto_merge", False):
         return False
     if attempt.implementer_exit_code != 0:
         return False
@@ -3528,6 +3621,18 @@ def summarize_attempt(attempt: AttemptRecord, state: TaskState | None = None) ->
             return (
                 "reviewer approved but merge is blocked by the test gate; "
                 "inspect artifacts, fix tests through a repair path, or allow merge without tests"
+            )
+        if state is not None and not bool(state.config.get("auto_merge", False)):
+            graph = ensure_task_graph(state)
+            if graph is not None and not graph_complete(graph):
+                node = attempt.graph_node_id or graph.current_node_id or "?"
+                return (
+                    f"node {node} approved and ready for handoff "
+                    f"(branch {attempt.branch}); run `cc-loop auto` for the next graph node"
+                )
+            return (
+                f"tests passed and review approved; ready for handoff on branch "
+                f"{attempt.branch} (auto_merge=false)"
             )
         return "reviewer approved but merge did not complete; run `cc-loop resume` to retry merge"
     if attempt.test_status and not attempt.decision:

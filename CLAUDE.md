@@ -1,10 +1,10 @@
 # CLAUDE.md — cc-loop
 
-**Package:** 0.9.0 · Read [AGENTS.md](AGENTS.md) · Task graph: [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · Recovery: [docs/RECOVERY.md](docs/RECOVERY.md)
+**Package:** 0.11.0 · Read [AGENTS.md](AGENTS.md) · Task graph: [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · Recovery: [docs/RECOVERY.md](docs/RECOVERY.md)
 
 ## What you are working on
 
-Local CLI orchestrator: planner → worktree → implementer → tests → reviewer → merge/retry/stop. v0.4 adds **task graph** orchestration (sequential multi-node execution). You are editing **cc-loop itself**, not running as its `claude-code` provider unless explicitly testing providers.
+Role-separated delivery engine: planner/reviewer vs implementer → tests → review → handoff (merge is opt-in). Default path is a single closed loop; task graphs / parallel are advanced. You are editing **cc-loop itself**, not running as its `claude-code` provider unless explicitly testing providers.
 
 ## Quick start
 

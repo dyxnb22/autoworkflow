@@ -25,9 +25,10 @@ Typical cases:
 
 - No task found under `--state-root`
 - Explicit `--task-id` does not exist
-- Preflight failed (dirty repo, missing provider, invalid test command, bad base branch)
+- Preflight failed (dirty repo, missing provider, invalid test command, bad base branch, `require_distinct_reviewer` violation)
 - `resume` not allowed for the current state
 - `doctor` checks failed
+- `auto` refused because `test_command` is not configured (unless `allow_merge_without_tests`)
 - `auto` hit max iterations, reviewer stop, merge failure notification path, or retry exhaustion
 
 Note: `run` returns 0 on reviewer `stop`, while `auto` classifies stop via heuristics — fixable stops enter repair; terminal stops exit 1 with structured `failure.report.json`. Prefer `status --json` (`next_action`, `failure`) when polling detached runs.

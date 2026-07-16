@@ -177,6 +177,19 @@ def decide_auto_step(
             return AutoStep.MERGE_RETRY, merge_report
         if merge_blocked_by_test_gate(attempt, config, state=state):
             return AutoStep.TERMINAL, test_gate_blocked_report(attempt)
+        # Default success path leaves work on the branch for handoff.
+        if not bool(config.get("auto_merge", False)):
+            graph = ensure_task_graph(state)
+            if graph is not None and not graph_complete(graph):
+                if state.iteration >= int(config.get("max_iterations", 10)):
+                    return AutoStep.TERMINAL, FailureReport(
+                        failure_type=FailureType.NONE,
+                        disposition=RecoveryDisposition.TERMINAL,
+                        message="reached max_iterations",
+                        stop_reason="max_iterations",
+                    )
+                return AutoStep.RUN, None
+            return AutoStep.DONE, None
         return AutoStep.MERGE_RETRY, None
 
     report: FailureReport | None = None
