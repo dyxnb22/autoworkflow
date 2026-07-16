@@ -775,16 +775,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         payload: dict = {"ok": True, "warnings": warnings}
         if test_command is not None:
             payload["test_command_argv"] = test_command
-        payload["require_distinct_reviewer"] = bool(config.get("require_distinct_reviewer", False))
-        payload["distinct_reviewer"] = True
+        payload["require_distinct_reviewer"] = bool(config.get("require_distinct_reviewer", True))
         from cc_loop.config import distinct_reviewer_satisfied
 
         payload["distinct_reviewer"] = distinct_reviewer_satisfied(config, providers)
+        payload["auto_merge_default"] = bool(config.get("auto_merge", False))
         print(json.dumps(payload))
     else:
         print("ok")
+        print(
+            f"roles: write={providers['implementer']}  "
+            f"review={providers['reviewer']}  "
+            f"plan={providers['planner']}"
+        )
+        from cc_loop.config import distinct_reviewer_satisfied
+
+        print(f"distinct_reviewer: {distinct_reviewer_satisfied(config, providers)}")
+        print(f"require_distinct_reviewer: {bool(config.get('require_distinct_reviewer', True))}")
         if test_command is not None:
             print(f"test_command_argv: {format_test_command_display(test_command)}")
+        else:
+            print("test_command: (not set — required for auto)")
         for warning in warnings:
             print(warning, file=sys.stderr)
     return 0
@@ -833,6 +844,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     state = load_state(task_id, args.state_root)
+    if not list(state.config.get("test_command") or []) and not bool(
+        state.config.get("allow_merge_without_tests", False)
+    ):
+        print(
+            "warning: no test_command configured; tests will be skipped and "
+            "cannot count as success unless allow_merge_without_tests is set. "
+            "`cc-loop auto` will refuse this task.",
+            file=sys.stderr,
+        )
     try:
         state, attempt, artifact_paths = execute_run(state, args.state_root)
     except RunError as exc:

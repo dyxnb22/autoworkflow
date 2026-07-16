@@ -309,7 +309,9 @@ cc-loop doctor --repo PATH [--base-branch main]
   [--test-command ARG ...] [--json]
 ```
 
-Success: exit 0, prints `ok` or `{"ok": true, "warnings": [...], "distinct_reviewer": bool}`. Failure: exit 1, message on stderr.
+Success: exit 0, prints `ok` plus roles / distinct_reviewer / require_distinct_reviewer (human), or
+`{"ok": true, "warnings": [...], "distinct_reviewer": bool, "require_distinct_reviewer": bool, "auto_merge_default": bool}`.
+Failure: exit 1, message on stderr.
 
 Even when checks pass, doctor prints strong recommendations when `require_distinct_reviewer` is off or `test_command` is missing.
 

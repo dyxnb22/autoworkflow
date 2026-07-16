@@ -151,6 +151,103 @@ class AutoTestGateTests(unittest.TestCase):
         finally:
             env.close()
 
+    def test_run_warns_without_test_command(self) -> None:
+        env = TempEnv()
+        try:
+            make_task(
+                repo=env.repo(),
+                state_root=env.state_root(),
+                task_id="run-warn",
+                config={"test_command": [], "allow_merge_without_tests": False},
+            )
+            # Avoid executing providers; just hit the CLI gate/warning path by
+            # invoking run with a missing worktree root mock would still run.
+            # Call the warning path via a dry check: load and invoke cmd through CLI
+            # with fake providers — execute_run may succeed with skipped tests.
+            with mock.patch("cc_loop.run.DEFAULT_WORKTREE_ROOT", env.worktree_root()):
+                result = _cli("run", "--task-id", "run-warn", state_root=env.state_root())
+            self.assertIn("no test_command configured", result.stderr)
+            self.assertIn("cc-loop auto", result.stderr)
+        finally:
+            env.close()
+
+
+class DoctorDeliveryFieldsTests(unittest.TestCase):
+    def test_doctor_human_shows_roles_and_distinct(self) -> None:
+        from io import StringIO
+        from contextlib import redirect_stdout, redirect_stderr
+        from cc_loop.cli import main
+
+        env = TempEnv()
+        try:
+            stdout = StringIO()
+            stderr = StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--state-root",
+                        str(env.state_root()),
+                        "doctor",
+                        "--repo",
+                        str(env.repo()),
+                        "--planner",
+                        "fake-planner",
+                        "--reviewer",
+                        "fake-reviewer",
+                        "--implementer",
+                        "fake-implementer",
+                        "--test-command",
+                        "--",
+                        "true",
+                    ]
+                )
+            self.assertEqual(code, 0, msg=stderr.getvalue())
+            out = stdout.getvalue()
+            self.assertIn("roles: write=fake-implementer", out)
+            self.assertIn("distinct_reviewer: True", out)
+            self.assertIn("require_distinct_reviewer: True", out)
+        finally:
+            env.close()
+
+    def test_doctor_json_includes_delivery_fields(self) -> None:
+        from io import StringIO
+        from contextlib import redirect_stdout, redirect_stderr
+        from cc_loop.cli import main
+
+        env = TempEnv()
+        try:
+            stdout = StringIO()
+            stderr = StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--state-root",
+                        str(env.state_root()),
+                        "doctor",
+                        "--repo",
+                        str(env.repo()),
+                        "--planner",
+                        "fake-planner",
+                        "--reviewer",
+                        "fake-reviewer",
+                        "--implementer",
+                        "fake-implementer",
+                        "--json",
+                        "--test-command",
+                        "--",
+                        "true",
+                    ]
+                )
+            self.assertEqual(code, 0, msg=stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["distinct_reviewer"])
+            self.assertTrue(payload["require_distinct_reviewer"])
+            self.assertIn("auto_merge_default", payload)
+            self.assertFalse(payload["auto_merge_default"])
+        finally:
+            env.close()
+
 
 class HandoffSuccessTests(unittest.TestCase):
     def test_default_success_is_ready_for_handoff(self) -> None:
