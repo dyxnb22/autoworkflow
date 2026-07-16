@@ -552,6 +552,122 @@ fn skipped_tests_cannot_handoff_without_escape() {
 }
 
 #[test]
+fn quality_gate_forces_reject_on_p0_approve() {
+    use cc_loop_core::config::default_config;
+    use cc_loop_core::inspect::{build_status_json, derive_success_outcome};
+    use cc_loop_core::orchestrator::run_loop;
+    use cc_loop_core::provider::{set_fake_reviewer_p0_approves, set_fake_reviewer_rejects};
+    use cc_loop_core::state::{AttemptPhase, create_initial_state, load_state};
+
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let state_root = root.path().join("state");
+    fs::create_dir_all(&state_root).unwrap();
+
+    let mut cfg = default_config();
+    cfg.planner_provider = "fake".into();
+    cfg.implementer_provider = "fake".into();
+    cfg.reviewer_provider = "fake".into();
+    cfg.require_distinct_reviewer = false;
+    cfg.auto_merge = false;
+    cfg.stop_policy = "no_p0_p1".into();
+    cfg.max_retries_per_step = 3;
+    cfg.test_command = vec!["true".into()];
+
+    let commit = cc_loop_core::git::resolve_base_commit(&repo, "main", 30).unwrap();
+    let mut state =
+        create_initial_state("p0gate", "quality gate", &repo, "main", &commit, Some(cfg));
+    cc_loop_core::state::save_state(&state, &state_root).unwrap();
+
+    set_fake_reviewer_rejects(0);
+    set_fake_reviewer_p0_approves(1);
+    std::env::set_var("CC_LOOP_FAKE_PROVIDERS", "1");
+    let outcome = run_loop(&mut state, &state_root, None).unwrap();
+    std::env::remove_var("CC_LOOP_FAKE_PROVIDERS");
+    set_fake_reviewer_p0_approves(0);
+
+    let loaded = load_state("p0gate", &state_root).unwrap();
+    assert!(
+        loaded.history.iter().any(|a| {
+            a.phase == AttemptPhase::Rejected
+                || a.decision == "reject"
+                || a.review_json
+                    .as_ref()
+                    .and_then(|r| r.get("quality_override"))
+                    .is_some()
+        }),
+        "expected quality override reject in history"
+    );
+    // Eventually should handoff after subsequent clean approve
+    let success = derive_success_outcome(&loaded, loaded.latest_attempt());
+    assert_eq!(success, "ready_for_handoff");
+    let status = build_status_json(&loaded, &state_root);
+    assert!(status.get("quality").is_some());
+    assert_eq!(status["quality"]["stop_policy"], "no_p0_p1");
+    assert!(matches!(
+        outcome,
+        cc_loop_core::orchestrator::RunOutcome::Success
+            | cc_loop_core::orchestrator::RunOutcome::UserStop
+    ));
+}
+
+#[test]
+fn status_exposes_quality_block_on_init() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let state = root.path().join("state");
+
+    cc_loop()
+        .args([
+            "--state-root",
+            state.to_str().unwrap(),
+            "init",
+            "--goal",
+            "q",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--task-id",
+            "q1",
+            "--planner",
+            "codex",
+            "--implementer",
+            "cursor",
+            "--reviewer",
+            "codex",
+            "--test-command",
+            "true",
+            "--stop-policy",
+            "no_p0_p1",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let status = cc_loop()
+        .args([
+            "--state-root",
+            state.to_str().unwrap(),
+            "status",
+            "--task-id",
+            "q1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status["quality"]["stop_policy"], "no_p0_p1");
+    assert!(status["quality"]["blocking_severities"].is_array());
+    assert!(status["delivery"]["quality"].is_object());
+}
+
+#[test]
 fn handoff_success_vocabulary() {
     use cc_loop_core::config::default_config;
     use cc_loop_core::inspect::derive_success_outcome;

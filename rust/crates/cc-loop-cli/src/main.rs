@@ -41,6 +41,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     Init {
         #[arg(long)]
@@ -65,6 +66,18 @@ enum Commands {
         allow_same_reviewer: bool,
         #[arg(long)]
         planner_granularity: Option<String>,
+        /// Stop policy: no_p0_p1 (default) | no_p0_only | approve_only
+        #[arg(long)]
+        stop_policy: Option<String>,
+        /// Comma-separated severities that block handoff (default P0,P1)
+        #[arg(long)]
+        blocking_severities: Option<String>,
+        /// Review mode: structured_single (default) | per_facet
+        #[arg(long)]
+        review_mode: Option<String>,
+        /// Comma-separated review facets (empty = engine defaults)
+        #[arg(long)]
+        review_facets: Option<String>,
         #[arg(long, num_args = 1.., allow_hyphen_values = true)]
         test_command: Vec<String>,
         #[arg(long)]
@@ -231,6 +244,10 @@ fn build_config_from_flags(
     codex_model: Option<&str>,
     cursor_model: Option<&str>,
     claude_code_model: Option<&str>,
+    stop_policy: Option<&str>,
+    blocking_severities: Option<&str>,
+    review_mode: Option<&str>,
+    review_facets: Option<&str>,
 ) -> LoopConfig {
     let mut map = Map::new();
     map.insert("planner_provider".into(), json!(planner));
@@ -262,6 +279,32 @@ fn build_config_from_flags(
     }
     if let Some(m) = claude_code_model {
         map.insert("claude_code_model".into(), json!(m));
+    }
+    if let Some(p) = stop_policy {
+        map.insert("stop_policy".into(), json!(p));
+    }
+    if let Some(s) = blocking_severities {
+        let list: Vec<String> = s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        if !list.is_empty() {
+            map.insert("blocking_severities".into(), json!(list));
+        }
+    }
+    if let Some(m) = review_mode {
+        map.insert("review_mode".into(), json!(m));
+    }
+    if let Some(f) = review_facets {
+        let list: Vec<String> = f
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        if !list.is_empty() {
+            map.insert("review_facets".into(), json!(list));
+        }
     }
     merge_config(Some(&Value::Object(map)))
 }
@@ -301,6 +344,10 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
             allow_merge_without_tests,
             allow_same_reviewer,
             planner_granularity,
+            stop_policy,
+            blocking_severities,
+            review_mode,
+            review_facets,
             test_command,
             codex_model,
             cursor_model,
@@ -319,6 +366,10 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
             allow_merge_without_tests,
             allow_same_reviewer,
             planner_granularity,
+            stop_policy,
+            blocking_severities,
+            review_mode,
+            review_facets,
             test_command,
             codex_model,
             cursor_model,
@@ -348,6 +399,10 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
                 allow_same_reviewer,
                 None,
                 &test_command,
+                None,
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -646,6 +701,10 @@ fn cmd_init(
     allow_merge_without_tests: bool,
     allow_same_reviewer: bool,
     planner_granularity: Option<String>,
+    stop_policy: Option<String>,
+    blocking_severities: Option<String>,
+    review_mode: Option<String>,
+    review_facets: Option<String>,
     test_command: Vec<String>,
     codex_model: Option<String>,
     cursor_model: Option<String>,
@@ -665,6 +724,10 @@ fn cmd_init(
         codex_model.as_deref(),
         cursor_model.as_deref(),
         claude_code_model.as_deref(),
+        stop_policy.as_deref(),
+        blocking_severities.as_deref(),
+        review_mode.as_deref(),
+        review_facets.as_deref(),
     );
     let repo = resolve_repo_path(&repo);
     let pre = run_preflight(&repo, &config, false, false)?;

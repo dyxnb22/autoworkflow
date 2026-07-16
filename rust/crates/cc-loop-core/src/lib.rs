@@ -19,6 +19,7 @@ pub mod preflight;
 pub mod process;
 pub mod prompt_cache;
 pub mod provider;
+pub mod quality;
 pub mod recovery;
 pub mod repair;
 pub mod report;

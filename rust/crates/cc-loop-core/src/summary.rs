@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use crate::config::distinct_reviewer_satisfied;
 use crate::error::Result;
+use crate::quality::build_quality_snapshot;
 use crate::inspect::{
     build_attempt_snapshot, build_failure_snapshot, build_roles_snapshot, derive_next_action,
     derive_success_outcome, latest_reject_reason, plan_summary_text, review_card, tests_card,
@@ -84,6 +85,7 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         "success": success.clone(),
         "next_action": next_action.clone(),
         "latest_reject_reason": reject_json.clone(),
+        "quality": build_quality_snapshot(&state.config, attempt),
     });
 
     let mut artifacts = serde_json::Map::new();
@@ -159,6 +161,7 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         "review": review_out,
         "diff_stat": diff_stat,
         "delivery": delivery,
+        "quality": build_quality_snapshot(&state.config, attempt),
         "success": success,
         "failure": report.get("failure_summary").cloned().unwrap_or_else(|| {
             build_failure_snapshot(attempt, state_root, &state.task_id, Some(state))
