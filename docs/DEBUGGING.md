@@ -6,9 +6,13 @@ When something goes wrong, start with:
 
 ```bash
 cc-loop status [--task-id ID]
-# or machine-readable:
 cc-loop status --task-id ID --json
+cc-loop summary --task-id ID --json   # Luma-oriented delivery recap
 ```
+
+Look at `success`, `roles`, `distinct_reviewer`, `tests` / `attempt.test_status`,
+`review` / `attempt.decision`, and `next_action`. Default success is
+`ready_for_handoff` (not merge) unless the task opted into `--auto-merge`.
 
 For detached runs (`auto --detach`), also check:
 
@@ -19,7 +23,8 @@ For detached runs (`auto --detach`), also check:
 
 Poll `running` / `runner_pid` in `status --json`. Integration contract: [INTEGRATION.md](INTEGRATION.md).
 
-The human `status` output `next:` line tells you what cc-loop thinks should happen next. The `phase:` and `decision:` lines tell you where the attempt stopped.
+The human `status` output shows who writes vs reviews, `success:`, and a `next:`
+hint. The `phase:` and `decision:` lines tell you where the attempt stopped.
 
 State file: `~/.cc-loop/tasks/<task-id>/state.json`
 Artifacts:  `~/.cc-loop/tasks/<task-id>/artifacts/iter-NNN[-retry-NN]/`

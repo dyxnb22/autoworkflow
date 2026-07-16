@@ -1,6 +1,6 @@
 # cc-loop integration contract (v1)
 
-This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps / Luma must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
+This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps / Luma must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or private delivery-loop internals.
 
 **Package version:** 0.11.0  
 **Integration schema version:** 1
@@ -94,6 +94,15 @@ Stdout is a single JSON object. No extra prose.
   "base_commit": "sha",
   "status": "stopped",
   "iteration": 1,
+  "roles": {
+    "planner": {"provider": "claude-code", "model": "sonnet"},
+    "implementer": {"provider": "cursor", "model": ""},
+    "reviewer": {"provider": "claude-code", "model": "sonnet"}
+  },
+  "distinct_reviewer": true,
+  "require_distinct_reviewer": true,
+  "auto_merge": false,
+  "success": "stopped",
   "attempt": {
     "iteration": 1,
     "retry": 0,
@@ -107,31 +116,6 @@ Stdout is a single JSON object. No extra prose.
     "created_at": "ISO8601 or empty",
     "graph_node_id": "T1 or empty for legacy tasks",
     "running_provider": "cursor or empty when no provider subprocess is active"
-  },
-  "task_graph": {
-    "schema_version": 1,
-    "current_node_id": "T2",
-    "summary": {
-      "total": 5,
-      "pending": 3,
-      "running": 0,
-      "passed": 2,
-      "failed": 0,
-      "rejected": 0,
-      "blocked": 0,
-      "skipped": 0
-    },
-    "nodes": [
-      {
-        "id": "T1",
-        "title": "Set up project structure",
-        "kind": "implementation",
-        "owner": "implementer",
-        "dependencies": [],
-        "status": "passed",
-        "retry_count": 0
-      }
-    ]
   },
   "next_action": "resume",
   "running": false,
@@ -147,6 +131,10 @@ Stdout is a single JSON object. No extra prose.
   "current_message": "Ready to run"
 }
 ```
+
+> Note: `task_graph` is omitted for the default single-loop path and for legacy
+> tasks without a graph. When present (advanced multi-node runs), it remains an
+> additive block as documented below.
 
 ### Field reference
 
@@ -197,7 +185,7 @@ The `task_graph` block is omitted for legacy tasks without a graph. See [TASK_GR
 | `run` | Task initialized, no attempts yet |
 | `resume` | Continue or retry the current attempt |
 | `inspect` | Reviewer requested stop; human inspection recommended |
-| `done` | Task completed successfully |
+| `done` | Task completed successfully (`success` is typically `ready_for_handoff` or `merged`) |
 | `failed` | Task or attempt failed |
 | `repair` | Auto loop will run implementer repair on a recoverable failure |
 | `terminal` | Unrecoverable stop; inspect `failure` block in JSON |

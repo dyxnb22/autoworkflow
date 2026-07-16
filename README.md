@@ -48,14 +48,15 @@ v1 core loop + integration contract + recovery + task graphs + runner control + 
 References:
 
 - [Integration contract](docs/INTEGRATION.md)
-- [Task graph orchestration](docs/TASK_GRAPH.md) (advanced)
+- [Task graphs](docs/TASK_GRAPH.md) (advanced)
+- [Recovery](docs/RECOVERY.md)
 - [Exit codes](docs/EXIT_CODES.md)
 - [Changelog](CHANGELOG.md)
 
 ## Command shape
 
 ```bash
-# Initialize — pick distinct writer/reviewer, require a test command for auto
+# Initialize — distinct writer/reviewer is default; require a test command for auto
 cc-loop init \
   --goal "Fix the failing CLI flag" \
   --repo /path/to/repo \
