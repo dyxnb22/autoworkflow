@@ -1,111 +1,100 @@
-# autoworkflow
+# cc-loop
 
-Personal automation workflows for local AI coding agents.
+**分角色交付引擎**（Rust 0.12）——不是通用 agent 调度器。
 
-The primary tool is `cc-loop`: a command-line orchestrator that assigns planning, review, and implementation roles to configurable local agents while the local script manages state, git isolation, tests, retries, and recovery.
+输入一个 goal，输出「**另一人审过、测试过**」的一串提交（停在 attempt 分支，默认可交接 / 可开 PR）。
 
-This repository is for the workflow tooling itself. It is not part of DeckBridge and should not document DeckBridge features as implemented here.
+> **写的人不能审自己的活；不过测试不能过关。**
 
-## cc-loop positioning
-
-`cc-loop` is a small local coordinator, not a third coding agent.
-
-- `planner`, `reviewer`, and `implementer` are fixed workflow roles.
-- Each role is backed by a configurable provider: `codex`, `cursor`, or `claude-code`.
-- `cc-loop` owns orchestration, state, prompts, subprocess calls, worktrees, test gates, and audit artifacts.
-
-The initial default setup is:
-
-- `planner = codex`
-- `reviewer = codex`
-- `implementer = cursor`
-
-The design goal is a reliable personal loop:
-
-1. The configured planner analyzes the target repo and produces a task graph (or legacy single-step prompt).
-2. `cc-loop` selects runnable graph nodes and creates an isolated git worktree per node attempt.
-3. The configured implementer runs headlessly in that worktree and makes scoped code changes.
-4. `cc-loop` runs configured tests and gathers bounded diff context.
-5. The configured reviewer reviews the current node against its acceptance criteria.
-6. `cc-loop` merges approved nodes, advances the graph, retries, stops, or leaves worktrees for manual inspection.
-
-## Current status
-
-Status: **v0.9 parallel execution** (package 0.9.0).
-
-v1 core loop + v0.2.0 integration contract + v0.3 auto recovery + v0.4 task graphs + v0.5 runner control + v0.6 events/reports + v0.7 replanning + v0.8 multi-role routing + v0.9 parallel execution.
-
-- task initialization, state persistence, and artifact layout under `~/.cc-loop`
-- preflight checks including dirty-repo blocking
-- configurable provider adapters (`codex`, `cursor`, `claude-code`) for planner, implementer, and reviewer roles
-- isolated git worktree per iteration/retry
-- planner and implementer execution with timeout-safe process groups
-- configured `test_command` execution with pass/fail/skipped gating
-- bounded diff collection for reviewer context
-- reviewer phase with normalized `approve` / `reject` / `stop` decisions
-- auto-merge when tests pass (or are explicitly allowed to be skipped), review approves, and git merge succeeds
-- retry from base commit after reviewer reject
-- `cc-loop resume` for stopped, interrupted, or in-progress attempts
-- `cc-loop auto` for fully unattended execution with macOS notifications
-- `cc-loop status` with phase, decision, artifacts, and next-action hints
-- **v0.2.0:** `--task-id` on operational commands, `list`, `status --json`, `doctor`, `auto --detach`, `CC_LOOP_STATE_ROOT`, init model/cursor flags
-- **v0.9.0:** parallel node execution, merge queue, state file locking, runner control (`stop`/`cancel`/`cleanup`), heartbeat, events, reports, dynamic replanning, per-node provider routing, execution budgets
-- **v0.4.0:** task graph planner output, sequential multi-node `auto`, `cc-loop graph`, node-scoped implementer/reviewer prompts, `status --json` task_graph block
-
-References:
-
-- [Integration contract](docs/INTEGRATION.md)
-- [Task graph orchestration](docs/TASK_GRAPH.md)
-- [Evolution roadmap](docs/EVOLUTION.md)
-- [Exit codes](docs/EXIT_CODES.md)
-- [Project plan](docs/PROJECT_PLAN.md)
-- [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
-- [Debugging guide](docs/DEBUGGING.md)
-- [Changelog](CHANGELOG.md)
-
-## Command shape
-
-```bash
-# Initialize — config flags are optional
-cc-loop init \
-  --goal "Implement the requested workflow" \
-  --repo /path/to/repo \
-  --task-id my-task \
-  --planner claude-code \
-  --reviewer claude-code \
-  --implementer claude-code \
-  --claude-code-model sonnet \
-  --test-command -- python -m pytest tests/ -q
-
-cc-loop doctor --repo /path/to/repo
-cc-loop list --json
-cc-loop run --task-id my-task
-cc-loop resume --task-id my-task
-cc-loop auto --detach --task-id my-task
-cc-loop status --task-id my-task --json
-cc-loop report --task-id my-task --json
-cc-loop stop --task-id my-task
-cc-loop graph --task-id my-task --history
+```text
+goal → plan → implement（另一角色/CLI）→ test → review（非实现方）
+         ↑______________ reject / fail 重试 _______________|
+                   双绿 → 停在分支（ready_for_handoff）
 ```
 
-Set `CC_LOOP_STATE_ROOT` to override the default `~/.cc-loop` state directory without passing `--state-root` on every command.
+合进 main **不是**默认成功（`--auto-merge` 才是 opt-in）。
 
-Global flags such as `--state-root` must appear **before** the subcommand, e.g. `cc-loop --state-root PATH list --json`.
+## 三个硬差异（相对「聊天里开个 subagent」）
 
-### Provider reference
+| 能力 | 默认行为 |
+|------|----------|
+| **跨 provider 角色锁定** | `require_distinct_reviewer=true`：implementer 与 reviewer 的 provider+model 必须不同 |
+| **测试门不可关** | `auto` 没有 `test_command` 直接拒绝；红测只能 repair/retry，不能把「跳过测试」当默认成功 |
+| **审核拒绝 → 重回实现** | `reject` 进入可恢复状态；`auto`/`resume` 带着原因再跑 implementer——状态机在转，不是聊完就散 |
 
-| Provider | Roles | Notes |
-|---|---|---|
-| `codex` | planner, reviewer | `codex exec` CLI; JSON output |
-| `cursor` | implementer | `cursor agent` CLI; edits in worktree |
-| `claude-code` | planner, reviewer, implementer | `claude` CLI; `--print` for planning/review, direct edits for implementation |
+## Install
 
-## v1 non-goals
+```bash
+make test && make release
+make install                 # ~/.local/bin/cc-loop
+./scripts/cc-loop --version
+```
 
-- No cloud coordinator.
-- No multi-user service.
-- No user-defined arbitrary shell provider runner in v1.
-- No direct edits in the user's main working tree.
-- No automatic merge when tests fail.
-- No global process killing such as `pkill -f`.
-- No attempt to make planner/reviewer and implementer providers talk to each other directly.
+代码：[`rust/`](rust/)。Luma/集成契约：[`docs/INTEGRATION.md`](docs/INTEGRATION.md)。运维：[`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+
+## 默认只卖这一条路径
+
+| 设置 | 默认 | 含义 |
+|------|------|------|
+| `planner_granularity` | `single` | 单切片闭环 |
+| `require_distinct_reviewer` | `true` | 写≠审 |
+| `auto_merge` | `false` | 成功 = 可交接，不合 main |
+| `test_command`（`auto`） | **必填** | 没测试命令不挂机 |
+| `allow_merge_without_tests` | `false` | 逃生口，绝非默认 |
+| Providers | planner/reviewer `codex`，implementer `cursor` | 开箱即跨 CLI |
+
+**先做厚：** worktree 隔离 · plan/implement/test/review · resume/stop · `status`/`summary --json`  
+**后做或不做：** 大任务图、多 node 并行、动态 replan、通用多 agent 框架、默认合 main
+
+## Quick start
+
+```bash
+cc-loop init \
+  --goal "Fix the failing CLI flag" \
+  --repo /path/to/repo \
+  --task-id my-task \
+  --planner claude-code --reviewer claude-code --implementer cursor \
+  --test-command -- cargo test -q
+
+cc-loop auto --detach --task-id my-task
+
+# Luma / TUI 第一屏：谁在写、谁在审、测试过了没、能否交付
+cc-loop status --task-id my-task --json
+cc-loop summary --task-id my-task --json
+```
+
+`--state-root` 必须写在子命令前。`CC_LOOP_STATE_ROOT` 可设默认状态根。
+
+## Luma 第一屏（一张卡）
+
+`summary --json`（及 `status --json` 的对应字段）优先讲故事，不要先甩任务图/并行/子命令清单：
+
+| 卡面 | 字段线索 |
+|------|----------|
+| 谁在写 / 谁在审 | `roles` · `distinct_reviewer` |
+| Plan 摘要 | `plan` / plan summary |
+| Implementer 改了什么 | diff stat（artifact / summary 内） |
+| Tests | `attempt.test_status` / `tests` |
+| Review | `decision` + 一句 `reason`；reject 时 `latest_reject_reason` |
+| 第几次重试 | `attempt.retry` |
+| 现在能否交付 | `success`（目标：`ready_for_handoff`）· `next_action` |
+
+详规见 [INTEGRATION.md](docs/INTEGRATION.md#luma-delivery-card)。
+
+## 日常命令
+
+`init` · `doctor` · `list` · `run` · `resume` · `auto` · `status` · `summary` · `stop`
+
+高级 / 少用：`graph` · `report` · `cancel` · `cleanup` · `eval` · `export`（以及并行、合 main 相关开关）
+
+## Providers
+
+| Provider | 典型角色 |
+|----------|----------|
+| `cursor` | implementer（worktree 里改代码） |
+| `codex` / `claude-code` | planner / reviewer（`--print` 规划与审核） |
+| `fake` | 离线契约冒烟（`CC_LOOP_FAKE_PROVIDERS=1`） |
+
+## 非目标
+
+不是更强的 subagent 调度器 · 不是默认合 main · 不在脏主仓上改文件 · 不用 `pkill -f` · 价值不来自「挂了多少 agent」。

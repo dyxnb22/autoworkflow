@@ -1,0 +1,17 @@
+[package]
+name = "cc-loop-contract-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Ensure the CLI binary is built before integration tests.
+[dependencies]
+cc-loop-cli = { path = "../cc-loop-cli" }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+cc-loop-core.workspace = true
+predicates.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

@@ -1,464 +1,173 @@
-# cc-loop integration contract (v1)
+# Integration contract (schema 1)
 
-This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or orchestration logic.
+Stable CLI/JSON for integrators（尤其是 Luma / TUI）。只依赖本文，不要解析内部模块或把 artifact 目录当控制面。
 
-**Package version:** 0.10.0  
-**Integration schema version:** 1
+**Package:** 0.12.0 · **Binary:** `make install` / `./scripts/cc-loop` / `rust/target/release/cc-loop`
 
-## Purpose
+## 产品一句话
 
-cc-loop is a local CLI orchestrator. External apps should:
+cc-loop 是 **分角色交付引擎**：输入 goal，输出「另一人审过、测试过」的 attempt 分支提交。
 
-1. Spawn documented commands with `subprocess`
-2. Parse `status --json` (and optionally `list --json`, `doctor --json`)
-3. Never embed cc-loop Python code or duplicate its state machine
+- 写的人不能审自己的活（`require_distinct_reviewer`）
+- 不过测试不能过关（`test_command` + 双绿）
+- 默认成功 = `ready_for_handoff`（可交接 / 可开 PR），**不合 main**
 
-## Stable CLI subset
+不是通用多 agent 调度器。任务图 / 并行 / 合 main 均为 advanced 或 opt-in。
 
-These commands and flags are the integration contract. Other commands exist for interactive use but are not required for thin integrations.
+## Integrator rules
+
+1. 用 subprocess 调文档内命令。
+2. **第一屏只读** `status --json` + `summary --json`（见下方 [Luma delivery card](#luma-delivery-card)）。
+3. 长跑用 `auto --detach`，轮询 JSON；不要阻塞前台 `auto` 当 UI。
+4. 不要 scrape artifact 目录做主控制流（排障除外）。
+
+## Day-to-day CLI（先卖这些）
 
 | Command | Purpose |
 |---------|---------|
-| `cc-loop init ...` | Create a task |
-| `cc-loop doctor --repo PATH` | Preflight without creating a task |
-| `cc-loop list [--repo PATH] [--json]` | Enumerate tasks |
-| `cc-loop status [--task-id ID] [--json]` | Poll task state |
-| `cc-loop graph [--task-id ID] [--json] [--history]` | Inspect task graph progress (v0.4+); `--history` shows graph mutations (v0.7) |
-| `cc-loop report [--task-id ID] [--json] [--format json\|human]` | Task report with graph progress, failures, artifacts (v0.6) |
-| `cc-loop summary [--task-id ID] [--json]` | Luma-oriented single JSON summary (v0.10+) |
-| `cc-loop eval --task-id ID --suite PATH [--json]` | Run local eval suite against latest attempt artifacts (v0.10) |
-| `cc-loop export --task-id ID --format jsonl --output PATH` | Export analytics-compatible JSONL rows (v0.10) |
-| `cc-loop stop --task-id ID [--json]` | Stop detached runner (v0.5) |
-| `cc-loop cancel --task-id ID [--json]` | Stop runner and mark task cancelled (v0.5) |
-| `cc-loop cleanup --task-id ID [--json]` | Remove task-owned runtime artifacts (v0.5) |
-| `cc-loop auto --detach [--task-id ID]` | Start unattended loop in background |
-| `cc-loop resume [--task-id ID]` | Continue after stop/interrupt (optional; polling may be enough) |
+| `init` | 建任务（带 test_command + 分角色 provider） |
+| `doctor --repo PATH` | 预检 |
+| `auto --detach [--task-id ID]` | 挂机跑默认闭环 |
+| `status [--task-id ID] [--json]` | 轮询：谁写/谁审/测没过/能否交付 |
+| `summary [--task-id ID] [--json]` | **一张交付卡**（Luma 主数据源） |
+| `resume` / `stop` | 继续 / 停 runner |
+| `list [--json]` | 列任务 |
 
-Global flags:
+Global：`--state-root PATH` **在子命令前**；`--version`。Env：`CC_LOOP_STATE_ROOT`。
 
-- `--state-root PATH` — state directory (default `~/.cc-loop`); must appear **before** the subcommand (e.g. `cc-loop --state-root PATH status --json`)
-- `--version` — print version and exit
+少用 / advanced：`graph` · `report` · `cancel` · `cleanup` · `eval` · `export` · `--auto-merge` · 并行相关 flag。
 
-Environment:
-
-- `CC_LOOP_STATE_ROOT` — when set and `--state-root` is not passed on the command line, defaults `--state-root` to this path.
-
-## Recommended integration flow
+## Recommended flow
 
 ```bash
 cc-loop doctor --repo "$PROJECT_PATH" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --test-command -- python -m pytest tests/ -q
+  --test-command -- cargo test -q
 
 cc-loop init --goal "..." --repo "$PROJECT_PATH" --task-id "$TASK_ID" \
   --planner claude-code --reviewer claude-code --implementer cursor \
-  --test-command -- python -m pytest tests/ -q
+  --test-command -- cargo test -q
 
 cc-loop auto --detach --task-id "$TASK_ID"
-
-# Poll until done:
 cc-loop status --task-id "$TASK_ID" --json
-
-# Single-file recap for Luma (after terminal state or anytime):
 cc-loop summary --task-id "$TASK_ID" --json
 ```
 
-## `status --json` schema (schema_version 1)
+### Hard defaults（三硬差异）
 
-Stdout is a single JSON object. No extra prose.
+| Setting | Default | Integrator 含义 |
+|---------|---------|-----------------|
+| `require_distinct_reviewer` | `true` | implementer ≠ reviewer（provider+model）；UI 应写死展示 `roles` + `distinct_reviewer` |
+| `test_command` for `auto` | **required** | 缺省 → exit `1`；不要提供「无测试默认成功」的 UX |
+| `allow_merge_without_tests` | `false` | 仅显式逃生；UI 不应当默认开关推销 |
+| `auto_merge` | `false` | `success=ready_for_handoff`；合 main 仅 `--auto-merge` |
+| `planner_granularity` | `single` | 默认单环；`graph` 为 advanced |
 
-```json
-{
-  "schema_version": 1,
-  "cc_loop_version": "0.10.0",
-  "task_id": "abc123",
-  "goal": "...",
-  "target_repo": "/absolute/path",
-  "base_branch": "main",
-  "base_commit": "sha",
-  "status": "stopped",
-  "iteration": 1,
-  "attempt": {
-    "iteration": 1,
-    "retry": 0,
-    "phase": "rejected",
-    "decision": "reject",
-    "test_status": "passed",
-    "implementer_exit_code": 0,
-    "worktree_path": "/path or empty string",
-    "merge_error": "",
-    "artifact_dir": "/absolute/path/to/artifacts/iter-001",
-    "created_at": "ISO8601 or empty",
-    "graph_node_id": "T1 or empty for legacy tasks",
-    "running_provider": "cursor or empty when no provider subprocess is active"
-  },
-  "task_graph": {
-    "schema_version": 1,
-    "current_node_id": "T2",
-    "summary": {
-      "total": 5,
-      "pending": 3,
-      "running": 0,
-      "passed": 2,
-      "failed": 0,
-      "rejected": 0,
-      "blocked": 0,
-      "skipped": 0
-    },
-    "nodes": [
-      {
-        "id": "T1",
-        "title": "Set up project structure",
-        "kind": "implementation",
-        "owner": "implementer",
-        "dependencies": [],
-        "status": "passed",
-        "retry_count": 0
-      }
-    ]
-  },
-  "next_action": "resume",
-  "running": false,
-  "runner_pid": null,
-  "runner_state": "idle",
-  "last_heartbeat_at": "",
-  "runner_started_at": "",
-  "elapsed_seconds": 0,
-  "can_stop": false,
-  "can_resume": true,
-  "can_cleanup": true,
-  "log_path": "/absolute/path/to/runner.log",
-  "current_message": "Ready to run"
-}
-```
+Reject → 状态机回到实现：`attempt.decision=reject` 且 retries 未尽时，`next_action` 偏向 `resume` / repair；`latest_reject_reason` 供下一轮 implementer。
 
-### Field reference
+## Luma delivery card
+
+TUI **第一屏只渲染这件事**（不要先画任务图 / 并行 / 命令清单）：
+
+| 卡面 | `summary --json`（优先） | `status --json` 备份 |
+|------|--------------------------|----------------------|
+| 谁在写 | `roles.implementer` | 同 |
+| 谁在审 | `roles.reviewer` · `distinct_reviewer` | 同 |
+| Plan 摘要 | `plan_summary` | （可从 attempt/plan 推） |
+| 改了什么 | `diff_stat` | attempt artifact 路径 |
+| Tests | `tests` / `latest_attempt.test_status` | `attempt.test_status` |
+| Review | `review.decision` + `review.reason` | `attempt.decision` · `latest_reject_reason` |
+| 第几次重试 | `latest_attempt.retry` | `attempt.retry` |
+| 能否交付 | `success` · `next_action` | 同 |
+
+成功目标值：`success == "ready_for_handoff"`（默认）。`merged` 仅在 opt-in `auto_merge` 后出现。
+
+终端态也会落盘 `~/.cc-loop/tasks/<id>/run.summary.json`（与 `summary --json` 同形）。
+
+## `status --json`（schema_version 1）
+
+单对象 stdout。第一屏相关字段：
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | int | Integration JSON schema version (currently `1`) |
-| `cc_loop_version` | string | cc-loop package version |
-| `task_id` | string | Task identifier |
-| `goal` | string | Task goal from init |
-| `target_repo` | string | Absolute path to target git repo |
-| `base_branch` | string | Base branch name |
-| `base_commit` | string | Current base commit SHA |
-| `status` | string | Task status: `initialized`, `running`, `stopped`, `done`, `failed`, etc. |
-| `iteration` | int | Current iteration counter |
-| `attempt` | object | Latest attempt snapshot (empty strings when no attempt yet) |
-| `next_action` | string | Stable enum (see below) |
-| `running` | bool | `true` when `runner.pid` exists and process is alive |
-| `runner_pid` | int \| null | PID from detached `auto`, or null |
-| `task_graph` | object \| omitted | Present when task has a graph (v0.4 additive) |
-| `runner_state` | string | `idle`, `running`, `stopped`, `stale_pid`, `stale_heartbeat` (v0.5 additive) |
-| `last_heartbeat_at` | string | ISO8601 from `runner.heartbeat.json` or empty (v0.5) |
-| `runner_started_at` | string | ISO8601 runner start or empty (v0.5) |
-| `elapsed_seconds` | int | Wall-clock seconds since first attempt (v0.5) |
-| `can_stop` | bool | Whether `cc-loop stop` can terminate a runner (v0.5) |
-| `can_resume` | bool | Whether resume/auto can continue (v0.5) |
-| `can_cleanup` | bool | Whether cleanup is safe (v0.5) |
-| `log_path` | string | Path to `runner.log` (v0.5) |
-| `current_message` | string | Short UI-friendly status message (v0.6) |
-| `running_node_ids` | array | Parallel running node ids when applicable (v0.9) |
-| `reviewer_prompt_metrics` | object \| omitted | Latest attempt reviewer cache metrics when `review.prompt.metrics.json` exists (v0.10 additive) |
-| `prompt_cache` | object \| omitted | Summary from `prompt.cache.json` when present: path, token totals, reviewer context mode, omitted patch chars (additive) |
-| `heartbeat` | object \| omitted | Fresh `runner.heartbeat.json` phase/provider snapshot during active runs (v0.10 additive) |
+| `roles` | object | `{planner,implementer,reviewer}` × `{provider,model}` |
+| `distinct_reviewer` | bool | 写审是否分离（实测） |
+| `require_distinct_reviewer` | bool | 配置是否强制 |
+| `attempt.test_status` | string | `passed` / `failed` / `skipped` / `timed_out` / … |
+| `attempt.decision` | string | `approve` / `reject` / … |
+| `attempt.retry` | int | 当前节点重试次数 |
+| `latest_reject_reason` | string \| null | 最近一次拒绝原因 |
+| `success` | string | `ready_for_handoff` / `merged` / `stopped` / `failed` / … |
+| `next_action` | string | 见下表 |
+| `auto_merge` | bool | 是否合 main |
+| `running` / `runner_pid` / `can_stop` / `can_resume` | … | 挂机控制 |
 
-`attempt.running_provider` (v0.10) is non-empty while a provider subprocess is active.
+身份与仓库：`task_id` · `goal` · `target_repo` · `base_branch` · `base_commit` · `status` · `iteration` · `cc_loop_version` · `schema_version`。
 
-The `task_graph` block is omitted for legacy tasks without a graph. See [TASK_GRAPH.md](TASK_GRAPH.md).
+`task_graph`：**可省略**；仅 advanced 多节点时出现——TUI 默认不要展示。
 
-### `next_action` values
+### `next_action`
 
 | Value | Meaning |
 |-------|---------|
-| `none` | Detached runner is active; wait and poll |
-| `run` | Task initialized, no attempts yet |
-| `resume` | Continue or retry the current attempt |
-| `inspect` | Reviewer requested stop; human inspection recommended |
-| `done` | Task completed successfully |
-| `failed` | Task or attempt failed |
-| `repair` | Auto loop will run implementer repair on a recoverable failure |
-| `terminal` | Unrecoverable stop; inspect `failure` block in JSON |
+| `none` | runner 活跃，继续轮询 |
+| `run` | 已 init，尚无 attempt |
+| `resume` | 继续 / reject 后重回实现 |
+| `repair` | 可恢复失败 → 实现侧修复 |
+| `inspect` | 需人看 |
+| `done` | 交付成功 |
+| `failed` / `terminal` | 失败 / 不可恢复 |
 
-Mapping follows the auto recovery dispatcher in `recovery.decide_auto_step`.
+可选 `failure` 对象：排障用，不是第一屏主角。
 
-Optional `failure` object (additive, schema v1):
+## `list --json`
 
-```json
-"failure": {
-  "failure_type": "merge_conflict",
-  "disposition": "recoverable",
-  "stop_reason": "",
-  "recovery_retry_count": 1,
-  "merge_retry_count": 0,
-  "attempted_repairs": ["implementer_repair:merge_conflict"],
-  "suggested_actions": ["..."],
-  "details": {}
-}
-```
+JSON **数组**：`{task_id, status, target_repo, phase, updated_at, goal, iteration}`。
 
-See [RECOVERY.md](RECOVERY.md) for failure types and budgets.
+## `summary --json`
 
-## `graph --json` schema (v0.4, additive)
-
-Stdout is a JSON object:
-
-```json
-{
-  "task_graph": {
-    "schema_version": 1,
-    "current_node_id": "T2",
-    "summary": { "total": 2, "passed": 1, "pending": 1, "...": 0 },
-    "nodes": [ { "id": "T1", "title": "...", "status": "passed", "...": "..." } ]
-  }
-}
-```
-
-When no graph exists: `{"task_graph": null}`.
-
-Human `graph` output lists node id, status, and title with a progress line.
-
-## `list --json` item schema
-
-Stdout is a JSON array of objects:
-
-```json
-{
-  "task_id": "...",
-  "status": "initialized",
-  "target_repo": "/abs/path",
-  "phase": "planning",
-  "updated_at": "2026-06-30T12:00:00+00:00",
-  "goal": "...",
-  "iteration": 0
-}
-```
-
-`phase` is `-` when no attempts exist. `updated_at` is the `state.json` modification time (UTC ISO8601).
-
-Human output (default): tab-separated `task_id`, `status`, `target_repo`, `phase`, `updated_at`.
+Luma 主合约。除 delivery card 字段外可含排障附加（`artifact_paths`、`execution_timeline`、`prompt_cache` 等）——**UI 可折叠，勿抢第一屏**。
 
 ## Exit codes
 
-See [EXIT_CODES.md](EXIT_CODES.md).
+| Code | Meaning |
+|------|---------|
+| `0` | 成功，或非执行错误的可恢复停顿 |
+| `1` | 用户/配置错误（含 `auto` 无 `test_command`、preflight、缺任务） |
+| `2` | 执行失败（provider / task `failed`） |
+
+挂机以 JSON 为准，不要只靠 exit code。
 
 ## Detached `auto`
 
-`cc-loop auto --detach --task-id ID`:
+1. 后台跑无 `--detach` 的 `auto`
+2. 写 `runner.pid` / `runner.log` / `runner.heartbeat.json`
+3. 父进程打印 `detached …` 后 exit `0`
 
-1. Spawns a background child running `auto` without `--detach`
-2. Writes child PID to `<state-root>/tasks/<id>/runner.pid`
-3. Appends child stdout/stderr to `<state-root>/tasks/<id>/runner.log`
-4. Child refreshes `<state-root>/tasks/<id>/runner.heartbeat.json` each loop iteration (v0.5)
-5. Parent prints one line: `detached pid=<pid> task_id=<id> log=<path>` and exits 0
+## Init flags（集成相关）
 
-Poll `status --json` fields `running`, `runner_pid`, `runner_state`, and `last_heartbeat_at`.
+- `--test-command -- ARG ...` — **`auto` 必填**（`--` 后跟真实命令）
+- `--planner` / `--implementer` / `--reviewer` — 角色锁定靠不同 provider（或同 provider 不同 model）
+- `--allow-same-reviewer` — 关掉角色锁定（不推荐；UI 应警告）
+- `--auto-merge` / `--allow-merge-without-tests` — 显式逃生，勿当默认
+- `--task-id` · `--goal-file` · 各 provider model flag
 
-## State file `schema_version`
+Advanced（不必进第一屏）：`--planner-granularity graph` · 并行相关 · review context 调优。
 
-New and saved `state.json` files include top-level `"schema_version": 1`. Older files without this field load with default `1`.
-
-## Semantic versioning policy
-
-- **Patch** (0.3.x): bug fixes, no contract change
-- **Minor** (0.x.0): backward-compatible additions (new optional JSON fields)
-- **Major** (x.0.0): breaking CLI or JSON changes — bump integration `schema_version`
-
-## What integrators should NOT do
-
-- Parse artifact directories or internal prompt files
-- Block on foreground `auto` for long-running tasks (use `--detach`)
-- Import `cc_loop` Python modules from another application
-- Depend on undocumented CLI flags or exit-code nuances without reading `status --json`
-
-## `init` flags (integration-relevant)
-
-In addition to goal/repo/providers/test-command:
-
-- `--test-command -- ARG ...` — recommended form; place `--` before the command so pytest/cargo flags are not parsed as cc-loop options. With this separator, every following token belongs to the test command; put cc-loop flags before `--test-command`. cc-loop emits a **stderr warning** (non-fatal) when known cc-loop flags appear after `--test-command --`. A single quoted string is also accepted and split with shell rules (shell pipelines are rejected).
-- `--planner-granularity single|auto|graph` — control planner decomposition (default `auto`; still invokes the planner provider)
-- `--planner-mode auto|graph|single|direct` — planner execution mode (default `auto`). `direct` skips the planner provider and synthesizes a single-node task graph from the goal; `graph`/`single`/`auto` still run the planner unless `direct` is set.
-- `--review-context-mode hybrid|inline|artifact_refs` — reviewer prompt context (default `hybrid`). `inline` always embeds patch text; `artifact_refs` references patch/test/diff artifact paths only; `hybrid` inlines patches up to the threshold below.
-- `--review-inline-patch-threshold N` — hybrid reviewer inline patch character limit (default `8000`)
-- `--provider-watchdog-grace-seconds N` — extra seconds after provider timeout before force-kill (config key `provider_watchdog_grace_seconds`, default `5`)
-- `--task-id ID` — explicit task id (recommended for integrations)
-- `--codex-model`, `--cursor-model`, `--claude-code-model`
-- `--cursor-force`, `--cursor-sandbox`
-- `--goal-file PATH` — mutually exclusive with `--goal`
-
-## `doctor` flags
-
-```
-cc-loop doctor --repo PATH [--base-branch main]
-  [--planner NAME] [--reviewer NAME] [--implementer NAME]
-  [--test-command ARG ...] [--json]
-```
-
-Success: exit 0, prints `ok` or `{"ok": true}`. Failure: exit 1, message on stderr.
-
-## v0.10 artifacts and observability (additive)
-
-Each attempt artifact directory may include:
-
-| Artifact | Description |
-|----------|-------------|
-| `plan.prompt.meta.json` | Planner prompt version/label/deployment metadata |
-| `implementer.prompt.meta.json` | Implementer prompt metadata |
-| `review.prompt.meta.json` | Reviewer prompt metadata |
-| `review.prompt.metrics.json` | Reviewer cache-layout metrics (`stable_prefix_ratio`, `contract_prefix_ratio`, `cache_health`, `context_mode`, `omitted_patch_chars`, `estimated_avoidable_miss_tokens`, token estimates) |
-| `prompt.cache.json` | Per-attempt prompt cache budget across planner/implementer/reviewer phases with totals |
-| `attempt.trace.json` | Normalized per-attempt trace with phase status and artifact paths |
-| `command.argv.json` | Executed argv per phase (`planner`, `implementer`, `reviewer`, `test`); prompt text is redacted as `<prompt:N chars sha256=...>` placeholders |
-| `subprocess.result.json` | Subprocess exit metadata per phase (`exit_code`, `timed_out`, `hung`, `duration_seconds`, `killed`, stdout/stderr paths) |
-
-### Prompt metadata contract (`schema_version` 1)
-
-```json
-{
-  "schema_version": 1,
-  "role": "reviewer",
-  "prompt_name": "cc-loop-reviewer",
-  "prompt_version": "0.10.0",
-  "label": "production",
-  "layout": "stable-prefix-v1",
-  "provider": "codex",
-  "model": "",
-  "task_id": "abc123",
-  "iteration": 1,
-  "retry": 0,
-  "graph_node_id": "T1",
-  "created_at": "2026-07-02T12:00:00+00:00",
-  "prompt_path": "/absolute/path/review.prompt.txt"
-}
-```
-
-### Trace contract (`schema_version` 1)
-
-`attempt.trace.json` summarizes providers, models, and per-phase status with
-artifact paths and heuristic `estimated_prompt_tokens` values (`ceil(chars / 4)`).
-
-### `eval` command
-
-```
-cc-loop eval --task-id ID --suite PATH [--json]
-```
-
-- Loads the latest attempt artifacts for the task.
-- Evaluates JSON artifact assertions from a local suite file (`schema_version` 1).
-- Exit `0` when all cases pass, `1` when any fail, `2` for invalid suite/input.
-- Supported assertion ops: `==`, `!=`, `>=`, `>`, `<=`, `<`, `contains`, `exists`.
-
-### `export` command
-
-```
-cc-loop export --task-id ID --format jsonl --output PATH
-```
-
-Writes one JSON object per line for planner, implementer, testing, reviewer, and
-merge phases. Rows include `schema_version`, task/attempt identifiers, provider,
-model, prompt paths, token estimates, reviewer `decision`, `stable_prefix_ratio`
-when available, and `timestamp`.
-
-### `report --json` observability fields (additive)
-
-```json
-"observability": {
-  "trace_path": "/absolute/path/attempt.trace.json",
-  "reviewer_prompt_metrics": {
-    "layout": "stable-prefix-v1",
-    "stable_prefix_ratio": 0.8,
-    "contract_prefix_ratio": 0.92,
-    "cache_health": "good",
-    "total_prompt_cache_health": "warning",
-    "estimated_prompt_tokens": 456,
-    "context_mode": "hybrid",
-    "inline_patch": false,
-    "omitted_patch_chars": 12000,
-    "estimated_avoidable_miss_tokens": 3000
-  },
-  "prompt_cache": {
-    "path": "/absolute/path/prompt.cache.json",
-    "estimated_prompt_tokens": 12000,
-    "estimated_provider_prompt_tokens": 9000,
-    "estimated_avoidable_miss_tokens": 3000,
-    "reviewer_context_mode": "hybrid",
-    "reviewer_inline_patch": false,
-    "reviewer_omitted_patch_chars": 12000
-  },
-  "prompt_metadata_paths": {
-    "planner": "/absolute/path/plan.prompt.meta.json",
-    "implementer": "/absolute/path/implementer.prompt.meta.json",
-    "reviewer": "/absolute/path/review.prompt.meta.json"
-  }
-}
-```
-
-### `summary --json` schema (v0.10+, additive)
-
-Luma-oriented single JSON object. Does not replace `report --json`.
+## Doctor
 
 ```bash
-cc-loop summary --task-id ID --json
+cc-loop doctor --repo PATH [--json] [--test-command -- …]
 ```
 
-Key fields:
+Exit `0` / `1`。应对缺失 `test_command`、未分角色给出强提示。
 
-| Field | Description |
-|-------|-------------|
-| `schema_version` | Summary schema version (currently `1`) |
-| `task_id`, `goal`, `status`, `base_branch`, `target_repo` | Task identity |
-| `latest_attempt` | Iteration, retry, phase, decision, test status, artifact dir |
-| `providers` | Planner/implementer/reviewer provider names |
-| `prompt_cache` | Snapshot from latest attempt `prompt.cache.json` |
-| `reviewer_prompt_metrics` | Snapshot from `review.prompt.metrics.json` |
-| `subprocess_result` | Per-phase exit metadata from `subprocess.result.json` |
-| `command_argv_path`, `attempt_trace_path` | Latest attempt diagnostic paths |
-| `review` | Decision, reason, issues |
-| `failure` | Failure summary compatible with `status --json` |
-| `artifact_paths` | Latest attempt artifact path map |
-| `suggested_next_action` | Recovery hint |
+## Artifacts（排障，非第一屏）
 
-Human output (`cc-loop summary --task-id ID`) lists task/status/latest/test/review/cache/artifacts.
+`artifacts/iter-NNN[-retry-NN]/`：`plan.*` · `implementer.*` · `test.output.txt` · `diff.*` · `review.*` · 可选 `prompt.cache.json`（优先服务 **reviewer / 多轮 retry** 的省 token，不是并行挂机）。
 
-### Task-level `run.summary.json` (v0.10+, additive)
+## Versioning
 
-Written to `~/.cc-loop/tasks/<task-id>/run.summary.json` when a task reaches a terminal state (`done`, `failed`, `cancelled`, or non-recoverable `stopped`). Content matches `cc-loop summary --json` for that task.
-
-### Reviewer prompt layout (v0.10+)
-
-Reviewer prompts use three sections before per-attempt evidence:
-
-1. `## Stable Review Contract` / Rubric / JSON output contract
-2. `## Task Review Context` — goal, node criteria, files scope (stable across retries of the same node)
-3. `## Dynamic Review Payload` — iteration, commits, test output, diff/patch evidence
-
-When `review_context_mode` is `artifact_refs`, or `hybrid` with a large patch, the reviewer prompt omits the full `git diff --stat` body and instead includes a short summary plus paths to `diff.stat.txt` and `diff.files.txt`.
-
-### Auto direct planner (`auto_direct_planner`)
-
-Config keys (defaults):
-
-- `auto_direct_planner`: `true`
-- `auto_direct_max_goal_chars`: `500`
-
-When `planner_mode` is `auto` (default), cc-loop may skip the planner provider for short, simple goals (keywords like `fix`, `bug`, `cli`, `docs`, `typo`, `test`, or phrases like `minimal change`). Complex goals containing keywords like `architecture`, `migration`, or `redesign` always use the planner provider.
-
-`planner_mode: direct` still forces direct mode. `planner_mode: single|graph` is never overridden.
-
-`prompt.cache.json` planner phase records `planner_mode_resolved`, `planner_direct_reason`, and `provider_skipped`.
-
-### Task-level terminal artifacts (v0.10+)
-
-On terminal disposition (`done`, `failed`, `cancelled`, or non-recoverable `stopped`), cc-loop writes:
-
-| Artifact | Description |
-|----------|-------------|
-| `run.summary.json` | Same payload as `cc-loop summary --json` |
-| `execution.timeline.json` | Time-ordered phase events from `events.jsonl` with subprocess durations |
-
-Terminal events in `events.jsonl`: `task.completed`, `task.failed`, `task.cancelled` (deduplicated).
-
-### Cursor implementer progress (v0.10+)
-
-When the Cursor implementer produces 0-byte raw output for 30+ seconds, `runner.heartbeat.json` and `status --json` heartbeat include `provider_progress` such as `cursor implementer: waiting for output (45s elapsed)`.
+- **Patch:** 修 bug，不改合约  
+- **Minor:** 可选 JSON 字段加法  
+- **Major / schema bump:** 破坏 CLI 或 JSON → 升 `schema_version`
