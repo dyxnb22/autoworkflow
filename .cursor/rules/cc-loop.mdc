@@ -9,19 +9,21 @@ alwaysApply: true
 
 **分角色交付引擎**，不是通用 agent 调度器。
 
-> 写的人不能审自己的活；不过测试不能过关。
+> 写的人不能审自己的活；不过测试不能过关。  
+> 目标态：没有 P0/P1，才允许交付。
 
 ```text
-goal → plan → implement（另一角色）→ test → review（非实现方）→ ready_for_handoff
-         ↑________ reject / fail 重试 _________|
+goal → plan → implement（另一角色）→ test → review（分级）→ ready_for_handoff
+         ↑________ reject / P0·P1 / 红测 _________|
 ```
 
-**三硬差异：** 跨 provider 角色锁定 · 测试门默认不可关 · reject→重回实现  
+**硬差异：** 跨 provider 角色锁定 · 测试门 · reject→实现  
+**质量环：** [docs/WORKFLOW.md](docs/WORKFLOW.md)（落地 M1→M4）
 
-**先做厚：** 单环 · worktree · 四态 · resume/stop · `status`/`summary --json`  
+**先做厚：** 单环 · worktree · 测试/severity 门 · resume/stop · `status`/`summary --json`  
 **后做或不做：** 大图 · 并行 · 动态 replan · 默认合 main
 
-Docs: [README.md](README.md) · [INTEGRATION.md](docs/INTEGRATION.md) · [OPERATIONS.md](docs/OPERATIONS.md) · [AGENTS.md](Agents.md)
+Docs: [README.md](README.md) · [WORKFLOW.md](docs/WORKFLOW.md) · [INTEGRATION.md](docs/INTEGRATION.md) · [OPERATIONS.md](docs/OPERATIONS.md) · [AGENTS.md](Agents.md)
 
 ## Tests
 
@@ -35,4 +37,4 @@ make test && make clippy
 
 ## Invariants
 
-`shell=false` · 无 `pkill -f` · 脏仓阻断 · 成功=handoff 非合 main · 破坏合约 → 更新 INTEGRATION.md · Luma 第一屏讲分工+门禁，不讲编排
+`shell=false` · 无 `pkill -f` · 脏仓阻断 · 成功=handoff 非合 main · 破坏合约 → 更新 INTEGRATION.md · Luma 第一屏讲分工+门禁+质量，不讲编排

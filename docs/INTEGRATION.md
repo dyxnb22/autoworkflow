@@ -4,12 +4,15 @@ Stable CLI/JSON for integrators（尤其是 Luma / TUI）。只依赖本文，�
 
 **Package:** 0.12.0 · **Binary:** `make install` / `./scripts/cc-loop` / `rust/target/release/cc-loop`
 
+质量环产品设计（多维审查、P0/P1 停止条件、落地里程碑）：[`WORKFLOW.md`](WORKFLOW.md)。下文 **已上线** 字段可依赖；标 **目标态** 的字段随实现以 minor 加法落地。
+
 ## 产品一句话
 
 cc-loop 是 **分角色交付引擎**：输入 goal，输出「另一人审过、测试过」的 attempt 分支提交。
 
 - 写的人不能审自己的活（`require_distinct_reviewer`）
 - 不过测试不能过关（`test_command` + 双绿）
+- **目标态：** 无 P0/P1 阻断项才允许交付（`stop_policy=no_p0_p1`）
 - 默认成功 = `ready_for_handoff`（可交接 / 可开 PR），**不合 main**
 
 不是通用多 agent 调度器。任务图 / 并行 / 合 main 均为 advanced 或 opt-in。
@@ -79,12 +82,14 @@ TUI **第一屏只渲染这件事**（不要先画任务图 / 并行 / 命令清
 | 改了什么 | `diff_stat` | attempt artifact / `delivery`（summary 更全） |
 | Tests | `tests` / `latest_attempt.test_status` | `tests` / `attempt.test_status` |
 | Review | `review.decision` + `review.reason` | `review` · `latest_reject_reason` |
+| 质量门（目标态） | `quality.*` | 同 |
 | 第几次重试 | `latest_attempt.retry` / `delivery.retry` | `attempt.retry` / `delivery.retry` |
 | 能否交付 | `success` · `next_action` | 同 |
 
 Luma 也可只读嵌套对象 `delivery`（status/summary 均有）：卡面字段集中在一处，排障字段留在顶层。
 
-成功目标值：`success == "ready_for_handoff"`（默认）。`merged` 仅在 opt-in `auto_merge` 后出现。
+成功目标值：`success == "ready_for_handoff"`（默认）。`merged` 仅在 opt-in `auto_merge` 后出现。  
+**目标态：** 仅当测试绿 **且** 无 P0/P1 阻断项时才允许该成功值（见 [WORKFLOW.md](WORKFLOW.md#停止条件definition-of-done)）。
 
 终端态也会落盘 `~/.cc-loop/tasks/<id>/run.summary.json`（与 `summary --json` 同形）。
 
@@ -136,6 +141,22 @@ JSON **数组**：`{task_id, status, target_repo, phase, updated_at, goal, itera
 
 Luma 主合约。除 delivery card 字段外可含排障附加（`artifact_paths`、`execution_timeline`、`prompt_cache` 等）——**UI 可折叠，勿抢第一屏**。
 
+## Quality loop fields（目标态 / minor 加法）
+
+实现落地后，`status`/`summary` 增加可选对象 `quality`（缺省时 UI 按「尚未启用分级门」降级展示）：
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `quality.stop_policy` | string | 如 `no_p0_p1` · `approve_only` |
+| `quality.blocking_severities` | string[] | 默认 `["P0","P1"]` |
+| `quality.blocking_counts` | object | `{P0,P1,P2,P3}` 计数 |
+| `quality.open_blocking_issues` | array | 当前仍阻断交付的 issues |
+| `quality.facets_covered` | string[] | 本轮审查覆盖的维 |
+| `review.issues[].severity` | string | `P0`\|`P1`\|`P2`\|`P3` |
+| `review.issues[].facet` | string | 如 `correctness` · `security` |
+
+引擎规则（目标态）：存在 P0/P1（或 `blocking:true`）时，即使模型输出 `approve`，也校正为 `reject` 并重回实现。详见 [WORKFLOW.md](WORKFLOW.md)。
+
 ## Exit codes
 
 | Code | Meaning |
@@ -154,11 +175,13 @@ Luma 主合约。除 delivery card 字段外可含排障附加（`artifact_paths
 
 ## Init flags（集成相关）
 
-- `--test-command -- ARG ...` — **`auto` 必填**（`--` 后跟真实命令）
+- `--test-command -- ARG ...` — **`auto`/`run`/`resume` 必填**（`--` 后跟真实命令）
 - `--planner` / `--implementer` / `--reviewer` — 角色锁定靠不同 provider（或同 provider 不同 model）
 - `--allow-same-reviewer` — 关掉角色锁定（不推荐；UI 应警告）
 - `--auto-merge` / `--allow-merge-without-tests` — 显式逃生，勿当默认
 - `--task-id` · `--goal-file` · 各 provider model flag
+
+目标态（见 WORKFLOW）：`--stop-policy no_p0_p1` · `--blocking-severities P0,P1` · review facet 相关 flag。
 
 Advanced（不必进第一屏）：`--planner-granularity graph` · 并行相关 · review context 调优。
 
