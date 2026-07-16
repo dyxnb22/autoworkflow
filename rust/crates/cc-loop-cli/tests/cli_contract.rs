@@ -226,6 +226,41 @@ fn distinct_reviewer_blocks_init() {
 }
 
 #[test]
+fn doctor_warns_but_allows_missing_test_command() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+
+    let out = cc_loop()
+        .args([
+            "doctor",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--planner",
+            "codex",
+            "--implementer",
+            "cursor",
+            "--reviewer",
+            "codex",
+            "--skip-provider-check",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["ok"], true);
+    let warnings = v["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap_or("").contains("test_command")),
+        "doctor should warn about empty test_command: {warnings:?}"
+    );
+}
+
+#[test]
 fn auto_refuses_without_test_command() {
     let root = tempdir().unwrap();
     let repo = root.path().join("repo");

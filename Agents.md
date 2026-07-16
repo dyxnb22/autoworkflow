@@ -44,4 +44,4 @@ goal → plan → implement（另一角色）→ test → review（非实现方�
 make test && make clippy
 ```
 
-Invariants：`shell=false` · 无 `pkill -f` · 脏仓阻断 · 不默认切换用户主 checkout 作为成功路径 · 成功=handoff。
+契约：`rust/crates/cc-loop-cli/tests/cli_contract.rs`。Invariants：`shell=false` · 无 `pkill -f` · 脏仓阻断 · 不默认切换用户主 checkout 作为成功路径 · 成功=handoff。

@@ -9,9 +9,8 @@ make test && make install
 
 | Crate | Role |
 |-------|------|
-| `cc-loop-cli` | 二进制 |
+| `cc-loop-cli` | 二进制 + CLI 契约测试（`tests/cli_contract.rs`） |
 | `cc-loop-core` | 闭环引擎（角色锁定 · 测试门 · reject→实现） |
-| `cc-loop-contract-tests` | CLI 契约 |
 
 默认：`planner_granularity=single` · `require_distinct_reviewer=true` · `auto_merge=false`。  
 大图 / 并行 / 合 main：advanced，不是产品主叙事。

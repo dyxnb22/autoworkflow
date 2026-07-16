@@ -15,7 +15,7 @@ rust-release:
 	cd rust && cargo build --release
 
 rust-test:
-	cd rust && cargo build -p cc-loop-cli && cargo test --workspace
+	cd rust && cargo test --workspace
 
 rust-clippy:
 	cd rust && cargo clippy -p cc-loop-core -p cc-loop-cli -- -D warnings

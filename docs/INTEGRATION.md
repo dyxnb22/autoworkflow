@@ -168,7 +168,7 @@ Advanced（不必进第一屏）：`--planner-granularity graph` · 并行相关
 cc-loop doctor --repo PATH [--json] [--test-command -- …]
 ```
 
-Exit `0` / `1`。应对缺失 `test_command`、未分角色给出强提示。
+Exit `0` / `1`。缺 `test_command` 时给出 **warning**（`init`/`doctor` 仍可通过）；`run`/`resume`/`auto` 的 preflight 则把空 `test_command` 升为 **error**（`require_test_command=true`）。未分角色时同样硬失败（除非 `--allow-same-reviewer`）。
 
 ## Artifacts（排障，非第一屏）
 

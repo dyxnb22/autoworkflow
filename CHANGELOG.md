@@ -3,8 +3,9 @@
 ## Unreleased
 
 - **Test gate:** `run` / `resume` / `auto` 均要求 `test_command`（或显式 `allow_merge_without_tests`）；`skipped` 不得进入 review / `ready_for_handoff`。
+- **Preflight:** `run`/`resume`/`auto` 使用 `require_test_command=true`；空测试命令升为 error。`init`/`doctor` 仍可 warning-only。
 - **Luma card:** `status`/`summary` 增加 `plan_summary` · `tests` · `review` · 聚合对象 `delivery`。
-- **Contracts:** reject→再实现闭环、红测阻断 review、skipped 不可 handoff。
+- **Contracts:** 迁入 `cc-loop-cli/tests`（`CARGO_BIN_EXE_cc-loop` 可靠）；覆盖 reject 闭环、红测阻断、skipped 不可 handoff。
 
 ## v0.12.0 — 分角色交付引擎（Rust）
 

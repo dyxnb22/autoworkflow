@@ -31,7 +31,7 @@ make test && make clippy
 
 ## Layout
 
-`rust/crates/cc-loop-cli` · `cc-loop-core` · `cc-loop-contract-tests`
+`rust/crates/cc-loop-cli`（含 `tests/cli_contract.rs`）· `cc-loop-core`
 
 ## Invariants
 

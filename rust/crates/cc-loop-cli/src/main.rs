@@ -18,7 +18,9 @@ use cc_loop_core::orchestrator::{
     require_test_command_for_execution, run_loop, RunOutcome,
 };
 use cc_loop_core::paths::{default_state_root, state_path};
-use cc_loop_core::preflight::{require_preflight_ok, run_preflight};
+use cc_loop_core::preflight::{
+    require_preflight_ok, run_preflight, run_preflight_with, PreflightOptions,
+};
 use cc_loop_core::report::{build_report, format_report_human};
 use cc_loop_core::runner::{cancel_task, cleanup_task, spawn_detached_auto, stop_runner};
 use cc_loop_core::state::{
@@ -546,7 +548,15 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
             let id = resolve_task_id(state_root, task_id.as_deref())?;
             let mut state = load_state(&id, state_root)?;
             require_test_command_for_execution(&state.config)?;
-            let pre = run_preflight(Path::new(&state.target_repo), &state.config, true, false)?;
+            let pre = run_preflight_with(
+                Path::new(&state.target_repo),
+                &state.config,
+                PreflightOptions {
+                    check_providers: true,
+                    allow_dirty: false,
+                    require_test_command: true,
+                },
+            )?;
             require_preflight_ok(&pre)?;
             Ok(match run_loop(&mut state, state_root, Some(1))? {
                 RunOutcome::Success | RunOutcome::UserStop => ExitCode::Success,
@@ -566,6 +576,16 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
                     state.status.as_str()
                 )));
             }
+            let pre = run_preflight_with(
+                Path::new(&state.target_repo),
+                &state.config,
+                PreflightOptions {
+                    check_providers: true,
+                    allow_dirty: false,
+                    require_test_command: true,
+                },
+            )?;
+            require_preflight_ok(&pre)?;
             Ok(match run_loop(&mut state, state_root, None)? {
                 RunOutcome::Success | RunOutcome::UserStop => ExitCode::Success,
                 RunOutcome::Failed => ExitCode::ExecutionFailure,
@@ -593,7 +613,15 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
                 }
                 return Ok(ExitCode::Success);
             }
-            let pre = run_preflight(Path::new(&state.target_repo), &state.config, true, false)?;
+            let pre = run_preflight_with(
+                Path::new(&state.target_repo),
+                &state.config,
+                PreflightOptions {
+                    check_providers: true,
+                    allow_dirty: false,
+                    require_test_command: true,
+                },
+            )?;
             require_preflight_ok(&pre)?;
             Ok(match run_loop(&mut state, state_root, None)? {
                 RunOutcome::Success => ExitCode::Success,

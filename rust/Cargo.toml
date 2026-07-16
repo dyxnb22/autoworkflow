@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/cc-loop-core",
     "crates/cc-loop-cli",
-    "crates/cc-loop-contract-tests",
 ]
 default-members = ["crates/cc-loop-cli"]
 
