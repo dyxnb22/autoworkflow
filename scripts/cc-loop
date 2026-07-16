@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Prefer Rust cc-loop when built; fall back to Python module.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RUST_BIN="$ROOT/rust/target/release/cc-loop"
+RUST_DBG="$ROOT/rust/target/debug/cc-loop"
+if [[ -x "$RUST_BIN" ]]; then
+  exec "$RUST_BIN" "$@"
+elif [[ -x "$RUST_DBG" ]]; then
+  exec "$RUST_DBG" "$@"
+elif command -v cc-loop >/dev/null 2>&1 && [[ "$(command -v cc-loop)" != "$0" ]]; then
+  exec "$(command -v cc-loop)" "$@"
+else
+  exec python -m cc_loop.cli "$@"
+fi

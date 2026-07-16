@@ -12,7 +12,7 @@ use cc_loop_core::error::{CcError, ExitCode};
 use cc_loop_core::eval::run_eval_suite;
 use cc_loop_core::export::export_jsonl;
 use cc_loop_core::git::resolve_repo_path;
-use cc_loop_core::graph::{build_graph_snapshot, TaskGraph};
+use cc_loop_core::graph::build_graph_cli_payload;
 use cc_loop_core::inspect::{build_status_json, list_tasks_json};
 use cc_loop_core::orchestrator::{
     require_test_command_for_auto, run_loop, warn_if_no_test_command, RunOutcome,
@@ -378,13 +378,22 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
                 ExitCode::UserOrConfig
             })
         }
-        Commands::List { json, .. } => {
+        Commands::List { json, repo } => {
             if json {
-                print_json(&list_tasks_json(state_root)?);
+                print_json(&list_tasks_json(state_root, repo.as_deref())?);
             } else {
-                for id in list_task_ids(state_root)? {
-                    let st = load_state(&id, state_root)?;
-                    println!("{}  {}  {}", id, st.status.as_str(), st.goal);
+                let items = list_tasks_json(state_root, repo.as_deref())?;
+                if let Some(arr) = items.as_array() {
+                    for item in arr {
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            item.get("task_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            item.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                            item.get("target_repo").and_then(|v| v.as_str()).unwrap_or(""),
+                            item.get("phase").and_then(|v| v.as_str()).unwrap_or("-"),
+                            item.get("updated_at").and_then(|v| v.as_str()).unwrap_or(""),
+                        );
+                    }
                 }
             }
             Ok(ExitCode::Success)
@@ -427,20 +436,28 @@ fn dispatch(cli: Cli, state_root: &Path) -> Result<ExitCode, CcError> {
         } => {
             let id = resolve_task_id(state_root, task_id.as_deref())?;
             let state = load_state(&id, state_root)?;
-            let graph = state
-                .task_graph
-                .clone()
-                .unwrap_or_else(|| TaskGraph::single_node(&state.goal));
-            let mut payload = build_graph_snapshot(&graph);
+            let mut payload = build_graph_cli_payload(state.task_graph.as_ref());
             if history {
-                if let Some(obj) = payload.as_object_mut() {
-                    obj.insert("history".into(), json!(graph.history));
+                if let Some(g) = state.task_graph.as_ref() {
+                    if let Some(tg) = payload.get_mut("task_graph").and_then(|v| v.as_object_mut()) {
+                        tg.insert("history".into(), json!(g.history));
+                    }
                 }
             }
             if json {
                 print_json(&payload);
+            } else if let Some(g) = state.task_graph.as_ref() {
+                let status = g.status_summary();
+                println!(
+                    "Task graph: {}  complete={}",
+                    id,
+                    status.get("complete").and_then(|v| v.as_bool()).unwrap_or(false)
+                );
+                for n in &g.nodes {
+                    println!("{}  {:<8}  {}", n.id, n.status.as_str(), n.title);
+                }
             } else {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                println!("No task graph for this task.");
             }
             Ok(ExitCode::Success)
         }

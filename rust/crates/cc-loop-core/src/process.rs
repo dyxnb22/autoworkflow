@@ -1,6 +1,6 @@
 //! Timeout-safe subprocess execution with process groups (shell=false).
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -43,7 +43,6 @@ pub struct RunResult {
 }
 
 fn pgid_alive(pgid: i32) -> bool {
-    // libc kill with signal 0
     let rc = unsafe { libc::kill(-pgid, 0) };
     if rc == 0 {
         return true;
@@ -83,15 +82,29 @@ pub fn run_with_timeout(
     timeout: Duration,
     env: &[(&str, &str)],
 ) -> Result<RunResult> {
+    run_with_timeout_stdin(args, cwd, timeout, env, None)
+}
+
+pub fn run_with_timeout_stdin(
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    timeout: Duration,
+    env: &[(&str, &str)],
+    stdin_data: Option<&str>,
+) -> Result<RunResult> {
     if args.is_empty() {
         return Err(CcError::config("empty argv"));
     }
     let started = Instant::now();
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if stdin_data.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -99,7 +112,6 @@ pub fn run_with_timeout(
         cmd.env(k, v);
     }
 
-    // New session => process group leader (for killpg).
     unsafe {
         cmd.pre_exec(|| match setsid() {
             Ok(_) => Ok(()),
@@ -112,6 +124,12 @@ pub fn run_with_timeout(
         .map_err(|e| CcError::execution(format!("failed to spawn {}: {e}", args[0])))?;
     let pid = child.id();
     set_active_pgid(Some(pid as i32));
+
+    if let Some(data) = stdin_data {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(data.as_bytes());
+        }
+    }
 
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();

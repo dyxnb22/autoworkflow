@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use crate::inspect::{
     attempt_artifact_paths, build_failure_snapshot, derive_next_action, derive_success_outcome,
+    runner_state_label,
 };
 use crate::paths::{events_path, runner_log_path};
 use crate::runner::is_runner_alive;
@@ -14,7 +15,12 @@ use crate::state::TaskState;
 pub fn build_report(state: &TaskState, state_root: &Path) -> Value {
     let attempt = state.latest_attempt();
     let (running, _) = is_runner_alive(state_root, &state.task_id);
-    let next_action = derive_next_action(state, attempt, running);
+    let runner_state = runner_state_label(
+        state_root,
+        &state.task_id,
+        state.config.stale_heartbeat_seconds,
+    );
+    let next_action = derive_next_action(state, attempt, running, &runner_state);
     let mut artifact_paths = json!({});
     if let Some(a) = attempt {
         let paths = attempt_artifact_paths(state, a, state_root);
@@ -41,7 +47,7 @@ pub fn build_report(state: &TaskState, state_root: &Path) -> Value {
         "suggested_next_action": next_action,
         "review_decision": review_decision,
         "artifact_paths": artifact_paths,
-        "failure_summary": build_failure_snapshot(attempt, state_root, &state.task_id),
+        "failure_summary": build_failure_snapshot(attempt, state_root, &state.task_id, Some(state)),
         "graph_progress": graph_progress,
         "events_path": events_path(state_root, &state.task_id).display().to_string(),
         "log_path": runner_log_path(state_root, &state.task_id).display().to_string(),

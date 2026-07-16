@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+# Ensure the CLI binary is built before integration tests.
+[dependencies]
+cc-loop-cli = { path = "../cc-loop-cli" }
+
 [dev-dependencies]
 assert_cmd.workspace = true
 cc-loop-core.workspace = true

@@ -145,6 +145,7 @@ name = "cc-loop-contract-tests"
 version = "0.12.0"
 dependencies = [
  "assert_cmd",
+ "cc-loop-cli",
  "cc-loop-core",
  "predicates",
  "serde_json",

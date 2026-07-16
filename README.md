@@ -35,16 +35,18 @@ Default providers (still changeable):
 4. Reviewer approves or rejects; reject → resume implementer with the rejection reason.
 5. On approve + green tests: **ready for handoff** on the attempt branch (`auto_merge=false` by default).
 
-### Rust rewrite (v0.12)
+## Rust rewrite (v0.12)
 
-The delivery engine is being rewritten in Rust under [`rust/`](rust/). Integration schema stays **1** ([INTEGRATION.md](docs/INTEGRATION.md)).
+The delivery engine is rewritten in Rust under [`rust/`](rust/). Integration schema stays **1** ([INTEGRATION.md](docs/INTEGRATION.md)).
 
 ```bash
-cd rust && cargo build --release && cargo test --workspace
-./target/release/cc-loop --version   # 0.12.0
+make rust-test && make rust-release
+make install-rust-bin          # ~/.local/bin/cc-loop
+# or without install:
+./scripts/cc-loop --version
 ```
 
-See [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md). The Python package (`0.11.0`) remains available during dual-run.
+See [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md). The Python package remains available as a reference during dual-run; prefer the Rust binary for new integrations.
 
 ### Advanced (explicit)
 

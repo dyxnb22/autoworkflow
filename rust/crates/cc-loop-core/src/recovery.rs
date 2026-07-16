@@ -9,6 +9,7 @@ pub enum AutoStep {
     Stop,
     Fail,
     Replan,
+    Repair,
 }
 
 pub fn decide_auto_step(state: &TaskState) -> AutoStep {
@@ -21,24 +22,32 @@ pub fn decide_auto_step(state: &TaskState) -> AutoStep {
                 if attempt.phase == AttemptPhase::Rejected {
                     return AutoStep::Resume;
                 }
-                if attempt.phase == AttemptPhase::Approved && !state.config.auto_merge {
-                    // Handoff ready — treat as done if graph complete
-                    if state
+                if attempt.phase == AttemptPhase::Approved
+                    && !state.config.auto_merge
+                    && state
                         .task_graph
                         .as_ref()
                         .map(|g| g.is_complete())
                         .unwrap_or(true)
-                    {
-                        return AutoStep::Done;
-                    }
+                {
+                    return AutoStep::Done;
                 }
                 if attempt.test_status == "failed" || attempt.test_status == "timed_out" {
                     if state.config.auto_recover_tests
                         && attempt.retry < state.config.max_retries_per_step
                     {
-                        return AutoStep::Resume;
+                        return AutoStep::Repair;
                     }
                     return AutoStep::Fail;
+                }
+                if !attempt.failure_type.is_empty()
+                    && state.config.auto_recover_provider_errors
+                    && attempt.recovery_retry_count < state.config.max_recovery_attempts_per_iteration
+                {
+                    return AutoStep::Repair;
+                }
+                if !attempt.merge_error.is_empty() && state.config.auto_recover_merge {
+                    return AutoStep::Repair;
                 }
             }
             AutoStep::Stop
@@ -51,13 +60,14 @@ pub fn decide_auto_step(state: &TaskState) -> AutoStep {
 
 pub fn derive_next_action_from_step(step: AutoStep, running: bool) -> String {
     if running {
-        return "wait".into();
+        return "none".into();
     }
     match step {
-        AutoStep::Done => "none".into(),
+        AutoStep::Done => "done".into(),
         AutoStep::Resume => "resume".into(),
         AutoStep::Stop => "inspect".into(),
-        AutoStep::Fail => "inspect".into(),
-        AutoStep::Replan => "replan".into(),
+        AutoStep::Fail => "failed".into(),
+        AutoStep::Replan => "resume".into(),
+        AutoStep::Repair => "repair".into(),
     }
 }

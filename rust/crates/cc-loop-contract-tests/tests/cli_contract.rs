@@ -134,6 +134,33 @@ fn init_doctor_status_summary_contract_fields() {
     assert_eq!(status["require_distinct_reviewer"], true);
     assert!(status["roles"].is_object());
     assert!(status["distinct_reviewer"].as_bool().unwrap());
+    // INTEGRATION.md flat runner fields
+    assert!(status.get("attempt").is_some());
+    assert!(status.get("running").is_some());
+    assert!(status.get("runner_state").is_some());
+    assert!(status.get("can_stop").is_some());
+    assert!(status.get("can_resume").is_some());
+    assert!(status.get("can_cleanup").is_some());
+    assert!(status.get("log_path").is_some());
+    assert!(status.get("current_message").is_some());
+    assert!(status.get("next_action").is_some());
+    assert_eq!(status["next_action"], "run");
+    assert!(status.get("failure").is_some());
+
+    let list = cc_loop()
+        .args([
+            "--state-root",
+            state.to_str().unwrap(),
+            "list",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&list).unwrap();
+    assert!(list.is_array());
 
     let summary = cc_loop()
         .args([
@@ -157,6 +184,7 @@ fn init_doctor_status_summary_contract_fields() {
     assert_eq!(summary["auto_merge"], false);
     assert!(summary.get("tests").is_some());
     assert!(summary.get("review").is_some());
+    assert!(summary.get("execution_timeline").is_some());
 }
 
 #[test]

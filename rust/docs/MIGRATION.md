@@ -1,47 +1,55 @@
-# Rust rewrite migration (v0.12)
+# Rust rewrite migration (v0.12) — completion checklist
 
-## Status
+## Status: feature-complete for replacement dual-run
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| A | Workspace, CLI surface, contract fixtures | Done |
-| B | Config / state / git / locks | Done |
-| C | Providers (codex, cursor, claude-code, fake) | Done |
-| D | Single-loop orchestrator + handoff defaults | Done |
-| E | `status` / `summary` Luma JSON | Done |
-| F | Contract tests + dual-run docs | Done |
-| G | Graph sequential, recovery steps, eval/export, detach | Done |
+| Area | Status |
+|------|--------|
+| CLI surface (all INTEGRATION commands) | Done |
+| `status --json` flat fields (`attempt`, `running`, `runner_*`, `can_*`, …) | Done |
+| `list --json` as array | Done |
+| `graph --json` `{task_graph:…}` wrapper | Done |
+| `summary --json` + observability paths | Done |
+| Config/state/git/locks/legacy load | Done |
+| Providers argv parity (codex stdin, cursor agent, claude --print/--model) | Done |
+| Single-loop + reject/repair + handoff | Done |
+| auto_direct planner, review_context, budgets | Done |
+| Events / failure.report / trace / timeline / prompt_cache | Done |
+| Sequential graph + merge_queue helpers + replan step | Done |
+| Parallel ready-set scheduling (sequential execute) | Done |
+| Detach / stop / cancel / cleanup | Done |
+| Eval / export | Done |
+| Contract tests | Done |
+| Install path | `make install-rust-bin` or `scripts/cc-loop` |
 
-## Dual-run
-
-- **Rust binary:** `rust/target/release/cc-loop` (package version `0.12.0`)
-- **Python package:** `src/cc_loop/` remains the reference implementation (`0.11.0`) during dual-run
-- **Integration schema:** still `1` — Luma should keep using `docs/INTEGRATION.md`
-
-## Build / test
+## Build / test / install
 
 ```bash
-cd rust
-cargo build --release
-cargo test --workspace
+make rust-test
+make rust-clippy
+make rust-release
+make install-rust-bin   # ~/.local/bin/cc-loop
+# or:
+./scripts/cc-loop --version
 ```
 
-## Fake providers (offline loop)
+## Fake offline loop
 
 ```bash
 export CC_LOOP_FAKE_PROVIDERS=1
-cc-loop --state-root /tmp/s init ... --planner fake --implementer fake --reviewer fake --allow-same-reviewer --test-command true
-cc-loop --state-root /tmp/s auto --task-id ...
+./scripts/cc-loop --state-root /tmp/s init --goal "fix typo" --repo "$REPO" \
+  --planner fake --implementer fake --reviewer fake --allow-same-reviewer \
+  --test-command true --task-id t1
+./scripts/cc-loop --state-root /tmp/s auto --task-id t1
+./scripts/cc-loop --state-root /tmp/s status --task-id t1 --json
+./scripts/cc-loop --state-root /tmp/s summary --task-id t1 --json
 ```
 
-When `CC_LOOP_FAKE_PROVIDERS=1`, all provider names resolve to the offline `fake` adapter.
+## Remaining intentional differences vs Python
 
-## Invariants preserved
+- True concurrent parallel node execution is scheduled but still run sequentially in-process (same outcome for default `max_parallel_nodes=1`).
+- Prompt-cache *health scoring* is stubbed (metrics files written; ratios are placeholders).
+- Python package remains installable for reference; prefer Rust binary for new integrations.
 
-- `shell=false` (argv only)
-- process-group kill on timeout (`killpg`)
-- no merge on failed/skipped tests unless `allow_merge_without_tests`
-- default `auto_merge=false` → `success=ready_for_handoff`
-- `require_distinct_reviewer=true` by default
-- dirty repo blocks run
-- legacy `state.json` without `task_graph` / missing config keys still loads
+## Invariants
+
+- `shell=false`, process-group kill, no merge on failed tests, handoff default, distinct reviewer default, dirty repo blocks run.

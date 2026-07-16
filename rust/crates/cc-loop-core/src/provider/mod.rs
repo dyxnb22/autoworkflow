@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::config::{provider_timeout_seconds, LoopConfig};
 use crate::error::{CcError, Result};
-use crate::process::{run_with_timeout, RunResult};
+use crate::process::{run_with_timeout, run_with_timeout_stdin, RunResult};
 
 fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH")
@@ -86,19 +86,23 @@ pub trait ProviderAdapter: Send + Sync {
         print_only: bool,
     ) -> Result<ProviderRunResult> {
         let args = self.build_args(worktree_path, prompt, output_path, config, print_only)?;
-        // Persist argv for observability
         if let Some(parent) = output_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let result = run_with_timeout(
-            &args,
-            if print_only { None } else { Some(worktree_path) },
-            Duration::from_secs(timeout_seconds.max(1)),
-            &[],
-        )?;
+        let timeout = Duration::from_secs(timeout_seconds.max(1));
+        // Codex reads prompt from stdin ("-"); others take prompt in argv.
+        let result = if self.name() == "codex" {
+            run_with_timeout_stdin(&args, Some(worktree_path), timeout, &[], Some(prompt))?
+        } else {
+            let cwd = if print_only && self.name() == "claude-code" {
+                None
+            } else {
+                Some(worktree_path)
+            };
+            run_with_timeout(&args, cwd, timeout, &[])?
+        };
         let raw_path = raw_output_path.unwrap_or(output_path);
         persist_raw(&result, raw_path, prompt)?;
-        // Also write last-message style output
         let combined = if !result.stdout.trim().is_empty() {
             result.stdout.clone()
         } else {
@@ -202,24 +206,27 @@ impl ProviderAdapter for CodexProvider {
 
     fn build_args(
         &self,
-        _worktree_path: &Path,
-        prompt: &str,
+        worktree_path: &Path,
+        _prompt: &str,
         output_path: &Path,
         config: &LoopConfig,
         _print_only: bool,
     ) -> Result<Vec<String>> {
+        // Prompt is passed on stdin ("-"); matches Python CodexAdapter.
         let mut args = vec![
             "codex".into(),
             "exec".into(),
-            "--full-auto".into(),
+            "--cd".into(),
+            worktree_path.display().to_string(),
+            "--json".into(),
             "-o".into(),
             output_path.display().to_string(),
+            "-".into(),
         ];
         if !config.codex_model.is_empty() {
-            args.push("-m".into());
+            args.push("--model".into());
             args.push(config.codex_model.clone());
         }
-        args.push(prompt.to_string());
         Ok(args)
     }
 
@@ -228,11 +235,19 @@ impl ProviderAdapter for CodexProvider {
     }
 
     fn parse_reviewer_output(&self, last_message: &str) -> Result<Value> {
-        extract_json_object(last_message)
+        let mut v = extract_json_object(last_message)?;
+        if let Some(d) = v.get("decision").and_then(|x| x.as_str()) {
+            if !matches!(d, "approve" | "reject" | "stop" | "replan") {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("decision".into(), Value::String("reject".into()));
+                }
+            }
+        }
+        Ok(v)
     }
 
     fn preflight_check_argv(&self) -> Vec<String> {
-        vec!["codex".into(), "--version".into()]
+        vec!["codex".into(), "exec".into(), "--help".into()]
     }
 }
 
@@ -249,47 +264,46 @@ impl ProviderAdapter for CursorProvider {
         config: &LoopConfig,
         _print_only: bool,
     ) -> Result<Vec<String>> {
-        // Prefer `agent` CLI when available.
-        let bin = if command_exists("agent") {
-            "agent"
-        } else {
-            "cursor"
-        };
+        // Match Python: `cursor agent -p --output-format json --trust --workspace ...`
         let mut args = vec![
-            bin.into(),
+            "cursor".into(),
+            "agent".into(),
             "-p".into(),
-            prompt.to_string(),
+            "--output-format".into(),
+            "json".into(),
+            "--trust".into(),
             "--workspace".into(),
             worktree_path.display().to_string(),
+            prompt.to_string(),
         ];
-        if config.cursor_force {
-            args.push("--force".into());
+        if !config.cursor_model.is_empty() {
+            args.push("--model".into());
+            args.push(config.cursor_model.clone());
         }
         if !config.cursor_sandbox.is_empty() {
             args.push("--sandbox".into());
             args.push(config.cursor_sandbox.clone());
         }
-        if !config.cursor_model.is_empty() {
-            args.push("--model".into());
-            args.push(config.cursor_model.clone());
+        if config.cursor_force {
+            args.push("--force".into());
         }
         Ok(args)
     }
 
-    fn parse_planner_output(&self, last_message: &str) -> Result<Value> {
-        extract_json_object(last_message)
+    fn parse_planner_output(&self, _last_message: &str) -> Result<Value> {
+        Err(CcError::provider(
+            "cursor adapter does not support planner role",
+        ))
     }
 
-    fn parse_reviewer_output(&self, last_message: &str) -> Result<Value> {
-        extract_json_object(last_message)
+    fn parse_reviewer_output(&self, _last_message: &str) -> Result<Value> {
+        Err(CcError::provider(
+            "cursor adapter does not support reviewer role",
+        ))
     }
 
     fn preflight_check_argv(&self) -> Vec<String> {
-        if command_exists("agent") {
-            vec!["agent".into(), "--version".into()]
-        } else {
-            vec!["cursor".into(), "--version".into()]
-        }
+        vec!["cursor".into(), "agent".into(), "--help".into()]
     }
 }
 
@@ -315,7 +329,7 @@ impl ProviderAdapter for ClaudeCodeProvider {
             args.push("--print".into());
         }
         if !config.claude_code_model.is_empty() {
-            args.push("-m".into());
+            args.push("--model".into());
             args.push(config.claude_code_model.clone());
         }
         args.push("-p".into());
@@ -334,6 +348,12 @@ impl ProviderAdapter for ClaudeCodeProvider {
     fn preflight_check_argv(&self) -> Vec<String> {
         vec!["claude".into(), "--version".into()]
     }
+}
+
+// Keep helper available for optional checks.
+#[allow(dead_code)]
+fn _command_exists_unused(name: &str) -> bool {
+    command_exists(name)
 }
 
 pub fn get_provider(name: &str) -> Result<Box<dyn ProviderAdapter>> {

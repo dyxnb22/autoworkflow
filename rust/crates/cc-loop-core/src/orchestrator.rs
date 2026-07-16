@@ -19,7 +19,20 @@ use crate::paths::{
 };
 use crate::process::run_with_timeout;
 use crate::provider::{extract_json_object, run_role};
+use crate::budgets::budget_exhausted_message;
+use crate::events::append_event;
+use crate::failure::{write_attempt_failure_report, write_failure_report};
+use crate::observability::{
+    append_command_argv, write_attempt_trace, write_execution_timeline, write_prompt_cache,
+    write_review_prompt_metrics, write_subprocess_result,
+};
+use crate::parallel::{clear_running, enqueue_merge, mark_running, schedule_ready_nodes};
+use crate::planner_direct::{direct_plan_json, should_skip_planner};
 use crate::recovery::{decide_auto_step, AutoStep};
+use crate::repair::{
+    provider_error_repair_prompt, reviewer_reject_repair_prompt, test_failure_repair_prompt,
+};
+use crate::review_context::build_reviewer_prompt;
 use crate::state::{
     save_state, AttemptPhase, AttemptRecord, TaskState, TaskStatus,
 };
@@ -73,39 +86,24 @@ fn implementer_prompt(goal: &str, plan: &Value, reject_reason: &str) -> String {
     )
 }
 
-fn reviewer_prompt(
+fn resolve_implementer_prompt(
     goal: &str,
     plan: &Value,
-    diff_stat_text: &str,
-    patch: &str,
-    max_patch_bytes: usize,
+    reject_reason: &str,
+    test_status: &str,
+    test_output: &str,
+    failure_type: &str,
 ) -> String {
-    let plan_text = serde_json::to_string_pretty(plan).unwrap_or_default();
-    let patch_trimmed = if patch.len() > max_patch_bytes {
-        format!(
-            "{}\n\n...[truncated {} bytes]...",
-            &patch[..max_patch_bytes],
-            patch.len() - max_patch_bytes
-        )
-    } else {
-        patch.to_string()
-    };
-    format!(
-        r#"You are the reviewer. You did NOT write this code. Gate on tests already ran.
-Goal: {goal}
-Plan:
-{plan_text}
-
-Diff stat:
-{diff_stat_text}
-
-Patch:
-{patch_trimmed}
-
-Return ONLY JSON:
-{{"decision":"approve"|"reject"|"stop","reason":"...","retry_prompt":"...","issues":[]}}
-"#
-    )
+    if !reject_reason.is_empty() {
+        return reviewer_reject_repair_prompt(goal, reject_reason, "");
+    }
+    if test_status == "failed" || test_status == "timed_out" {
+        return test_failure_repair_prompt(goal, test_output, test_status);
+    }
+    if !failure_type.is_empty() {
+        return provider_error_repair_prompt(goal, failure_type);
+    }
+    implementer_prompt(goal, plan, "")
 }
 
 fn run_tests(
@@ -176,67 +174,103 @@ fn run_one_attempt(
     attempt.branch = branch.clone();
     attempt.worktree_path = wt.display().to_string();
     attempt.phase = AttemptPhase::Planning;
-    attempt.running_provider = state
-        .providers
-        .get("planner")
-        .cloned()
-        .unwrap_or_else(|| state.config.planner_provider.clone());
-
-    // Plan
-    let plan_prompt = planner_prompt(node_goal, &state.config.planner_granularity);
-    fs::write(&paths.plan_prompt, &plan_prompt)?;
-    let planner = state
-        .providers
-        .get("planner")
-        .cloned()
-        .unwrap_or_else(|| state.config.planner_provider.clone());
-    let plan_result = run_role(
-        "planner",
-        &planner,
-        &wt,
-        &plan_prompt,
-        &paths.plan_last_message,
-        &paths.plan_raw,
-        &state.config,
-        true, // print_only
+    mark_running(state, node_id, iteration);
+    let _ = append_event(
+        state_root,
+        &state.task_id,
+        "planner.started",
+        iteration,
+        retry,
+        node_id,
+        "planning",
+        "planner started",
+        json!({}),
     );
-    // Worktree may not exist yet for planner print_only — create empty cwd parent
-    fs::create_dir_all(state_root)?;
 
-    let plan_json = match &plan_result {
-        Ok(r) => {
-            fs::write(&paths.plan_provider, &r.provider)?;
-            attempt.plan_provider = r.provider.clone();
-            attempt.plan_raw_path = r.raw_artifact_path.display().to_string();
-            if r.timed_out || r.exit_code != 0 {
-                attempt.phase = AttemptPhase::Failed;
-                attempt.failure_type = "planner_failed".into();
-                state.status = TaskStatus::Failed;
-                state.history.push(attempt);
-                save_state(state, state_root)?;
-                return Err(CcError::execution("planner failed or timed out"));
-            }
-            let text = fs::read_to_string(&paths.plan_last_message).unwrap_or_default();
-            match extract_json_object(&text) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Persist raw even on parse failure; synthesize single-node plan.
-                    let fallback = json!({
+    // Plan (auto-direct may skip provider)
+    let plan_json = if should_skip_planner(node_goal, &state.config) {
+        let plan = direct_plan_json(node_goal);
+        fs::write(
+            &paths.plan_prompt,
+            "auto_direct_planner: skipped provider\n",
+        )?;
+        fs::write(
+            &paths.plan_last_message,
+            serde_json::to_string_pretty(&plan)?,
+        )?;
+        fs::write(&paths.plan_provider, "auto_direct")?;
+        attempt.plan_provider = "auto_direct".into();
+        plan
+    } else {
+        let plan_prompt = planner_prompt(node_goal, &state.config.planner_granularity);
+        fs::write(&paths.plan_prompt, &plan_prompt)?;
+        let planner = state
+            .providers
+            .get("planner")
+            .cloned()
+            .unwrap_or_else(|| state.config.planner_provider.clone());
+        attempt.running_provider = planner.clone();
+        let plan_result = run_role(
+            "planner",
+            &planner,
+            &wt,
+            &plan_prompt,
+            &paths.plan_last_message,
+            &paths.plan_raw,
+            &state.config,
+            true,
+        );
+        fs::create_dir_all(state_root)?;
+        match plan_result {
+            Ok(r) => {
+                let _ = write_subprocess_result(
+                    &paths,
+                    "planner",
+                    r.exit_code,
+                    r.timed_out,
+                    r.duration_seconds,
+                    r.killed,
+                    r.hung,
+                );
+                fs::write(&paths.plan_provider, &r.provider)?;
+                attempt.plan_provider = r.provider.clone();
+                attempt.plan_raw_path = r.raw_artifact_path.display().to_string();
+                if r.timed_out || r.exit_code != 0 {
+                    attempt.phase = AttemptPhase::Failed;
+                    attempt.failure_type = "planner_failed".into();
+                    state.status = TaskStatus::Failed;
+                    clear_running(state, node_id);
+                    let _ = write_failure_report(
+                        state_root,
+                        &state.task_id,
+                        &attempt,
+                        "planner_failed",
+                        "terminal",
+                        "planner failed or timed out",
+                        &["inspect artifacts", "resume after fixing provider"],
+                    );
+                    state.history.push(attempt);
+                    save_state(state, state_root)?;
+                    return Err(CcError::execution("planner failed or timed out"));
+                }
+                let text = fs::read_to_string(&paths.plan_last_message).unwrap_or_default();
+                extract_json_object(&text).unwrap_or_else(|_| {
+                    json!({
                         "summary": node_goal,
                         "implementer_prompt": node_goal,
                         "parse_error": true,
-                    });
-                    fallback
-                }
+                    })
+                })
             }
-        }
-        Err(e) => {
-            attempt.phase = AttemptPhase::Failed;
-            attempt.failure_type = "planner_failed".into();
-            state.status = TaskStatus::Failed;
-            state.history.push(attempt);
-            save_state(state, state_root)?;
-            return Err(CcError::execution(e.to_string()));
+            Err(e) => {
+                attempt.phase = AttemptPhase::Failed;
+                attempt.failure_type = "planner_failed".into();
+                state.status = TaskStatus::Failed;
+                clear_running(state, node_id);
+                state.history.push(attempt);
+                save_state(state, state_root)?;
+                return Err(CcError::execution(e.to_string()));
+            }
         }
     };
     fs::write(
@@ -244,6 +278,17 @@ fn run_one_attempt(
         serde_json::to_string_pretty(&plan_json)?,
     )?;
     attempt.plan_json = Some(plan_json.clone());
+    let _ = append_event(
+        state_root,
+        &state.task_id,
+        "planner.completed",
+        iteration,
+        retry,
+        node_id,
+        "planning",
+        "planner completed",
+        json!({}),
+    );
 
     // Update / create graph from plan when first planning
     if state.task_graph.is_none() || state.config.planner_granularity == "single" {
@@ -267,9 +312,39 @@ fn run_one_attempt(
         .unwrap_or_else(|| state.config.implementer_provider.clone());
     attempt.running_provider = implementer.clone();
     attempt.implementer_provider = implementer.clone();
-    let impl_prompt = implementer_prompt(node_goal, &plan_json, reject_reason);
+    let prior_test = state
+        .latest_attempt()
+        .map(|a| a.test_status.clone())
+        .unwrap_or_default();
+    let prior_fail = state
+        .latest_attempt()
+        .map(|a| a.failure_type.clone())
+        .unwrap_or_default();
+    let prior_test_out = state
+        .latest_attempt()
+        .map(|a| fs::read_to_string(&a.test_raw_path).unwrap_or_default())
+        .unwrap_or_default();
+    let impl_prompt = resolve_implementer_prompt(
+        node_goal,
+        &plan_json,
+        reject_reason,
+        &prior_test,
+        &prior_test_out,
+        &prior_fail,
+    );
     fs::write(&paths.implementer_prompt, &impl_prompt)?;
     attempt.implementer_prompt_path = paths.implementer_prompt.display().to_string();
+    let _ = append_event(
+        state_root,
+        &state.task_id,
+        "implementer.started",
+        iteration,
+        retry,
+        node_id,
+        "executing",
+        "implementer started",
+        json!({}),
+    );
     let impl_result = run_role(
         "implementer",
         &implementer,
@@ -280,6 +355,15 @@ fn run_one_attempt(
         &state.config,
         false,
     )?;
+    let _ = write_subprocess_result(
+        &paths,
+        "implementer",
+        impl_result.exit_code,
+        impl_result.timed_out,
+        impl_result.duration_seconds,
+        impl_result.killed,
+        impl_result.hung,
+    );
     fs::write(&paths.implementer_provider, &impl_result.provider)?;
     attempt.implementer_exit_code = Some(impl_result.exit_code);
     attempt.implementer_raw_path = impl_result.raw_artifact_path.display().to_string();
@@ -290,6 +374,16 @@ fn run_one_attempt(
         if let Some(g) = state.task_graph.as_mut() {
             g.mark_node(node_id, NodeStatus::Failed);
         }
+        clear_running(state, node_id);
+        let _ = write_failure_report(
+            state_root,
+            &state.task_id,
+            &attempt,
+            "implementer_failed",
+            "recoverable",
+            "implementer failed or timed out",
+            &["resume", "inspect implementer.raw"],
+        );
         state.history.push(attempt);
         save_state(state, state_root)?;
         return Err(CcError::execution("implementer failed or timed out"));
@@ -330,10 +424,22 @@ fn run_one_attempt(
         attempt.phase = AttemptPhase::Failed;
         attempt.failure_type = format!("test_{test_status}");
         attempt.decision = "reject".into();
-        // Treat as retryable via recovery when auto_recover_tests
+        attempt.recovery_disposition = "recoverable".into();
         state.status = TaskStatus::Stopped;
+        clear_running(state, node_id);
+        let report = write_failure_report(
+            state_root,
+            &state.task_id,
+            &attempt,
+            &attempt.failure_type,
+            "recoverable",
+            &format!("tests {test_status}"),
+            &["resume for repair", "inspect test.output.txt"],
+        )?;
+        let _ = write_attempt_failure_report(&paths.root, &report);
         state.history.push(attempt);
         save_state(state, state_root)?;
+        write_execution_timeline(state, state_root)?;
         return Ok(());
     }
 
@@ -346,30 +452,67 @@ fn run_one_attempt(
         .unwrap_or_else(|| state.config.reviewer_provider.clone());
     attempt.running_provider = reviewer.clone();
     attempt.review_provider = reviewer.clone();
-    let rev_prompt = reviewer_prompt(
+    let plan_text = serde_json::to_string_pretty(&plan_json).unwrap_or_default();
+    let review_payload = build_reviewer_prompt(
         node_goal,
-        &plan_json,
+        &plan_text,
         &stat,
         &patch,
-        state.config.max_review_patch_bytes,
+        &state.config,
+        &paths.diff_stat.display().to_string(),
+        &paths.diff_files.display().to_string(),
     );
-    fs::write(&paths.review_prompt, &rev_prompt)?;
+    fs::write(&paths.review_prompt, &review_payload.prompt)?;
+    let _ = write_prompt_cache(
+        &paths,
+        &review_payload.context_mode,
+        review_payload.omitted_patch_chars,
+        review_payload.prompt.len() / 4,
+    );
+    let _ = write_review_prompt_metrics(
+        &paths.root,
+        &review_payload.context_mode,
+        review_payload.inline_patch,
+        review_payload.omitted_patch_chars,
+        review_payload.prompt.len() / 4,
+    );
+    let _ = append_event(
+        state_root,
+        &state.task_id,
+        "reviewer.started",
+        iteration,
+        retry,
+        node_id,
+        "reviewing",
+        "reviewer started",
+        json!({}),
+    );
     let rev_result = run_role(
         "reviewer",
         &reviewer,
         &wt,
-        &rev_prompt,
+        &review_payload.prompt,
         &paths.review_last_message,
         &paths.review_raw,
         &state.config,
         true,
     )?;
+    let _ = write_subprocess_result(
+        &paths,
+        "reviewer",
+        rev_result.exit_code,
+        rev_result.timed_out,
+        rev_result.duration_seconds,
+        rev_result.killed,
+        rev_result.hung,
+    );
     fs::write(&paths.review_provider, &rev_result.provider)?;
     attempt.review_raw_path = rev_result.raw_artifact_path.display().to_string();
     if rev_result.timed_out || rev_result.exit_code != 0 {
         attempt.phase = AttemptPhase::Failed;
         attempt.failure_type = "reviewer_failed".into();
         state.status = TaskStatus::Failed;
+        clear_running(state, node_id);
         state.history.push(attempt);
         save_state(state, state_root)?;
         return Err(CcError::execution("reviewer failed or timed out"));
@@ -398,14 +541,15 @@ fn run_one_attempt(
     match decision.as_str() {
         "approve" => {
             if state.config.auto_merge {
-                // Opt-in merge into base — checkout base in main repo carefully.
                 let merge_out = merge_into_base(&repo, &state.config.base_branch, &branch, timeout)?;
                 fs::write(&paths.merge_output, &merge_out)?;
                 attempt.merge_output_path = paths.merge_output.display().to_string();
                 if merge_out.contains("MERGE_FAILED") {
                     attempt.merge_error = merge_out.clone();
                     attempt.phase = AttemptPhase::Approved;
+                    attempt.recovery_disposition = "recoverable".into();
                     state.status = TaskStatus::Stopped;
+                    enqueue_merge(state, node_id);
                 } else {
                     finalize_merged(state, &mut attempt);
                     if let Some(g) = state.task_graph.as_mut() {
@@ -421,10 +565,15 @@ fn run_one_attempt(
         }
         "reject" => {
             attempt.phase = AttemptPhase::Rejected;
+            attempt.recovery_disposition = "recoverable".into();
             state.status = TaskStatus::Stopped;
             if let Some(g) = state.task_graph.as_mut() {
                 g.mark_node(node_id, NodeStatus::Pending);
             }
+        }
+        "replan" => {
+            attempt.phase = AttemptPhase::Replanning;
+            state.status = TaskStatus::Replanning;
         }
         _ => {
             attempt.phase = AttemptPhase::Failed;
@@ -437,8 +586,19 @@ fn run_one_attempt(
         }
     }
 
+    clear_running(state, node_id);
+    let _ = write_attempt_trace(
+        &paths,
+        &[json!({
+            "phase": attempt.phase.as_str(),
+            "decision": attempt.decision,
+            "test_status": attempt.test_status,
+        })],
+    );
+    let _ = append_command_argv(&paths, "reviewer", &[]);
     state.history.push(attempt);
     save_state(state, state_root)?;
+    write_execution_timeline(state, state_root)?;
     write_run_summary_if_terminal(state, state_root)?;
     Ok(())
 }
@@ -470,14 +630,30 @@ pub fn run_loop(state: &mut TaskState, state_root: &Path, max_steps: Option<u32>
 
     let max_iter = state.config.max_iterations;
     let max_retries = state.config.max_retries_per_step;
+    let _ = max_iter; // checked via budget_exhausted_message
     let steps_cap = max_steps.unwrap_or(u32::MAX);
     let mut steps = 0u32;
 
     while steps < steps_cap {
         steps += 1;
-        if state.iteration >= max_iter {
+        if let Some(msg) = budget_exhausted_message(state) {
             state.status = TaskStatus::Failed;
+            if let Some(a) = state.latest_attempt_mut() {
+                a.failure_type = "budget_exhausted".into();
+                a.stop_reason = msg.clone();
+            }
             save_state(state, state_root)?;
+            let _ = append_event(
+                state_root,
+                &state.task_id,
+                "task.failed",
+                state.iteration,
+                0,
+                "",
+                "failed",
+                &msg,
+                json!({}),
+            );
             return Ok(RunOutcome::Failed);
         }
 
@@ -488,22 +664,14 @@ pub fn run_loop(state: &mut TaskState, state_root: &Path, max_steps: Option<u32>
                 state.task_graph = Some(TaskGraph::single_node(&goal));
             }
         }
-        let parallel = if state.config.allow_parallel_execution {
-            state.config.max_parallel_nodes.max(1)
-        } else {
-            1
-        };
 
-        let ready_ids: Vec<(String, String)> = {
+        let ready_ids = {
             let g = state.task_graph.as_ref().unwrap();
             if g.is_complete() && matches!(state.status, TaskStatus::Done) {
                 write_run_summary_if_terminal(state, state_root)?;
                 return Ok(RunOutcome::Success);
             }
-            g.next_ready_nodes(parallel)
-                .into_iter()
-                .map(|n| (n.id.clone(), if n.goal.is_empty() { state.goal.clone() } else { n.goal.clone() }))
-                .collect()
+            schedule_ready_nodes(state)
         };
 
         if ready_ids.is_empty() {
@@ -555,14 +723,13 @@ pub fn run_loop(state: &mut TaskState, state_root: &Path, max_steps: Option<u32>
                     write_run_summary_if_terminal(state, state_root)?;
                     return Ok(RunOutcome::Failed);
                 }
-                AutoStep::Resume => continue,
+                AutoStep::Resume | AutoStep::Repair => continue,
                 AutoStep::Stop => {
                     write_run_summary_if_terminal(state, state_root)?;
                     return Ok(RunOutcome::UserStop);
                 }
                 AutoStep::Replan => {
                     state.status = TaskStatus::Replanning;
-                    // Reset graph to single node for replan
                     let goal = state.goal.clone();
                     state.task_graph = Some(TaskGraph::single_node(&goal));
                     state.status = TaskStatus::Running;

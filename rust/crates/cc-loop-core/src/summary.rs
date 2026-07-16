@@ -12,7 +12,8 @@ use crate::inspect::{
     build_attempt_snapshot, build_failure_snapshot, build_roles_snapshot, derive_next_action,
     derive_success_outcome, latest_reject_reason,
 };
-use crate::paths::{run_summary_path, task_dir};
+use crate::observability::{build_execution_timeline, execution_timeline_path};
+use crate::paths::{run_summary_path, task_dir, ArtifactPaths};
 use crate::report::build_report;
 use crate::runner::is_runner_alive;
 use crate::state::{atomic_write_text, AttemptRecord, TaskState, TaskStatus};
@@ -33,13 +34,18 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         .unwrap_or(Value::Null);
     let roles = build_roles_snapshot(state);
     let (running, _) = is_runner_alive(state_root, &state.task_id);
-    let next_action = derive_next_action(state, attempt, running);
+    let runner_state = crate::inspect::runner_state_label(
+        state_root,
+        &state.task_id,
+        state.config.stale_heartbeat_seconds,
+    );
+    let next_action = derive_next_action(state, attempt, running, &runner_state);
     let phase = attempt.map(|a| a.phase.as_str()).unwrap_or("");
     let success = derive_success_outcome(state, attempt);
     let reject = latest_reject_reason(state);
 
     let latest_attempt = attempt.map(|a| {
-        let snap = build_attempt_snapshot(state, a, state_root);
+        let snap = build_attempt_snapshot(state, Some(a), state_root);
         json!({
             "iteration": snap.get("iteration").cloned().unwrap_or(json!(0)),
             "retry": snap.get("retry").cloned().unwrap_or(json!(0)),
@@ -79,6 +85,34 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         }
     }
 
+    let artifact_root = attempt.map(|a| {
+        ArtifactPaths::new(crate::paths::artifacts_dir(
+            state_root,
+            &state.task_id,
+            a.iteration,
+            a.retry,
+        ))
+        .root
+    });
+    let subprocess_result = artifact_root.as_ref().and_then(|root| {
+        let path = root.join("subprocess.result.json");
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    });
+    let prompt_cache = artifact_root.as_ref().and_then(|root| {
+        let path = root.join("prompt.cache.json");
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    });
+    let reviewer_metrics = artifact_root.as_ref().and_then(|root| {
+        let path = root.join("review.prompt.metrics.json");
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    });
+
     json!({
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "cc_loop_version": CC_LOOP_VERSION,
@@ -99,9 +133,11 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         "latest_attempt": latest_attempt,
         "latest_reject_reason": if reject.is_empty() { Value::Null } else { json!(reject) },
         "tests": tests,
-        "prompt_cache": Value::Null,
-        "reviewer_prompt_metrics": Value::Null,
-        "subprocess_result": Value::Null,
+        "prompt_cache": prompt_cache,
+        "reviewer_prompt_metrics": reviewer_metrics,
+        "subprocess_result": subprocess_result,
+        "command_argv_path": artifact_root.as_ref().map(|r| r.join("command.argv.json").display().to_string()),
+        "attempt_trace_path": artifact_root.as_ref().map(|r| r.join("attempt.trace.json").display().to_string()),
         "review": {
             "decision": review_decision.get("decision").cloned().unwrap_or(json!("")),
             "reason": review_decision.get("reason").cloned().unwrap_or(json!("")),
@@ -110,7 +146,7 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         "diff_stat": diff_stat_summary(attempt),
         "success": success,
         "failure": report.get("failure_summary").cloned().unwrap_or_else(|| {
-            build_failure_snapshot(attempt, state_root, &state.task_id)
+            build_failure_snapshot(attempt, state_root, &state.task_id, Some(state))
         }),
         "artifact_paths": artifact_paths,
         "artifacts": artifacts,
@@ -118,6 +154,8 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         "task_dir": task_dir(state_root, &state.task_id).display().to_string(),
         "events_path": report.get("events_path").cloned(),
         "log_path": report.get("log_path").cloned(),
+        "execution_timeline": build_execution_timeline(state),
+        "execution_timeline_path": execution_timeline_path(state_root, &state.task_id).display().to_string(),
     })
 }
 

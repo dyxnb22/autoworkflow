@@ -193,12 +193,29 @@ pub fn ensure_task_graph(state: &mut crate::state::TaskState) -> &TaskGraph {
 }
 
 pub fn build_graph_snapshot(graph: &TaskGraph) -> serde_json::Value {
+    let status = graph.status_summary();
+    let current = graph
+        .next_ready_nodes(1)
+        .first()
+        .map(|n| n.id.clone())
+        .or_else(|| graph.nodes.last().map(|n| n.id.clone()))
+        .unwrap_or_default();
     serde_json::json!({
+        "schema_version": 1,
         "summary": graph.summary,
         "version": graph.version,
-        "status": graph.status_summary(),
+        "current_node_id": current,
+        "status": status,
         "nodes": graph.nodes,
     })
+}
+
+/// Wrapper used by `graph --json` CLI.
+pub fn build_graph_cli_payload(graph: Option<&TaskGraph>) -> serde_json::Value {
+    match graph {
+        Some(g) => serde_json::json!({"task_graph": build_graph_snapshot(g)}),
+        None => serde_json::json!({"task_graph": null}),
+    }
 }
 
 #[cfg(test)]
