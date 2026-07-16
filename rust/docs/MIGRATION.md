@@ -1,6 +1,6 @@
-# Rust rewrite migration (v0.12) — completion checklist
+# Rust rewrite migration (v0.12) — complete
 
-## Status: feature-complete for replacement dual-run
+## Status: Rust is the default implementation
 
 | Area | Status |
 |------|--------|
@@ -13,13 +13,13 @@
 | Providers argv parity (codex stdin, cursor agent, claude --print/--model) | Done |
 | Single-loop + reject/repair + handoff | Done |
 | auto_direct planner, review_context, budgets | Done |
-| Events / failure.report / trace / timeline / prompt_cache | Done |
-| Sequential graph + merge_queue helpers + replan step | Done |
-| Parallel ready-set scheduling (sequential execute) | Done |
+| Events / failure.report / trace / timeline / prompt_cache (real health scoring) | Done |
+| Sequential graph + merge_queue + replan | Done |
+| True concurrent parallel node execution (`allow_parallel_execution` + `max_parallel_nodes>1`) | Done |
 | Detach / stop / cancel / cleanup | Done |
 | Eval / export | Done |
 | Contract tests | Done |
-| Install path | `make install-rust-bin` or `scripts/cc-loop` |
+| Default entry | Rust binary (`scripts/cc-loop`, `make install-rust-bin`, or Python CLI delegates to Rust) |
 
 ## Build / test / install
 
@@ -31,6 +31,10 @@ make install-rust-bin   # ~/.local/bin/cc-loop
 # or:
 ./scripts/cc-loop --version
 ```
+
+Python `cc-loop` / `python -m cc_loop.cli` execs the Rust binary when found.
+Force the Python implementation with `CC_LOOP_FORCE_PYTHON=1`.
+Override binary path with `CC_LOOP_BIN=/path/to/cc-loop`.
 
 ## Fake offline loop
 
@@ -44,12 +48,7 @@ export CC_LOOP_FAKE_PROVIDERS=1
 ./scripts/cc-loop --state-root /tmp/s summary --task-id t1 --json
 ```
 
-## Remaining intentional differences vs Python
-
-- True concurrent parallel node execution is scheduled but still run sequentially in-process (same outcome for default `max_parallel_nodes=1`).
-- Prompt-cache *health scoring* is stubbed (metrics files written; ratios are placeholders).
-- Python package remains installable for reference; prefer Rust binary for new integrations.
-
 ## Invariants
 
 - `shell=false`, process-group kill, no merge on failed tests, handoff default, distinct reviewer default, dirty repo blocks run.
+- Parallel workers commit via locked merge updates (no last-writer-wins on `history`).

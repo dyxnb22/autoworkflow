@@ -1,13 +1,14 @@
 # Changelog
 
-## v0.12.0 — Rust rewrite (dual-run)
+## v0.12.0 — Rust rewrite (default)
 
 Rust implementation of the role-separated delivery engine under `rust/` (binary `cc-loop` 0.12.0).
 
 - Phases A–G: CLI contract, config/state/git, providers, single-loop orchestrator, Luma `status`/`summary`, contract tests, graph/recovery/eval/export/detach
+- True concurrent parallel node execution + real prompt-cache health scoring
 - Integration schema remains **1**; product defaults match v0.11 (`auto_merge=false`, `require_distinct_reviewer=true`, `planner_granularity=single`)
 - Offline `fake` provider via `CC_LOOP_FAKE_PROVIDERS=1` or provider name `fake`
-- Python package `0.11.0` kept as reference during dual-run — see [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md)
+- Rust is the default entry (`scripts/cc-loop`, install path, Python CLI delegates); Python remains a fallback via `CC_LOOP_FORCE_PYTHON=1` — see [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md)
 
 ## v0.11.0 — product sharpening
 

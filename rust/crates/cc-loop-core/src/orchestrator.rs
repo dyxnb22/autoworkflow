@@ -1,7 +1,7 @@
-//! Single-loop / sequential graph orchestrator.
+//! Single-loop / graph orchestrator (sequential or concurrent parallel nodes).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -23,10 +23,13 @@ use crate::budgets::budget_exhausted_message;
 use crate::events::append_event;
 use crate::failure::{write_attempt_failure_report, write_failure_report};
 use crate::observability::{
-    append_command_argv, write_attempt_trace, write_execution_timeline, write_prompt_cache,
-    write_review_prompt_metrics, write_subprocess_result,
+    append_command_argv, record_implementer_cache, record_planner_cache, record_reviewer_cache,
+    write_attempt_trace, write_execution_timeline, write_subprocess_result,
 };
-use crate::parallel::{clear_running, enqueue_merge, mark_running, schedule_ready_nodes};
+use crate::parallel::{
+    clear_running, enqueue_merge, mark_running, parallel_execution_enabled, prepare_parallel_jobs,
+    run_jobs_concurrently, schedule_ready_nodes, ParallelJob,
+};
 use crate::planner_direct::{direct_plan_json, should_skip_planner};
 use crate::recovery::{decide_auto_step, AutoStep};
 use crate::repair::{
@@ -34,7 +37,7 @@ use crate::repair::{
 };
 use crate::review_context::build_reviewer_prompt;
 use crate::state::{
-    save_state, AttemptPhase, AttemptRecord, TaskState, TaskStatus,
+    load_state, save_state, with_state_mut, AttemptPhase, AttemptRecord, TaskState, TaskStatus,
 };
 use crate::summary::write_run_summary_if_terminal;
 
@@ -56,11 +59,16 @@ impl RunOutcome {
 
 fn planner_prompt(goal: &str, granularity: &str) -> String {
     format!(
-        r#"You are the planner for cc-loop, a role-separated delivery engine.
+        r#"## Stable Planner Contract
+You are the planner for cc-loop, a role-separated delivery engine.
+Return ONLY a JSON object.
+
+## Task Planner Context
 Goal: {goal}
 Planner granularity: {granularity}
 
-Return ONLY a JSON object. Prefer single closed-loop for default:
+## Dynamic Planner Payload
+Prefer single closed-loop for default:
 {{
   "mode": "task_graph",
   "summary": "short plan summary",
@@ -81,8 +89,13 @@ fn implementer_prompt(goal: &str, plan: &Value, reject_reason: &str) -> String {
         format!("\nPrevious review reject reason (fix this):\n{reject_reason}\n")
     };
     format!(
-        "Implement the following goal in this worktree.\nGoal: {goal}\n{retry}\nPlan JSON:\n{plan_text}\n\
-         Make the minimal correct change. Do not push. Do not merge."
+        "## Stable Implementer Contract\n\
+         Implement the goal in this worktree. Do not push. Do not merge.\n\
+         Make the minimal correct change.\n\n\
+         ## Task Implementer Context\n\
+         Goal: {goal}\n{retry}\n\
+         ## Dynamic Implementer Payload\n\
+         Plan JSON:\n{plan_text}\n"
     )
 }
 
@@ -140,13 +153,110 @@ fn run_tests(
 fn finalize_handoff(state: &mut TaskState, attempt: &mut AttemptRecord) {
     attempt.phase = AttemptPhase::Approved;
     attempt.decision = "approve".into();
-    state.status = TaskStatus::Done;
+    let complete = state
+        .task_graph
+        .as_ref()
+        .map(|g| g.is_complete())
+        .unwrap_or(true);
+    state.status = if complete {
+        TaskStatus::Done
+    } else {
+        TaskStatus::Running
+    };
 }
 
 fn finalize_merged(state: &mut TaskState, attempt: &mut AttemptRecord) {
     attempt.phase = AttemptPhase::Merged;
     attempt.decision = "approve".into();
-    state.status = TaskStatus::Done;
+    let complete = state
+        .task_graph
+        .as_ref()
+        .map(|g| g.is_complete())
+        .unwrap_or(true);
+    state.status = if complete {
+        TaskStatus::Done
+    } else {
+        TaskStatus::Running
+    };
+}
+
+/// Merge one attempt into shared state without clobbering sibling parallel updates.
+fn persist_attempt_and_reload(
+    state: &mut TaskState,
+    state_root: &Path,
+    attempt: AttemptRecord,
+) -> Result<()> {
+    let task_id = state.task_id.clone();
+    let node_id = attempt.graph_node_id.clone();
+    let node_status = state
+        .task_graph
+        .as_ref()
+        .and_then(|g| g.nodes.iter().find(|n| n.id == node_id).map(|n| n.status))
+        .unwrap_or(NodeStatus::Failed);
+    let desired_status = state.status;
+    let should_enqueue = state.merge_queue.iter().any(|id| id == &node_id)
+        || (attempt.decision == "approve"
+            && matches!(
+                attempt.phase,
+                AttemptPhase::Approved | AttemptPhase::Merged
+            )
+            && state.config.auto_merge);
+
+    with_state_mut(&task_id, state_root, |st| {
+        if let Some(idx) = st.history.iter().position(|a| {
+            a.iteration == attempt.iteration
+                && a.retry == attempt.retry
+                && a.graph_node_id == attempt.graph_node_id
+        }) {
+            st.history[idx] = attempt.clone();
+        } else {
+            st.history.push(attempt.clone());
+        }
+        if let Some(g) = st.task_graph.as_mut() {
+            g.mark_node(&node_id, node_status);
+        }
+        clear_running(st, &node_id);
+        if should_enqueue {
+            enqueue_merge(st, &node_id);
+        }
+        match desired_status {
+            TaskStatus::Failed | TaskStatus::Cancelled => {
+                st.status = desired_status;
+            }
+            TaskStatus::Done => {
+                if st
+                    .task_graph
+                    .as_ref()
+                    .map(|g| g.is_complete())
+                    .unwrap_or(true)
+                {
+                    st.status = TaskStatus::Done;
+                } else {
+                    st.status = TaskStatus::Running;
+                }
+            }
+            TaskStatus::Stopped | TaskStatus::Interrupted | TaskStatus::Replanning => {
+                // Don't downgrade a sibling's terminal Done/Failed.
+                if !matches!(st.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled)
+                {
+                    st.status = desired_status;
+                }
+            }
+            TaskStatus::Running | TaskStatus::Initialized | TaskStatus::WaitingManualReview => {
+                if !matches!(
+                    st.status,
+                    TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
+                    st.status = TaskStatus::Running;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    *state = load_state(&task_id, state_root)?;
+    write_execution_timeline(state, state_root)?;
+    write_run_summary_if_terminal(state, state_root)?;
+    Ok(())
 }
 
 /// Run one closed-loop attempt for a graph node (or single default node).
@@ -190,10 +300,9 @@ fn run_one_attempt(
     // Plan (auto-direct may skip provider)
     let plan_json = if should_skip_planner(node_goal, &state.config) {
         let plan = direct_plan_json(node_goal);
-        fs::write(
-            &paths.plan_prompt,
-            "auto_direct_planner: skipped provider\n",
-        )?;
+        let skip_prompt = planner_prompt(node_goal, &state.config.planner_granularity);
+        fs::write(&paths.plan_prompt, &skip_prompt)?;
+        let _ = record_planner_cache(&paths, &skip_prompt, true, "auto_direct");
         fs::write(
             &paths.plan_last_message,
             serde_json::to_string_pretty(&plan)?,
@@ -204,6 +313,7 @@ fn run_one_attempt(
     } else {
         let plan_prompt = planner_prompt(node_goal, &state.config.planner_granularity);
         fs::write(&paths.plan_prompt, &plan_prompt)?;
+        let _ = record_planner_cache(&paths, &plan_prompt, false, "");
         let planner = state
             .providers
             .get("planner")
@@ -249,8 +359,7 @@ fn run_one_attempt(
                         "planner failed or timed out",
                         &["inspect artifacts", "resume after fixing provider"],
                     );
-                    state.history.push(attempt);
-                    save_state(state, state_root)?;
+                    persist_attempt_and_reload(state, state_root, attempt)?;
                     return Err(CcError::execution("planner failed or timed out"));
                 }
                 let text = fs::read_to_string(&paths.plan_last_message).unwrap_or_default();
@@ -267,8 +376,7 @@ fn run_one_attempt(
                 attempt.failure_type = "planner_failed".into();
                 state.status = TaskStatus::Failed;
                 clear_running(state, node_id);
-                state.history.push(attempt);
-                save_state(state, state_root)?;
+                persist_attempt_and_reload(state, state_root, attempt)?;
                 return Err(CcError::execution(e.to_string()));
             }
         }
@@ -333,6 +441,7 @@ fn run_one_attempt(
         &prior_fail,
     );
     fs::write(&paths.implementer_prompt, &impl_prompt)?;
+    let _ = record_implementer_cache(&paths, &impl_prompt);
     attempt.implementer_prompt_path = paths.implementer_prompt.display().to_string();
     let _ = append_event(
         state_root,
@@ -384,8 +493,7 @@ fn run_one_attempt(
             "implementer failed or timed out",
             &["resume", "inspect implementer.raw"],
         );
-        state.history.push(attempt);
-        save_state(state, state_root)?;
+        persist_attempt_and_reload(state, state_root, attempt)?;
         return Err(CcError::execution("implementer failed or timed out"));
     }
 
@@ -437,9 +545,7 @@ fn run_one_attempt(
             &["resume for repair", "inspect test.output.txt"],
         )?;
         let _ = write_attempt_failure_report(&paths.root, &report);
-        state.history.push(attempt);
-        save_state(state, state_root)?;
-        write_execution_timeline(state, state_root)?;
+        persist_attempt_and_reload(state, state_root, attempt)?;
         return Ok(());
     }
 
@@ -463,18 +569,12 @@ fn run_one_attempt(
         &paths.diff_files.display().to_string(),
     );
     fs::write(&paths.review_prompt, &review_payload.prompt)?;
-    let _ = write_prompt_cache(
+    let _ = record_reviewer_cache(
         &paths,
-        &review_payload.context_mode,
-        review_payload.omitted_patch_chars,
-        review_payload.prompt.len() / 4,
-    );
-    let _ = write_review_prompt_metrics(
-        &paths.root,
+        &review_payload.prompt,
         &review_payload.context_mode,
         review_payload.inline_patch,
         review_payload.omitted_patch_chars,
-        review_payload.prompt.len() / 4,
     );
     let _ = append_event(
         state_root,
@@ -513,8 +613,7 @@ fn run_one_attempt(
         attempt.failure_type = "reviewer_failed".into();
         state.status = TaskStatus::Failed;
         clear_running(state, node_id);
-        state.history.push(attempt);
-        save_state(state, state_root)?;
+        persist_attempt_and_reload(state, state_root, attempt)?;
         return Err(CcError::execution("reviewer failed or timed out"));
     }
     let review_text = fs::read_to_string(&paths.review_last_message).unwrap_or_default();
@@ -551,16 +650,16 @@ fn run_one_attempt(
                     state.status = TaskStatus::Stopped;
                     enqueue_merge(state, node_id);
                 } else {
-                    finalize_merged(state, &mut attempt);
                     if let Some(g) = state.task_graph.as_mut() {
                         g.mark_node(node_id, NodeStatus::Done);
                     }
+                    finalize_merged(state, &mut attempt);
                 }
             } else {
-                finalize_handoff(state, &mut attempt);
                 if let Some(g) = state.task_graph.as_mut() {
                     g.mark_node(node_id, NodeStatus::Done);
                 }
+                finalize_handoff(state, &mut attempt);
             }
         }
         "reject" => {
@@ -596,10 +695,7 @@ fn run_one_attempt(
         })],
     );
     let _ = append_command_argv(&paths, "reviewer", &[]);
-    state.history.push(attempt);
-    save_state(state, state_root)?;
-    write_execution_timeline(state, state_root)?;
-    write_run_summary_if_terminal(state, state_root)?;
+    persist_attempt_and_reload(state, state_root, attempt)?;
     Ok(())
 }
 
@@ -693,7 +789,45 @@ pub fn run_loop(state: &mut TaskState, state_root: &Path, max_steps: Option<u32>
             return Ok(RunOutcome::UserStop);
         }
 
-        // Sequential in v0.12 (parallel scheduler can expand ready set later)
+        // Concurrent when explicitly enabled and multiple ready nodes; else sequential.
+        if parallel_execution_enabled(state) && ready_ids.len() > 1 {
+            let reject_reason = latest_reject_reason(state);
+            let jobs = prepare_parallel_jobs(
+                state,
+                state_root,
+                &ready_ids,
+                max_retries,
+                current_retry_for_node,
+            )?;
+            run_jobs_concurrently(state, state_root, jobs, {
+                let reject_reason = reject_reason.clone();
+                move |sr, tid, job| run_one_attempt_job(sr, tid, job, reject_reason.clone())
+            })?;
+            match decide_auto_step(state) {
+                AutoStep::Done => {
+                    write_run_summary_if_terminal(state, state_root)?;
+                    return Ok(RunOutcome::Success);
+                }
+                AutoStep::Fail => {
+                    write_run_summary_if_terminal(state, state_root)?;
+                    return Ok(RunOutcome::Failed);
+                }
+                AutoStep::Resume | AutoStep::Repair => continue,
+                AutoStep::Stop => {
+                    write_run_summary_if_terminal(state, state_root)?;
+                    return Ok(RunOutcome::UserStop);
+                }
+                AutoStep::Replan => {
+                    state.status = TaskStatus::Replanning;
+                    let goal = state.goal.clone();
+                    state.task_graph = Some(TaskGraph::single_node(&goal));
+                    state.status = TaskStatus::Running;
+                    save_state(state, state_root)?;
+                }
+            }
+            continue;
+        }
+
         for (node_id, node_goal) in ready_ids {
             let reject_reason = latest_reject_reason(state);
             let retry = current_retry_for_node(state, &node_id);
@@ -739,6 +873,24 @@ pub fn run_loop(state: &mut TaskState, state_root: &Path, max_steps: Option<u32>
         }
     }
     Ok(RunOutcome::UserStop)
+}
+
+fn run_one_attempt_job(
+    state_root: PathBuf,
+    task_id: String,
+    job: ParallelJob,
+    reject_reason: String,
+) -> Result<()> {
+    let mut state = load_state(&task_id, &state_root)?;
+    run_one_attempt(
+        &mut state,
+        &state_root,
+        &job.node_id,
+        &job.node_goal,
+        job.iteration,
+        job.retry,
+        &reject_reason,
+    )
 }
 
 fn current_retry_for_node(state: &TaskState, node_id: &str) -> u32 {

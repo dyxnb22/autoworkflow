@@ -17,6 +17,7 @@ pub mod paths;
 pub mod planner_direct;
 pub mod preflight;
 pub mod process;
+pub mod prompt_cache;
 pub mod provider;
 pub mod recovery;
 pub mod repair;

@@ -35,4 +35,4 @@ cd rust
 cargo test
 ```
 
-Python package under `src/cc_loop/` remains available as the reference implementation during the dual-run period.
+Python package under `src/cc_loop/` remains available as a fallback (`CC_LOOP_FORCE_PYTHON=1`). The default entry prefers the Rust binary (`scripts/cc-loop`, `make install-rust-bin`, or the Python console script when a Rust build is present).

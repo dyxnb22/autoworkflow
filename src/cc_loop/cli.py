@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -1217,7 +1218,56 @@ def _apply_state_root_default(argv: list[str] | None) -> list[str]:
     return expand_test_command_in_argv(args)
 
 
+def _resolve_rust_binary() -> Path | None:
+    """Prefer the Rust cc-loop binary when present (unless CC_LOOP_FORCE_PYTHON=1)."""
+    if os.environ.get("CC_LOOP_FORCE_PYTHON") == "1":
+        return None
+    candidates: list[Path] = []
+    explicit = os.environ.get("CC_LOOP_BIN")
+    if explicit:
+        candidates.append(Path(explicit))
+    root = Path(__file__).resolve().parents[2]
+    candidates.extend(
+        [
+            root / "rust" / "target" / "release" / "cc-loop",
+            root / "rust" / "target" / "debug" / "cc-loop",
+            Path.home() / ".local" / "bin" / "cc-loop",
+        ]
+    )
+    which = shutil.which("cc-loop")
+    if which:
+        candidates.append(Path(which))
+    seen: set[Path] = set()
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not (resolved.is_file() and os.access(resolved, os.X_OK)):
+            continue
+        try:
+            with resolved.open("rb") as fh:
+                magic = fh.read(4)
+        except OSError:
+            continue
+        # Skip Python/shell wrappers (keep looking for the real binary).
+        if magic.startswith(b"#!"):
+            continue
+        return resolved
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Delegate only for real process entry (console script / `python -m`).
+    # Tests call main([...]) with an explicit argv and must stay on Python.
+    if argv is None:
+        rust_bin = _resolve_rust_binary()
+        if rust_bin is not None:
+            os.execv(str(rust_bin), [str(rust_bin), *sys.argv[1:]])
+
     argv = _apply_state_root_default(argv)
     parser = _build_parser()
     args = parser.parse_args(argv)

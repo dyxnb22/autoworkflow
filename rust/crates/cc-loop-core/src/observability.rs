@@ -7,6 +7,10 @@ use serde_json::{json, Value};
 
 use crate::error::Result;
 use crate::paths::{task_dir, ArtifactPaths};
+use crate::prompt_cache::{
+    build_implementer_phase_cache, build_planner_phase_cache, build_reviewer_phase_cache,
+    update_prompt_cache_artifact, write_review_prompt_metrics_from_phase,
+};
 use crate::state::{atomic_write_text, TaskState, utc_now_iso};
 
 pub fn write_attempt_trace(paths: &ArtifactPaths, events: &[Value]) -> Result<()> {
@@ -22,25 +26,42 @@ pub fn write_attempt_trace(paths: &ArtifactPaths, events: &[Value]) -> Result<()
     Ok(())
 }
 
+/// Persist phase metrics into prompt.cache.json + review.prompt.metrics.json.
+pub fn record_planner_cache(paths: &ArtifactPaths, prompt: &str, skipped: bool, reason: &str) -> Result<()> {
+    let phase = build_planner_phase_cache(
+        prompt,
+        skipped,
+        if skipped { "direct" } else { "provider" },
+        reason,
+    );
+    update_prompt_cache_artifact(&paths.prompt_cache, "planner", phase)
+}
+
+pub fn record_implementer_cache(paths: &ArtifactPaths, prompt: &str) -> Result<()> {
+    let phase = build_implementer_phase_cache(prompt);
+    update_prompt_cache_artifact(&paths.prompt_cache, "implementer", phase)
+}
+
+pub fn record_reviewer_cache(
+    paths: &ArtifactPaths,
+    prompt: &str,
+    context_mode: &str,
+    inline_patch: bool,
+    omitted_patch_chars: usize,
+) -> Result<()> {
+    let phase = build_reviewer_phase_cache(prompt, context_mode, inline_patch, omitted_patch_chars);
+    write_review_prompt_metrics_from_phase(&paths.root, &phase)?;
+    update_prompt_cache_artifact(&paths.prompt_cache, "reviewer", phase)
+}
+
+// Back-compat shims used by older call sites.
 pub fn write_prompt_cache(
     paths: &ArtifactPaths,
     review_context_mode: &str,
     omitted_patch_chars: usize,
-    estimated_tokens: usize,
+    _estimated_tokens: usize,
 ) -> Result<()> {
-    let payload = json!({
-        "schema_version": 1,
-        "updated_at": utc_now_iso(),
-        "review_context_mode": review_context_mode,
-        "omitted_patch_chars": omitted_patch_chars,
-        "total_prompt_tokens": estimated_tokens,
-        "estimated_prompt_tokens": estimated_tokens,
-    });
-    atomic_write_text(
-        &paths.prompt_cache,
-        &(serde_json::to_string_pretty(&payload)? + "\n"),
-    )?;
-    Ok(())
+    record_reviewer_cache(paths, "", review_context_mode, false, omitted_patch_chars)
 }
 
 pub fn write_review_prompt_metrics(
@@ -48,24 +69,10 @@ pub fn write_review_prompt_metrics(
     context_mode: &str,
     inline_patch: bool,
     omitted_patch_chars: usize,
-    estimated_tokens: usize,
+    _estimated_tokens: usize,
 ) -> Result<()> {
-    let payload = json!({
-        "layout": "stable_contract_task_dynamic",
-        "context_mode": context_mode,
-        "inline_patch": inline_patch,
-        "omitted_patch_chars": omitted_patch_chars,
-        "estimated_prompt_tokens": estimated_tokens,
-        "stable_prefix_ratio": 0.4,
-        "contract_prefix_ratio": 0.2,
-        "cache_health": "unknown",
-        "total_prompt_cache_health": "unknown",
-    });
-    atomic_write_text(
-        &artifact_root.join("review.prompt.metrics.json"),
-        &(serde_json::to_string_pretty(&payload)? + "\n"),
-    )?;
-    Ok(())
+    let phase = build_reviewer_phase_cache("", context_mode, inline_patch, omitted_patch_chars);
+    write_review_prompt_metrics_from_phase(artifact_root, &phase)
 }
 
 pub fn execution_timeline_path(state_root: &Path, task_id: &str) -> std::path::PathBuf {

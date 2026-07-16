@@ -28,6 +28,8 @@ def _cli(*args: str, env: dict | None = None, state_root: Path | None = None) ->
     if state_root is not None:
         argv = ["--state-root", str(state_root), *argv]
     merged = {**os.environ, **(env or {})}
+    # Exercise the Python implementation explicitly; Rust is covered by cargo tests.
+    merged.setdefault("CC_LOOP_FORCE_PYTHON", "1")
     return subprocess.run(
         [sys.executable, "-m", "cc_loop.cli", *argv],
         capture_output=True,

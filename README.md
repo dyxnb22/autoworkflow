@@ -46,7 +46,7 @@ make install-rust-bin          # ~/.local/bin/cc-loop
 ./scripts/cc-loop --version
 ```
 
-See [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md). The Python package remains available as a reference during dual-run; prefer the Rust binary for new integrations.
+See [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md). Rust is the default implementation; the Python package remains a fallback (`CC_LOOP_FORCE_PYTHON=1`).
 
 ### Advanced (explicit)
 

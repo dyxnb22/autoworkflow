@@ -2,10 +2,10 @@
 
 This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps / Luma must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or private delivery-loop internals.
 
-**Package version:** 0.11.0 (Python) / 0.12.0 (Rust under `rust/`)  
+**Package version:** 0.12.0 (Rust default) / 0.11.0 (Python fallback)  
 **Integration schema version:** 1
 
-> Dual-run: Luma and other integrators should keep depending on this document’s CLI/JSON contract. Prefer the Rust binary when available (`rust/target/release/cc-loop`); behavior and schema stay aligned. See [rust/docs/MIGRATION.md](../rust/docs/MIGRATION.md).
+> Prefer the Rust binary (`make install-rust-bin`, `./scripts/cc-loop`, or `rust/target/release/cc-loop`). The Python CLI delegates to Rust when a binary is present; use `CC_LOOP_FORCE_PYTHON=1` only for fallback. See [rust/docs/MIGRATION.md](../rust/docs/MIGRATION.md).
 
 ## Purpose
 

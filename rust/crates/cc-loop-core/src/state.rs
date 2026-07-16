@@ -367,6 +367,29 @@ pub fn load_state(task_id: &str, state_root: &Path) -> Result<TaskState> {
     })
 }
 
+/// Hold the task lock while mutating state (safe for parallel workers).
+pub fn with_state_mut<T>(
+    task_id: &str,
+    state_root: &Path,
+    mutate: impl FnOnce(&mut TaskState) -> Result<T>,
+) -> Result<T> {
+    with_task_lock(state_root, task_id, || {
+        let path = state_path(state_root, task_id);
+        if !path.is_file() {
+            return Err(CcError::user(format!("task not found: {task_id}")));
+        }
+        let mut file = fs::File::open(&path)?;
+        let mut buf = String::new();
+        file.read_to_string(&mut buf)?;
+        let data: Value = serde_json::from_str(&buf)?;
+        let mut state = task_state_from_value(data)?;
+        let out = mutate(&mut state)?;
+        let payload = serde_json::to_string_pretty(&state)? + "\n";
+        atomic_write_text(&path, &payload)?;
+        Ok(out)
+    })
+}
+
 pub fn list_task_ids(state_root: &Path) -> Result<Vec<String>> {
     let root = state_root.join("tasks");
     if !root.is_dir() {

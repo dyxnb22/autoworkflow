@@ -1,6 +1,7 @@
 //! Reviewer prompt context mode (hybrid / artifact_refs / inline).
 
 use crate::config::LoopConfig;
+use crate::prompt_cache::DYNAMIC_REVIEW_MARKER;
 
 #[derive(Debug, Clone)]
 pub struct ReviewPayload {
@@ -23,17 +24,17 @@ pub fn build_reviewer_prompt(
     let threshold = config.review_inline_patch_threshold;
     let mode = config.review_context_mode.as_str();
 
-    let use_refs = mode == "artifact_refs"
-        || (mode == "hybrid" && patch.len() > threshold);
+    let use_refs = mode == "artifact_refs" || (mode == "hybrid" && patch.len() > threshold);
 
     let (patch_section, inline, omitted) = if use_refs {
         let omitted = patch.len();
         (
             format!(
-                "Patch omitted (artifact refs mode).\n\
+                "### Diff stat summary\n{}\n\n\
+                 ### Patch artifact references\n\
+                 Patch omitted (artifact refs mode).\n\
                  diff_stat_path: {diff_stat_path}\n\
-                 diff_files_path: {diff_files_path}\n\
-                 Diff stat summary (truncated):\n{}\n",
+                 diff_files_path: {diff_files_path}\n",
                 diff_stat.lines().take(20).collect::<Vec<_>>().join("\n")
             ),
             false,
@@ -43,31 +44,32 @@ pub fn build_reviewer_prompt(
         let omitted = patch.len() - max;
         (
             format!(
-                "{}\n\n...[truncated {omitted} bytes]...",
+                "### Diff stat\n{diff_stat}\n\n### Selected patches\n{}\n\n...[truncated {omitted} bytes]...",
                 &patch[..max]
             ),
             true,
             omitted,
         )
     } else {
-        (patch.to_string(), true, 0)
+        (
+            format!("### Diff stat\n{diff_stat}\n\n### Selected patches\n{patch}\n"),
+            true,
+            0,
+        )
     };
 
     let prompt = format!(
         r#"## Stable Review Contract
 You are the reviewer. You did NOT write this code. Gate on tests already ran.
 Return ONLY JSON:
-{{"decision":"approve"|"reject"|"stop","reason":"...","retry_prompt":"...","issues":[]}}
+{{"decision":"approve"|"reject"|"stop"|"replan","reason":"...","retry_prompt":"...","issues":[]}}
 
 ## Task Review Context
 Goal: {goal}
 Plan:
 {plan_text}
 
-## Dynamic Review Payload
-Diff stat:
-{diff_stat}
-
+{DYNAMIC_REVIEW_MARKER}
 {patch_section}
 "#
     );
