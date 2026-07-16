@@ -2,7 +2,9 @@
 
 mod fake;
 
-pub use fake::{fake_providers_enabled, FakeProvider};
+pub use fake::{
+    fake_providers_enabled, fake_reviewer_rejects_remaining, set_fake_reviewer_rejects, FakeProvider,
+};
 
 use std::fs;
 use std::path::{Path, PathBuf};

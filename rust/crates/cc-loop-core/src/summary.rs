@@ -7,10 +7,9 @@ use serde_json::{json, Value};
 
 use crate::config::distinct_reviewer_satisfied;
 use crate::error::Result;
-use crate::graph::ensure_task_graph;
 use crate::inspect::{
     build_attempt_snapshot, build_failure_snapshot, build_roles_snapshot, derive_next_action,
-    derive_success_outcome, latest_reject_reason,
+    derive_success_outcome, latest_reject_reason, plan_summary_text, review_card, tests_card,
 };
 use crate::observability::{build_execution_timeline, execution_timeline_path};
 use crate::paths::{run_summary_path, task_dir, ArtifactPaths};
@@ -20,12 +19,6 @@ use crate::state::{atomic_write_text, AttemptRecord, TaskState, TaskStatus};
 use crate::version::{CC_LOOP_VERSION, INTEGRATION_SCHEMA_VERSION, SUMMARY_SCHEMA_VERSION};
 
 pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
-    // ensure_task_graph needs &mut — clone graph view without mutating when possible
-    let mut state_clone = state.clone();
-    let graph_summary = {
-        let g = ensure_task_graph(&mut state_clone);
-        g.summary.clone()
-    };
     let report = build_report(state, state_root);
     let attempt = state.latest_attempt();
     let artifact_paths = report
@@ -40,9 +33,18 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         state.config.stale_heartbeat_seconds,
     );
     let next_action = derive_next_action(state, attempt, running, &runner_state);
+    let suggested_next = report
+        .get("suggested_next_action")
+        .cloned()
+        .unwrap_or_else(|| json!(next_action.clone()));
     let phase = attempt.map(|a| a.phase.as_str()).unwrap_or("");
     let success = derive_success_outcome(state, attempt);
     let reject = latest_reject_reason(state);
+    let reject_json = if reject.is_empty() {
+        Value::Null
+    } else {
+        json!(reject)
+    };
 
     let latest_attempt = attempt.map(|a| {
         let snap = build_attempt_snapshot(state, Some(a), state_root);
@@ -60,13 +62,29 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         })
     });
 
-    let plan_summary = plan_summary_text(state, attempt, &graph_summary);
-    let tests = tests_summary(attempt);
-    let review_json = attempt.and_then(|a| a.review_json.clone()).unwrap_or(json!({}));
-    let review_decision = report
-        .get("review_decision")
-        .cloned()
-        .unwrap_or(json!({}));
+    let plan_summary = plan_summary_text(state, attempt);
+    let tests = tests_card(attempt);
+    let review = review_card(attempt);
+    // Prefer report review_decision when present (richer), else card.
+    let review_decision = report.get("review_decision").cloned().unwrap_or(review.clone());
+    let review_out = json!({
+        "decision": review_decision.get("decision").cloned().unwrap_or_else(|| review.get("decision").cloned().unwrap_or(json!(""))),
+        "reason": review_decision.get("reason").cloned().unwrap_or_else(|| review.get("reason").cloned().unwrap_or(json!(""))),
+        "issues": review.get("issues").cloned().unwrap_or(json!([])),
+    });
+    let diff_stat = diff_stat_summary(attempt);
+    let delivery = json!({
+        "roles": roles.clone(),
+        "distinct_reviewer": distinct_reviewer_satisfied(&state.config, Some(&state.providers)),
+        "plan_summary": plan_summary.clone(),
+        "diff_stat": diff_stat.clone(),
+        "tests": tests.clone(),
+        "review": review_out.clone(),
+        "retry": attempt.map(|a| a.retry).unwrap_or(0),
+        "success": success.clone(),
+        "next_action": next_action.clone(),
+        "latest_reject_reason": reject_json.clone(),
+    });
 
     let mut artifacts = serde_json::Map::new();
     if let Some(obj) = artifact_paths.as_object() {
@@ -131,69 +149,28 @@ pub fn build_task_summary(state: &TaskState, state_root: &Path) -> Value {
         "auto_merge": state.config.auto_merge,
         "plan_summary": plan_summary,
         "latest_attempt": latest_attempt,
-        "latest_reject_reason": if reject.is_empty() { Value::Null } else { json!(reject) },
+        "latest_reject_reason": reject_json,
         "tests": tests,
         "prompt_cache": prompt_cache,
         "reviewer_prompt_metrics": reviewer_metrics,
         "subprocess_result": subprocess_result,
         "command_argv_path": artifact_root.as_ref().map(|r| r.join("command.argv.json").display().to_string()),
         "attempt_trace_path": artifact_root.as_ref().map(|r| r.join("attempt.trace.json").display().to_string()),
-        "review": {
-            "decision": review_decision.get("decision").cloned().unwrap_or(json!("")),
-            "reason": review_decision.get("reason").cloned().unwrap_or(json!("")),
-            "issues": review_json.get("issues").cloned().unwrap_or(json!([])),
-        },
-        "diff_stat": diff_stat_summary(attempt),
+        "review": review_out,
+        "diff_stat": diff_stat,
+        "delivery": delivery,
         "success": success,
         "failure": report.get("failure_summary").cloned().unwrap_or_else(|| {
             build_failure_snapshot(attempt, state_root, &state.task_id, Some(state))
         }),
         "artifact_paths": artifact_paths,
         "artifacts": artifacts,
-        "suggested_next_action": report.get("suggested_next_action").cloned().unwrap_or(json!(next_action)),
+        "suggested_next_action": suggested_next,
         "task_dir": task_dir(state_root, &state.task_id).display().to_string(),
         "events_path": report.get("events_path").cloned(),
         "log_path": report.get("log_path").cloned(),
         "execution_timeline": build_execution_timeline(state),
         "execution_timeline_path": execution_timeline_path(state_root, &state.task_id).display().to_string(),
-    })
-}
-
-fn plan_summary_text(state: &TaskState, attempt: Option<&AttemptRecord>, graph_summary: &str) -> String {
-    if !graph_summary.trim().is_empty() {
-        return graph_summary.chars().take(240).collect();
-    }
-    if let Some(a) = attempt {
-        if let Some(ref plan) = a.plan_json {
-            for key in ["summary", "expected_changes", "title"] {
-                if let Some(v) = plan.get(key).and_then(|x| x.as_str()) {
-                    let t = v.trim();
-                    if !t.is_empty() {
-                        return t.chars().take(240).collect();
-                    }
-                }
-            }
-        }
-    }
-    state.goal.chars().take(240).collect()
-}
-
-fn tests_summary(attempt: Option<&AttemptRecord>) -> Value {
-    let status = attempt.map(|a| a.test_status.as_str()).unwrap_or("");
-    let reason = match status {
-        "skipped" => "test_command not configured",
-        "failed" => "test_command exited non-zero",
-        "timed_out" => "test_command timed out",
-        "passed" => "test_command passed",
-        _ => "",
-    };
-    json!({
-        "status": status,
-        "pass": status == "passed",
-        "fail": status == "failed" || status == "timed_out",
-        "skipped": status == "skipped",
-        "reason": reason,
-        "exit_code": attempt.and_then(|a| a.test_exit_code),
     })
 }
 

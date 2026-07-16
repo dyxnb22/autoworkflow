@@ -58,12 +58,14 @@ cc-loop summary --task-id "$TASK_ID" --json
 | Setting | Default | Integrator 含义 |
 |---------|---------|-----------------|
 | `require_distinct_reviewer` | `true` | implementer ≠ reviewer（provider+model）；UI 应写死展示 `roles` + `distinct_reviewer` |
-| `test_command` for `auto` | **required** | 缺省 → exit `1`；不要提供「无测试默认成功」的 UX |
+| `test_command` for `auto`/`run`/`resume` | **required** | 缺省 → exit `1`；不要提供「无测试默认成功」的 UX |
 | `allow_merge_without_tests` | `false` | 仅显式逃生；UI 不应当默认开关推销 |
 | `auto_merge` | `false` | `success=ready_for_handoff`；合 main 仅 `--auto-merge` |
 | `planner_granularity` | `single` | 默认单环；`graph` 为 advanced |
 
 Reject → 状态机回到实现：`attempt.decision=reject` 且 retries 未尽时，`next_action` 偏向 `resume` / repair；`latest_reject_reason` 供下一轮 implementer。
+
+空 `test_command` 若仍进入 orchestrator，会记 `test_status=skipped` 并**阻断 review/handoff**（除非显式 `allow_merge_without_tests`）。
 
 ## Luma delivery card
 
@@ -71,14 +73,16 @@ TUI **第一屏只渲染这件事**（不要先画任务图 / 并行 / 命令清
 
 | 卡面 | `summary --json`（优先） | `status --json` 备份 |
 |------|--------------------------|----------------------|
-| 谁在写 | `roles.implementer` | 同 |
+| 谁在写 | `roles.implementer` / `delivery.roles` | 同 |
 | 谁在审 | `roles.reviewer` · `distinct_reviewer` | 同 |
-| Plan 摘要 | `plan_summary` | （可从 attempt/plan 推） |
-| 改了什么 | `diff_stat` | attempt artifact 路径 |
-| Tests | `tests` / `latest_attempt.test_status` | `attempt.test_status` |
-| Review | `review.decision` + `review.reason` | `attempt.decision` · `latest_reject_reason` |
-| 第几次重试 | `latest_attempt.retry` | `attempt.retry` |
+| Plan 摘要 | `plan_summary` | `plan_summary` |
+| 改了什么 | `diff_stat` | attempt artifact / `delivery`（summary 更全） |
+| Tests | `tests` / `latest_attempt.test_status` | `tests` / `attempt.test_status` |
+| Review | `review.decision` + `review.reason` | `review` · `latest_reject_reason` |
+| 第几次重试 | `latest_attempt.retry` / `delivery.retry` | `attempt.retry` / `delivery.retry` |
 | 能否交付 | `success` · `next_action` | 同 |
+
+Luma 也可只读嵌套对象 `delivery`（status/summary 均有）：卡面字段集中在一处，排障字段留在顶层。
 
 成功目标值：`success == "ready_for_handoff"`（默认）。`merged` 仅在 opt-in `auto_merge` 后出现。
 
@@ -93,6 +97,10 @@ TUI **第一屏只渲染这件事**（不要先画任务图 / 并行 / 命令清
 | `roles` | object | `{planner,implementer,reviewer}` × `{provider,model}` |
 | `distinct_reviewer` | bool | 写审是否分离（实测） |
 | `require_distinct_reviewer` | bool | 配置是否强制 |
+| `plan_summary` | string | plan / goal 一句话 |
+| `tests` | object | `{status,pass,fail,skipped,reason,exit_code}` |
+| `review` | object | `{decision,reason,issues}` |
+| `delivery` | object | 上述卡面字段的聚合（含 `retry` · `success` · `next_action`） |
 | `attempt.test_status` | string | `passed` / `failed` / `skipped` / `timed_out` / … |
 | `attempt.decision` | string | `approve` / `reject` / … |
 | `attempt.retry` | int | 当前节点重试次数 |
@@ -133,7 +141,7 @@ Luma 主合约。除 delivery card 字段外可含排障附加（`artifact_paths
 | Code | Meaning |
 |------|---------|
 | `0` | 成功，或非执行错误的可恢复停顿 |
-| `1` | 用户/配置错误（含 `auto` 无 `test_command`、preflight、缺任务） |
+| `1` | 用户/配置错误（含 `auto`/`run`/`resume` 无 `test_command`、preflight、缺任务） |
 | `2` | 执行失败（provider / task `failed`） |
 
 挂机以 JSON 为准，不要只靠 exit code。
