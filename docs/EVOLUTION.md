@@ -1,12 +1,17 @@
 # cc-loop Evolution Roadmap
 
+> **Historical document.** Product positioning for v0.11+ lives in
+> [README.md](../README.md), [AGENTS.md](../Agents.md), and
+> [INTEGRATION.md](INTEGRATION.md). This file remains the v0.4–v0.10 evolution
+> record; defaults below that imply “merge by default” or “task graph as the
+> main path” are superseded.
+
 This document is the planning and implementation guide for evolving cc-loop
-from the current v0.4 task-graph orchestrator into a reliable local autonomous
-development loop.
+from the v0.4 task-graph layer into a reliable local autonomous development loop.
 
 The product boundary is intentionally narrow:
 
-- cc-loop is the local execution loop.
+- cc-loop is the local **role-separated delivery loop** (writer ≠ reviewer; tests gate delivery).
 - External apps consume cc-loop through CLI and JSON contracts.
 - Enterprise governance, RBAC, approvals, and permission-aware RAG belong in a
   higher platform layer, not inside cc-loop core.
@@ -22,6 +27,7 @@ The product boundary is intentionally narrow:
 | v0.8 | Multi-role routing | Route different node kinds to different providers/reviewers. |
 | v0.9 | Parallel execution | Run independent graph nodes concurrently behind a merge queue. | **Done** |
 | v0.10 | Observability and eval | Prompt metadata, attempt traces, eval CI, analytics export. | **Done** |
+| v0.11 | Product sharpening | Distinct reviewer default, hard auto test gate, handoff-default success, Luma summary. | **Done** |
 
 ## Design Principles
 

@@ -1,13 +1,19 @@
 # cc-loop v1 Technical Design
 
-> **v0.2.0 note:** External integration (Luma / subprocess consumers) is documented separately in [INTEGRATION.md](INTEGRATION.md). This file describes the v1 internal design; it remains accurate for orchestration semantics.
+> **Historical design notes.** External integration is documented in
+> [INTEGRATION.md](INTEGRATION.md). Product positioning for v0.11+ is in
+> [README.md](../README.md). This file describes early v1 internals; prefer
+> INTEGRATION / RECOVERY / TASK_GRAPH for current behavior. In particular,
+> default success is now **handoff** (`auto_merge=false`), not merge.
 
 ## Summary
 
-`cc-loop` runs a bounded local automation loop:
+`cc-loop` runs a bounded local delivery loop:
 
 ```text
-state -> planner provider -> git worktree -> implementer provider -> tests -> reviewer provider -> merge/retry/stop -> state
+state -> planner -> worktree -> implementer -> tests -> reviewer
+          ^______________ reject/fail retry ______________|
+                         approve -> handoff (merge opt-in)
 ```
 
 The tool is intentionally boring: it should be easier to debug than a free-form agent conversation.

@@ -105,7 +105,7 @@ class ReviewerApproveClearsStaleFailureTests(unittest.TestCase):
                 test_status="passed",
                 failure_type="",
             )
-            state = _state(attempt)
+            state = _state(attempt, config={"auto_merge": True})
             write_failure_report(
                 artifact_root,
                 FailureReport(

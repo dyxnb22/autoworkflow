@@ -1,3 +1,3 @@
-"""cc-loop: local orchestrator for planner, implementer, and reviewer agents."""
+"""cc-loop: role-separated delivery engine for planner/reviewer vs implementer."""
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"

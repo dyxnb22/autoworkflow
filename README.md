@@ -1,91 +1,82 @@
-# autoworkflow
+# cc-loop
 
-Personal automation workflows for local AI coding agents.
+**cc-loop is a role-separated delivery engine:** the person who writes the code cannot be the one who reviews it, and nothing advances past a failing (or missing) test gate.
 
-The primary tool is `cc-loop`: a command-line orchestrator that assigns planning, review, and implementation roles to configurable local agents while the local script manages state, git isolation, tests, retries, and recovery.
+You give a goal. One role plans and reviews; another role implements. The default loop is intentionally narrow:
 
-This repository is for the workflow tooling itself. It is not part of DeckBridge and should not document DeckBridge features as implemented here.
+```text
+goal → plan → implement → test → review
+         ↑________________reject/fail retry_______|
+                   approve → ready for handoff (branch/worktree)
+```
 
-## cc-loop positioning
+Merge into your base branch is **opt-in** (`--auto-merge`). Success means tests green + review approve + changes sitting on an attempt branch you can hand off.
 
-`cc-loop` is a small local coordinator, not a third coding agent.
+This repo is the workflow tooling itself. It is not a general multi-agent framework and does not compete with Cursor/Claude built-in subagents on “who splits tasks better.”
 
-- `planner`, `reviewer`, and `implementer` are fixed workflow roles.
-- Each role is backed by a configurable provider: `codex`, `cursor`, or `claude-code`.
-- `cc-loop` owns orchestration, state, prompts, subprocess calls, worktrees, test gates, and audit artifacts.
+## Positioning
 
-The initial default setup is:
+- Fixed roles: `planner` / `reviewer` and `implementer` (writer ≠ reviewer).
+- Providers are swappable (`codex`, `cursor`, `claude-code`), but the loop and gates belong to cc-loop.
+- Recommended: distinct implementer/reviewer (`require_distinct_reviewer=true` by default; escape with `--allow-same-reviewer`).
+- Required for `auto`: a real `--test-command`. Skipping tests is never the default path.
+
+Default providers (still changeable):
 
 - `planner = codex`
 - `reviewer = codex`
 - `implementer = cursor`
 
-The design goal is a reliable personal loop:
+## Default path (simple closed loop)
 
-1. The configured planner analyzes the target repo and produces a task graph (or legacy single-step prompt).
-2. `cc-loop` selects runnable graph nodes and creates an isolated git worktree per node attempt.
-3. The configured implementer runs headlessly in that worktree and makes scoped code changes.
-4. `cc-loop` runs configured tests and gathers bounded diff context.
-5. The configured reviewer reviews the current node against its acceptance criteria.
-6. `cc-loop` merges approved nodes, advances the graph, retries, stops, or leaves worktrees for manual inspection.
+1. Planner produces a **single-node** plan by default (`planner_granularity=single`).
+2. Implementer edits in an isolated git worktree.
+3. Configured tests run; fail → repair/retry, never “success.”
+4. Reviewer approves or rejects; reject → resume implementer with the rejection reason.
+5. On approve + green tests: **ready for handoff** on the attempt branch (`auto_merge=false` by default).
+
+### Advanced (explicit)
+
+Multi-node task graphs, parallel nodes (`allow_parallel_execution`), and auto-merge into the base branch remain available but are not the default story. See [TASK_GRAPH.md](docs/TASK_GRAPH.md).
 
 ## Current status
 
-Status: **v0.9 parallel execution** (package 0.9.0).
+Status: **v0.11 product sharpening** (package 0.11.0).
 
-v1 core loop + v0.2.0 integration contract + v0.3 auto recovery + v0.4 task graphs + v0.5 runner control + v0.6 events/reports + v0.7 replanning + v0.8 multi-role routing + v0.9 parallel execution.
-
-- task initialization, state persistence, and artifact layout under `~/.cc-loop`
-- preflight checks including dirty-repo blocking
-- configurable provider adapters (`codex`, `cursor`, `claude-code`) for planner, implementer, and reviewer roles
-- isolated git worktree per iteration/retry
-- planner and implementer execution with timeout-safe process groups
-- configured `test_command` execution with pass/fail/skipped gating
-- bounded diff collection for reviewer context
-- reviewer phase with normalized `approve` / `reject` / `stop` decisions
-- auto-merge when tests pass (or are explicitly allowed to be skipped), review approves, and git merge succeeds
-- retry from base commit after reviewer reject
-- `cc-loop resume` for stopped, interrupted, or in-progress attempts
-- `cc-loop auto` for fully unattended execution with macOS notifications
-- `cc-loop status` with phase, decision, artifacts, and next-action hints
-- **v0.2.0:** `--task-id` on operational commands, `list`, `status --json`, `doctor`, `auto --detach`, `CC_LOOP_STATE_ROOT`, init model/cursor flags
-- **v0.9.0:** parallel node execution, merge queue, state file locking, runner control (`stop`/`cancel`/`cleanup`), heartbeat, events, reports, dynamic replanning, per-node provider routing, execution budgets
-- **v0.4.0:** task graph planner output, sequential multi-node `auto`, `cc-loop graph`, node-scoped implementer/reviewer prompts, `status --json` task_graph block
+v1 core loop + integration contract + recovery + task graphs + runner control + events/reports + replanning + multi-role routing + parallel (advanced) + observability + **v0.11: distinct-reviewer gate, hard auto test gate, handoff-default success, Luma summary contract**.
 
 References:
 
 - [Integration contract](docs/INTEGRATION.md)
-- [Task graph orchestration](docs/TASK_GRAPH.md)
-- [Evolution roadmap](docs/EVOLUTION.md)
+- [Task graphs](docs/TASK_GRAPH.md) (advanced)
+- [Recovery](docs/RECOVERY.md)
 - [Exit codes](docs/EXIT_CODES.md)
-- [Project plan](docs/PROJECT_PLAN.md)
-- [v1 technical design](docs/V1_TECHNICAL_DESIGN.md)
-- [Debugging guide](docs/DEBUGGING.md)
 - [Changelog](CHANGELOG.md)
 
 ## Command shape
 
 ```bash
-# Initialize — config flags are optional
+# Initialize — distinct writer/reviewer is default; require a test command for auto
 cc-loop init \
-  --goal "Implement the requested workflow" \
+  --goal "Fix the failing CLI flag" \
   --repo /path/to/repo \
   --task-id my-task \
   --planner claude-code \
   --reviewer claude-code \
-  --implementer claude-code \
-  --claude-code-model sonnet \
+  --implementer cursor \
   --test-command -- python -m pytest tests/ -q
 
-cc-loop doctor --repo /path/to/repo
-cc-loop list --json
-cc-loop run --task-id my-task
-cc-loop resume --task-id my-task
+cc-loop doctor --repo /path/to/repo \
+  --test-command -- python -m pytest tests/ -q
 cc-loop auto --detach --task-id my-task
 cc-loop status --task-id my-task --json
-cc-loop report --task-id my-task --json
-cc-loop stop --task-id my-task
-cc-loop graph --task-id my-task --history
+cc-loop summary --task-id my-task --json   # Luma / TUI single-file recap
+```
+
+Default providers already separate writer (`cursor`) from reviewer (`codex`). Opt into merging only when you mean it:
+
+```bash
+cc-loop init ... --auto-merge --test-command -- pytest -q
 ```
 
 Set `CC_LOOP_STATE_ROOT` to override the default `~/.cc-loop` state directory without passing `--state-root` on every command.
@@ -100,12 +91,10 @@ Global flags such as `--state-root` must appear **before** the subcommand, e.g. 
 | `cursor` | implementer | `cursor agent` CLI; edits in worktree |
 | `claude-code` | planner, reviewer, implementer | `claude` CLI; `--print` for planning/review, direct edits for implementation |
 
-## v1 non-goals
+## Non-goals
 
-- No cloud coordinator.
-- No multi-user service.
-- No user-defined arbitrary shell provider runner in v1.
-- No direct edits in the user's main working tree.
-- No automatic merge when tests fail.
-- No global process killing such as `pkill -f`.
-- No attempt to make planner/reviewer and implementer providers talk to each other directly.
+- No cloud coordinator / multi-user service.
+- No general multi-agent framework or LangGraph-style graph runtime as the product.
+- No automatic merge when tests fail; no default merge into the user’s main checkout.
+- No edits in the user’s main working tree; dirty repos block runs.
+- No `pkill -f`; subprocess cleanup uses process groups (`shell=False`).

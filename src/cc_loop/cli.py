@@ -38,7 +38,12 @@ from cc_loop.recovery import (
     persist_failure_state,
 )
 from cc_loop.list_tasks import format_task_line, iter_tasks
-from cc_loop.preflight import PreflightError, run_doctor_preflight
+from cc_loop.preflight import (
+    PreflightError,
+    distinct_reviewer_recommendation,
+    run_doctor_preflight,
+    verify_distinct_reviewer,
+)
 from cc_loop.providers import claude_code, codex, cursor  # noqa: F401 — register built-in providers
 from cc_loop.run import (
     ImplementingError,
@@ -96,7 +101,14 @@ def _task_id_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = CcLoopArgumentParser(prog="cc-loop", description="Local coding agent orchestrator")
+    parser = CcLoopArgumentParser(
+        prog="cc-loop",
+        description=(
+            "Role-separated delivery engine: planner/reviewer and implementer are distinct roles; "
+            "tests must pass; review reject retries implement. Default success is handoff-ready "
+            "on a branch (merge into base is opt-in)."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--state-root",
@@ -125,7 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--planner-granularity",
         choices=["single", "auto", "graph"],
         default=None,
-        help="Planner decomposition: single node, auto (default), or multi-node graph",
+        help="Planner decomposition: single node (default), auto, or multi-node graph (advanced)",
     )
     init_parser.add_argument(
         "--planner-mode",
@@ -156,7 +168,25 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--implementer", default=None, help="Implementer provider name (default: cursor)")
     init_parser.add_argument(
         "--allow-merge-without-tests", action="store_true", default=False,
-        help="Allow auto-merge when no test command is configured",
+        help="Explicitly allow continuing when no test command is configured (not recommended)",
+    )
+    init_parser.add_argument(
+        "--auto-merge",
+        action="store_true",
+        default=False,
+        help="Opt in to merge approved work into the base branch (default: leave branch ready for handoff)",
+    )
+    init_parser.add_argument(
+        "--require-distinct-reviewer",
+        action="store_true",
+        default=False,
+        help="Enforce distinct implementer/reviewer identities (default: already on)",
+    )
+    init_parser.add_argument(
+        "--allow-same-reviewer",
+        action="store_true",
+        default=False,
+        help="Escape hatch: allow implementer and reviewer to share provider+model (not recommended)",
     )
     init_parser.add_argument("--max-iterations", type=int, default=None, help="Override max_iterations")
     init_parser.add_argument("--max-retries", type=int, default=None, help="Override max_retries_per_step")
@@ -165,12 +195,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--claude-code-model", default=None, help="Claude Code model override")
     init_parser.add_argument("--cursor-force", action="store_true", default=False, help="Pass --force to cursor agent")
     init_parser.add_argument("--cursor-sandbox", default=None, help="Cursor sandbox mode override")
-    init_parser.add_argument("--max-parallel-nodes", type=int, default=None, help="Max concurrent graph nodes (default: 1)")
+    init_parser.add_argument("--max-parallel-nodes", type=int, default=None, help="Advanced: max concurrent graph nodes")
     init_parser.add_argument(
         "--allow-parallel-execution",
         action="store_true",
         default=False,
-        help="Enable experimental parallel graph node execution (requires max_parallel_nodes > 1)",
+        help="Advanced: enable experimental parallel graph node execution",
     )
     init_parser.add_argument(
         "--max-wall-clock-seconds",
@@ -245,9 +275,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Test command argv to validate; use `--` before flags",
     )
+    doctor_parser.add_argument(
+        "--require-distinct-reviewer",
+        action="store_true",
+        default=False,
+        help="Enforce distinct implementer/reviewer identities (default: already on)",
+    )
+    doctor_parser.add_argument(
+        "--allow-same-reviewer",
+        action="store_true",
+        default=False,
+        help="Escape hatch: skip distinct-reviewer enforcement for this check",
+    )
     doctor_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
 
-    graph_parser = subparsers.add_parser("graph", help="Show task graph progress")
+    graph_parser = subparsers.add_parser("graph", help="Advanced: show task graph progress")
     _task_id_arg(graph_parser)
     graph_parser.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON")
     graph_parser.add_argument("--history", action="store_true", default=False, help="Show graph mutation history")
@@ -357,6 +399,15 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["implementer_provider"] = args.implementer
     if args.allow_merge_without_tests:
         overrides["allow_merge_without_tests"] = True
+    if args.auto_merge:
+        overrides["auto_merge"] = True
+    if args.allow_same_reviewer and args.require_distinct_reviewer:
+        print("error: use either --require-distinct-reviewer or --allow-same-reviewer", file=sys.stderr)
+        return 1
+    if args.allow_same_reviewer:
+        overrides["require_distinct_reviewer"] = False
+    elif args.require_distinct_reviewer:
+        overrides["require_distinct_reviewer"] = True
     if args.max_iterations is not None:
         overrides["max_iterations"] = args.max_iterations
     if args.max_retries is not None:
@@ -395,6 +446,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         overrides["review_inline_patch_threshold"] = args.review_inline_patch_threshold
 
     config = merge_config(overrides)
+    providers = {
+        "planner": config["planner_provider"],
+        "reviewer": config["reviewer_provider"],
+        "implementer": config["implementer_provider"],
+    }
+    try:
+        verify_distinct_reviewer(config, providers)
+    except PreflightError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     base_commit = resolve_base_commit_if_possible(repo, args.base_branch)
     state = create_initial_state(
         task_id=task_id,
@@ -418,10 +480,21 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"reviewer: {config['reviewer_provider']}  "
         f"implementer: {config['implementer_provider']}"
     )
+    print(f"auto_merge: {bool(config.get('auto_merge', False))}")
+    print(f"require_distinct_reviewer: {bool(config.get('require_distinct_reviewer', True))}")
     if config.get("test_command"):
         print(f"test_command: {format_test_command_argv(config['test_command'])}")
         print(f"test_command_argv: {format_test_command_display(config['test_command'])}")
-    print("next: cc-loop run")
+    else:
+        print(
+            "warning: no test_command configured; `cc-loop auto` will refuse to run "
+            "unless allow_merge_without_tests is set",
+            file=sys.stderr,
+        )
+    recommendation = distinct_reviewer_recommendation(config, providers)
+    if recommendation:
+        print(recommendation, file=sys.stderr)
+    print("next: cc-loop run  (or cc-loop auto after setting --test-command)")
     return 0
 
 
@@ -439,20 +512,37 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
 
     attempt = state.history[-1] if state.history else None
+    roles = state.providers
     print(f"task_id: {state.task_id}")
     print(f"status: {state.status.value}")
+    print(
+        f"roles: write={roles.get('implementer', '-')}  "
+        f"review={roles.get('reviewer', '-')}  "
+        f"plan={roles.get('planner', '-')}"
+    )
+    from cc_loop.config import distinct_reviewer_satisfied
+    from cc_loop.inspect import derive_success_outcome
+
+    print(f"distinct_reviewer: {distinct_reviewer_satisfied(state.config, state.providers)}")
+    print(f"success: {derive_success_outcome(state, attempt)}")
+    reject = None
+    from cc_loop.inspect import latest_reject_reason
+
+    reject = latest_reject_reason(state)
+    if reject:
+        print(f"latest_reject_reason: {reject}")
     if state.config.get("test_command"):
         print(f"test_command_argv: {format_test_command_display(state.config.get('test_command'))}")
     print(f"goal: {state.goal}")
     print(f"target_repo: {state.target_repo}")
     print(f"iteration: {state.iteration}")
     graph = ensure_task_graph(state)
-    if graph is not None:
+    if graph is not None and len(graph.nodes) > 1:
         from cc_loop.task_graph import graph_status_summary
 
         summary = graph_status_summary(graph)
         current = graph.current_node_id or "(none)"
-        print(f"task_graph: {summary['passed']}/{summary['total']} passed (current node: {current})")
+        print(f"task_graph (advanced): {summary['passed']}/{summary['total']} passed (current node: {current})")
     if attempt is not None:
         artifact_root = artifacts_dir(state.task_id, attempt.iteration, attempt.retry, args.state_root)
         print(f"attempt: iter-{attempt.iteration:03d} retry-{attempt.retry:02d}")
@@ -636,6 +726,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"hint: {TEST_COMMAND_HINT}", file=sys.stderr)
             return 1
     try:
+        require_flag: bool | None = None
+        if args.allow_same_reviewer and args.require_distinct_reviewer:
+            print("error: use either --require-distinct-reviewer or --allow-same-reviewer", file=sys.stderr)
+            return 1
+        if args.allow_same_reviewer:
+            require_flag = False
+        elif args.require_distinct_reviewer:
+            require_flag = True
         run_doctor_preflight(
             target_repo=repo,
             base_branch=args.base_branch,
@@ -643,20 +741,69 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             reviewer=args.reviewer,
             implementer=args.implementer,
             test_command=test_command,
+            require_distinct_reviewer=require_flag,
         )
     except PreflightError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    from cc_loop.config import merge_config
+
+    overrides: dict = {"base_branch": args.base_branch}
+    if args.planner is not None:
+        overrides["planner_provider"] = args.planner
+    if args.reviewer is not None:
+        overrides["reviewer_provider"] = args.reviewer
+    if args.implementer is not None:
+        overrides["implementer_provider"] = args.implementer
+    if test_command is not None:
+        overrides["test_command"] = test_command
+    if args.allow_same_reviewer:
+        overrides["require_distinct_reviewer"] = False
+    elif args.require_distinct_reviewer:
+        overrides["require_distinct_reviewer"] = True
+    config = merge_config(overrides)
+    providers = {
+        "planner": config["planner_provider"],
+        "reviewer": config["reviewer_provider"],
+        "implementer": config["implementer_provider"],
+    }
+    recommendation = distinct_reviewer_recommendation(config, providers)
+    warnings: list[str] = []
+    if recommendation:
+        warnings.append(recommendation)
+    if not config.get("test_command") and not config.get("allow_merge_without_tests"):
+        warnings.append(
+            "recommendation: configure --test-command; `cc-loop auto` refuses to run without one"
+        )
+
     if args.json:
-        payload = {"ok": True}
+        payload: dict = {"ok": True, "warnings": warnings}
         if test_command is not None:
             payload["test_command_argv"] = test_command
+        payload["require_distinct_reviewer"] = bool(config.get("require_distinct_reviewer", True))
+        from cc_loop.config import distinct_reviewer_satisfied
+
+        payload["distinct_reviewer"] = distinct_reviewer_satisfied(config, providers)
+        payload["auto_merge_default"] = bool(config.get("auto_merge", False))
         print(json.dumps(payload))
     else:
         print("ok")
+        print(
+            f"roles: write={providers['implementer']}  "
+            f"review={providers['reviewer']}  "
+            f"plan={providers['planner']}"
+        )
+        from cc_loop.config import distinct_reviewer_satisfied
+
+        print(f"distinct_reviewer: {distinct_reviewer_satisfied(config, providers)}")
+        print(f"require_distinct_reviewer: {bool(config.get('require_distinct_reviewer', True))}")
         if test_command is not None:
             print(f"test_command_argv: {format_test_command_display(test_command)}")
+        else:
+            print("test_command: (not set — required for auto)")
+        for warning in warnings:
+            print(warning, file=sys.stderr)
     return 0
 
 
@@ -694,6 +841,19 @@ def _print_run_summary(
     print(f"next: {summarize_attempt(attempt, state)}")
 
 
+def _warn_missing_test_command(state) -> None:
+    if list(state.config.get("test_command") or []):
+        return
+    if bool(state.config.get("allow_merge_without_tests", False)):
+        return
+    print(
+        "warning: no test_command configured; tests will be skipped and "
+        "cannot count as success unless allow_merge_without_tests is set. "
+        "`cc-loop auto` will refuse this task.",
+        file=sys.stderr,
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     task_id = resolve_task_id(args.state_root, args.task_id)
     if task_id is None:
@@ -703,6 +863,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     state = load_state(task_id, args.state_root)
+    _warn_missing_test_command(state)
     try:
         state, attempt, artifact_paths = execute_run(state, args.state_root)
     except RunError as exc:
@@ -740,6 +901,22 @@ def cmd_auto(args: argparse.Namespace) -> int:
         if args.task_id:
             return 1
         print("error: no task found; run `cc-loop init` first", file=sys.stderr)
+        return 1
+
+    state = load_state(task_id, args.state_root)
+    test_command = list(state.config.get("test_command") or [])
+    if not test_command and not bool(state.config.get("allow_merge_without_tests", False)):
+        print(
+            "error: `cc-loop auto` requires a configured test_command "
+            "(tests are the delivery gate). Re-init with --test-command, "
+            "or set allow_merge_without_tests=true explicitly to override.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        verify_distinct_reviewer(state.config, state.providers)
+    except PreflightError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.detach:
@@ -992,6 +1169,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         return 1
 
     state = load_state(task_id, args.state_root)
+    _warn_missing_test_command(state)
     try:
         state, attempt, artifact_paths = execute_resume(state, args.state_root)
     except ResumeError as exc:

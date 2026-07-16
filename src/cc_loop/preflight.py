@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from cc_loop.config import LoopConfig
+from cc_loop.config import (
+    LoopConfig,
+    distinct_reviewer_satisfied,
+    format_distinct_reviewer_error,
+)
 from cc_loop.git import (
     GitError,
     dirty_files,
@@ -38,6 +42,30 @@ def _verify_test_command(config: LoopConfig) -> None:
         raise PreflightError("test_command must be a non-empty argv list")
     if not all(isinstance(part, str) and part for part in test_command):
         raise PreflightError("test_command must contain only non-empty strings")
+
+
+def verify_distinct_reviewer(config: LoopConfig, providers: dict[str, str]) -> None:
+    """Fail when require_distinct_reviewer is set and writer/reviewer identities match."""
+    if not bool(config.get("require_distinct_reviewer", True)):
+        return
+    if distinct_reviewer_satisfied(config, providers):
+        return
+    raise PreflightError(format_distinct_reviewer_error(config, providers))
+
+
+def distinct_reviewer_recommendation(config: LoopConfig, providers: dict[str, str]) -> str | None:
+    """Return a strong recommendation string when write/review separation is weak or disabled."""
+    if bool(config.get("require_distinct_reviewer", True)):
+        return None
+    if distinct_reviewer_satisfied(config, providers):
+        return (
+            "recommendation: re-enable require_distinct_reviewer "
+            "(writer/reviewer identities already differ)"
+        )
+    return (
+        "warning: require_distinct_reviewer is disabled and implementer/reviewer match; "
+        "the writer can review their own work — prefer distinct providers/models"
+    )
 
 
 def _configured_provider_names(providers: dict[str, str]) -> set[str]:
@@ -90,6 +118,7 @@ def run_doctor_preflight(
     reviewer: str | None = None,
     implementer: str | None = None,
     test_command: list[str] | None = None,
+    require_distinct_reviewer: bool | None = None,
 ) -> PreflightResult:
     """Run preflight checks without creating a task."""
     from cc_loop.config import merge_config
@@ -103,6 +132,8 @@ def run_doctor_preflight(
         overrides["implementer_provider"] = implementer
     if test_command is not None:
         overrides["test_command"] = test_command
+    if require_distinct_reviewer is not None:
+        overrides["require_distinct_reviewer"] = require_distinct_reviewer
 
     config = merge_config(overrides)
     providers = {
@@ -149,6 +180,7 @@ def run_preflight(
         raise PreflightError(str(exc)) from exc
 
     _verify_test_command(config)
+    verify_distinct_reviewer(config, providers)
     verify_providers(providers)
     if task_graph is not None:
         verify_graph_node_providers(task_graph, providers)

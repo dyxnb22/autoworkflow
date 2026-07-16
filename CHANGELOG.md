@@ -1,8 +1,49 @@
 # Changelog
 
+## v0.11.0 — product sharpening
+
+Positions cc-loop as a **role-separated delivery engine** and narrows the default path.
+
+### Defaults
+
+- `auto_merge=false` — success is `ready_for_handoff` on the attempt branch/worktree; merge into base is opt-in (`--auto-merge`)
+- `planner_granularity=single` — default single closed loop; multi-node graphs are advanced
+- `require_distinct_reviewer=true` — implementer and reviewer provider+model must differ; escape hatch `--allow-same-reviewer`
+- `allow_parallel_execution=false` / `max_parallel_nodes=1` unchanged (parallel remains advanced)
+
+### Gates
+
+- `cc-loop auto` exits `1` when `test_command` is unset unless `allow_merge_without_tests=true`
+- Reviewer `reject` → `auto`/`resume` returns to implementer with rejection feedback
+- Failed/skipped tests never count as success; merge-without-tests stays explicit only
+
+### Luma / integration surface
+
+- `summary --json` tells the delivery story: roles, distinct_reviewer, tests, review, diff_stat, `success`, artifacts
+- `status --json` additive: `roles`, `distinct_reviewer`, `require_distinct_reviewer`, `auto_merge`, `success`
+- Human `status` / `summary` show who writes, who reviews, tests, and handoff outcome
+
+### Docs
+
+- README / INTEGRATION / Agents / CLAUDE / EXIT_CODES aligned to the delivery-engine positioning
+- Task graphs and parallel marked advanced; not the default narrative
+
+### Compatibility
+
+Loading older `state.json` merges missing config keys onto current defaults (`auto_merge=false`, `require_distinct_reviewer=true`). See [INTEGRATION.md](docs/INTEGRATION.md).
+
+## v0.10.0 — observability and eval
+
+Additive observability surface (historical relative to v0.11 product sharpening):
+
+- Prompt metadata / cache artifacts, `attempt.trace.json`, `command.argv.json`, `subprocess.result.json`
+- `cc-loop summary`, `eval`, `export`, `run.summary.json`, `execution.timeline.json`
+- Status heartbeat / reviewer prompt metrics fields
+
 ## v0.9.0 — 2026-07-02
 
-Full evolution from v0.4 task graph orchestrator through v0.9 parallel execution.
+
+Full evolution from v0.4 task graph through v0.9 parallel execution (historical).
 
 ### v0.4.x — Contract stabilization
 
@@ -30,7 +71,7 @@ Full evolution from v0.4 task graph orchestrator through v0.9 parallel execution
 - Reviewer `decision: replan` with `replan_reason` / `replan_prompt`
 - `graph_patch.py` — add/update/skip nodes, dependency edits, validation
 - `graph_events.jsonl` and `cc-loop graph --history [--json]`
-- Replanning phase orchestration via `execute_replan`
+- Replanning phase via `execute_replan`
 
 ### v0.8 — Multi-role routing
 

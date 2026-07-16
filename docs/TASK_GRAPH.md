@@ -1,12 +1,20 @@
-# Task graph orchestration (v0.4–v0.9)
+# Task graphs (advanced, v0.4–v0.9)
 
-cc-loop v0.4 adds a **task graph** layer on top of the linear planner → implementer → test → reviewer pipeline. v0.7 adds dynamic replanning; v0.8 adds per-node provider/policy routing; v0.9 adds parallel execution for independent nodes.
+> **Product note (v0.11):** The default delivery path is a **single closed loop**
+> (`planner_granularity=single`). Multi-node task graphs and parallel execution are
+> advanced / explicit. See [README.md](../README.md) and [INTEGRATION.md](INTEGRATION.md).
+
+cc-loop can layer a **task graph** on top of `plan → implement → test → review`.
+v0.7 adds dynamic replanning; v0.8 adds per-node provider/policy routing; v0.9 adds
+optional parallel execution for independent nodes.
 
 ## Modes
 
-### Legacy single-step mode
+### Single-loop / legacy single-step (default path)
 
-If the planner returns the original JSON shape:
+With `planner_granularity=single` (default), the planner is steered toward one
+implementation step. Legacy single-step JSON still works and is wrapped into a
+one-node graph automatically:
 
 ```json
 {
@@ -17,11 +25,10 @@ If the planner returns the original JSON shape:
 }
 ```
 
-cc-loop wraps it into a single-node task graph (`T1`) automatically. Behavior matches v0.3 for most workflows.
+### Task graph mode (advanced)
 
-### Task graph mode (preferred)
-
-The planner returns:
+Enable with `--planner-granularity graph` (or `auto` when the goal warrants
+decomposition). The planner may return:
 
 ```json
 {
@@ -43,7 +50,8 @@ The planner returns:
 }
 ```
 
-cc-loop stores the graph in `state.json` under `task_graph` and runs nodes in dependency order.
+cc-loop stores the graph in `state.json` under `task_graph` and runs nodes in
+dependency order.
 
 ## Graph node statuses
 
@@ -51,7 +59,7 @@ cc-loop stores the graph in `state.json` under `task_graph` and runs nodes in de
 |--------|---------|
 | `pending` | Not started; may run when dependencies pass |
 | `running` | Current attempt targets this node |
-| `passed` | Node approved, tests passed, changes merged |
+| `passed` | Node approved + tests green; merged **or** marked handoff-ready when `auto_merge=false` |
 | `failed` | Terminal failure on this node |
 | `rejected` | Reviewer rejected; may retry within budget |
 | `blocked` | Dependency failed or invalid dependency id |
@@ -59,75 +67,70 @@ cc-loop stores the graph in `state.json` under `task_graph` and runs nodes in de
 
 ## Execution flow
 
-1. **Init** — user creates a task with a goal.
-2. **Plan** — first iteration runs the planner; output becomes a `TaskGraph`.
-3. **Dispatch** — cc-loop selects the first runnable node (dependencies satisfied).
-4. **Implement** — implementer receives a **node-scoped** prompt (goal, graph summary, acceptance criteria, files scope).
+1. **Init** — create a task with a goal (and usually `--test-command`).
+2. **Plan** — first iteration runs the planner (or direct single-node synthesis).
+3. **Dispatch** — select the first runnable node.
+4. **Implement** — implementer gets a node-scoped prompt.
 5. **Test** — configured `test_command` runs in the worktree.
-6. **Review** — reviewer judges whether the **current node** is complete.
-7. **Merge** — on approve + passing tests, changes merge into the base branch; node → `passed`.
-8. **Continue** — if more nodes remain, `auto` starts the next iteration for the next runnable node.
-9. **Done** — when all required nodes are `passed`, task status becomes `done`.
+6. **Review** — reviewer judges the **current node**.
+7. **Finalize** — on approve + green tests:
+   - default (`auto_merge=false`): node → `passed`, work stays on the attempt branch (`ready_for_handoff`)
+   - with `--auto-merge`: merge into the base branch, then node → `passed`
+8. **Continue** — if more nodes remain, `auto` starts the next runnable node.
+9. **Done** — when required nodes are `passed`, task status becomes `done`.
 
-Nodes run **sequentially** by default (`max_parallel_nodes: 1`). Set `max_parallel_nodes` > 1 in task config for parallel execution of independent nodes (v0.9). Approved parallel nodes merge through a serial merge queue.
+Nodes run **sequentially** by default (`max_parallel_nodes: 1`). Parallel
+execution requires both `allow_parallel_execution=true` and `max_parallel_nodes > 1`.
 
-## Multi-agent orchestration
+## Roles (not a general multi-agent framework)
 
-v0.4 “multi-agent” means graph-aware orchestration with configurable provider roles:
+Graph-aware runs still use the same fixed roles:
 
-- **Planner / reviewer** — e.g. `claude-code` as the planning and review brain.
-- **Implementer** — e.g. `cursor` as the implementation worker per node.
-- **Node metadata** — `owner` and `kind` are tracked for future routing.
+- **Planner / reviewer** — planning and review brain (must differ from implementer when `require_distinct_reviewer=true`).
+- **Implementer** — writes code in an isolated worktree per node.
 
-cc-loop does not spawn a distributed worker pool or cloud runtime in v0.4.
+cc-loop does not spawn a distributed worker pool or compete with IDE subagent
+task-splitting. Role separation + test gate remain the product.
 
 ## Inspecting progress
 
 ```bash
-cc-loop status --task-id TASK_ID          # human summary includes graph progress
-cc-loop status --task-id TASK_ID --json   # additive task_graph block
-cc-loop graph --task-id TASK_ID           # human node list
-cc-loop graph --task-id TASK_ID --json    # graph JSON snapshot
-cc-loop graph --task-id TASK_ID --history # graph mutation events (v0.7)
-cc-loop report --task-id TASK_ID --json   # full task report (v0.6)
-```
-
-Example human `graph` output:
-
-```
-Task graph: spec-planner
-Progress: 2/5 passed
-
-T1 passed   Set up project structure
-T2 passed   Implement parser
-T3 pending  Implement renderers
-T4 pending  Implement CLI
-T5 pending  Add integration tests
+cc-loop status --task-id TASK_ID
+cc-loop status --task-id TASK_ID --json   # additive task_graph block when present
+cc-loop graph --task-id TASK_ID           # advanced human node list
+cc-loop graph --task-id TASK_ID --json
+cc-loop graph --task-id TASK_ID --history
+cc-loop summary --task-id TASK_ID --json  # Luma single-file recap
 ```
 
 ## State and attempts
 
 - `TaskState.task_graph` — persisted graph (optional; absent in pre-v0.4 state files).
-- `AttemptRecord.graph_node_id` — links each attempt to a graph node (empty for legacy tasks).
+- `AttemptRecord.graph_node_id` — links each attempt to a graph node.
 
 ## Recovery
 
-Test failures, merge conflicts, and provider errors apply to the **current graph node**. Repair prompts and retry budgets are unchanged from v0.3; see [RECOVERY.md](RECOVERY.md).
+Test failures, merge conflicts, and provider errors apply to the **current graph
+node**. Reviewer reject retries the implementer for that node. See
+[RECOVERY.md](RECOVERY.md).
 
 When a dependency node fails terminally, downstream nodes are marked `blocked`.
 
-## Per-node routing (v0.8)
+## Per-node routing (v0.8, advanced)
 
 Graph nodes may optionally specify:
 
 - `planner_provider`, `implementer_provider`, `reviewer_provider`, `reviewer_providers`
 - `test_policy`, `merge_policy`, `max_changed_files`, `max_review_patch_bytes`, `requires_manual_review`, `allow_merge_without_tests`
 
-Task-level config is the fallback. Node policy cannot weaken task-level safety unless `allow_node_policy_weakening` is explicitly enabled.
+Task-level config is the fallback. Node policy cannot weaken task-level safety
+unless `allow_node_policy_weakening` is explicitly enabled.
 
-## Dynamic replanning (v0.7)
+## Dynamic replanning (v0.7, advanced)
 
-Reviewer `decision: replan` triggers a planner graph patch (`mode: graph_patch`). Valid patches apply to the persisted graph; invalid patches fail with a structured failure report. Mutations are recorded in `graph_events.jsonl`.
+Reviewer `decision: replan` triggers a planner graph patch (`mode: graph_patch`).
+Valid patches apply to the persisted graph; invalid patches fail with a structured
+failure report. Mutations are recorded in `graph_events.jsonl`.
 
 ## Runnable node rules
 
@@ -140,6 +143,6 @@ A node is `blocked` when a dependency is terminally failed or references an unkn
 
 ## Limitations
 
-- Parallel execution requires `max_parallel_nodes` > 1 and independent runnable nodes.
-- Graph replanning requires reviewer `replan` decision and valid planner patch JSON.
-- Planner must produce valid graph JSON, graph patch JSON, or legacy JSON.
+- Parallel execution is opt-in and advanced.
+- Graph replanning requires reviewer `replan` and valid planner patch JSON.
+- Default product path does not require multi-node graphs.

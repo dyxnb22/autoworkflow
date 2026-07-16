@@ -1,10 +1,19 @@
 # Project Plan
 
+> **Historical / planning notes.** Current product positioning is in
+> [README.md](../README.md) and [AGENTS.md](../Agents.md). Defaults as of v0.11:
+> single closed loop, `require_distinct_reviewer=true`, `auto_merge=false`
+> (handoff-ready success), `auto` requires `test_command`.
+
 ## Product intent
 
-`cc-loop` is a personal command-line workflow tool for coordinating configurable local coding agents on local repositories.
+`cc-loop` is a personal command-line **role-separated delivery engine** for
+coordinating configurable local coding agents on local repositories.
 
-The product bet is simple: multiple agents are useful when their responsibilities are separated. A planner should plan, a reviewer should review, and an implementer should implement. `cc-loop` should keep the loop deterministic enough that the user can inspect, resume, and recover it.
+The product bet is simple: multiple agents are useful when their responsibilities
+are separated. A planner should plan, a reviewer should review, and an implementer
+should implement — and the writer must not review their own work. `cc-loop` keeps
+the loop deterministic enough that the user can inspect, resume, hand off, and recover it.
 
 ## Core roles
 
