@@ -1,0 +1,117 @@
+//! Offline fake provider for deterministic loop tests.
+//!
+//! Enabled when `CC_LOOP_FAKE_PROVIDERS=1` (or provider name `fake`).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+
+use crate::config::LoopConfig;
+use crate::error::Result;
+use crate::provider::{ProviderAdapter, ProviderRunResult};
+
+pub struct FakeProvider;
+
+impl ProviderAdapter for FakeProvider {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+
+    fn build_args(
+        &self,
+        _worktree_path: &Path,
+        _prompt: &str,
+        _output_path: &Path,
+        _config: &LoopConfig,
+        _print_only: bool,
+    ) -> Result<Vec<String>> {
+        Ok(vec!["true".into()])
+    }
+
+    fn parse_planner_output(&self, _last_message: &str) -> Result<Value> {
+        Ok(json!({
+            "mode": "task_graph",
+            "summary": "fake plan",
+            "nodes": [{"id": "n1", "title": "deliver", "goal": "fake", "depends_on": []}]
+        }))
+    }
+
+    fn parse_reviewer_output(&self, _last_message: &str) -> Result<Value> {
+        Ok(json!({"decision": "approve", "reason": "fake ok", "issues": []}))
+    }
+
+    fn preflight_check_argv(&self) -> Vec<String> {
+        vec!["true".into()]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &self,
+        worktree_path: &Path,
+        prompt: &str,
+        output_path: &Path,
+        _config: &LoopConfig,
+        _timeout_seconds: u64,
+        raw_output_path: Option<&Path>,
+        print_only: bool,
+    ) -> Result<ProviderRunResult> {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let payload = if prompt.contains("planner") || prompt.contains("Return ONLY a JSON object") {
+            self.parse_planner_output("")?
+        } else if prompt.contains("reviewer") || prompt.contains("\"decision\"") {
+            self.parse_reviewer_output("")?
+        } else {
+            // implementer: touch a file in worktree
+            if !print_only {
+                fs::create_dir_all(worktree_path)?;
+                fs::write(worktree_path.join("FAKE_CHANGE.md"), "fake implementer\n")?;
+                // stage+commit so diff is non-empty
+                let _ = std::process::Command::new("git")
+                    .args(["-C", &worktree_path.display().to_string(), "add", "FAKE_CHANGE.md"])
+                    .status();
+                let _ = std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        &worktree_path.display().to_string(),
+                        "commit",
+                        "-m",
+                        "fake",
+                    ])
+                    .status();
+            }
+            json!({"ok": true})
+        };
+        let text = serde_json::to_string_pretty(&payload)?;
+        fs::write(output_path, &text)?;
+        let raw = raw_output_path.unwrap_or(output_path);
+        fs::write(
+            raw,
+            serde_json::to_string_pretty(&json!({
+                "provider": "fake",
+                "stdout": text,
+                "returncode": 0,
+            }))?,
+        )?;
+        Ok(ProviderRunResult {
+            provider: "fake".into(),
+            exit_code: 0,
+            raw_artifact_path: PathBuf::from(raw),
+            timed_out: false,
+            interrupted: false,
+            killed: false,
+            hung: false,
+            duration_seconds: 0.01,
+            summary: "fake".into(),
+        })
+    }
+}
+
+pub fn fake_providers_enabled() -> bool {
+    matches!(
+        std::env::var("CC_LOOP_FAKE_PROVIDERS").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}

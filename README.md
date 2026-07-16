@@ -35,6 +35,17 @@ Default providers (still changeable):
 4. Reviewer approves or rejects; reject → resume implementer with the rejection reason.
 5. On approve + green tests: **ready for handoff** on the attempt branch (`auto_merge=false` by default).
 
+### Rust rewrite (v0.12)
+
+The delivery engine is being rewritten in Rust under [`rust/`](rust/). Integration schema stays **1** ([INTEGRATION.md](docs/INTEGRATION.md)).
+
+```bash
+cd rust && cargo build --release && cargo test --workspace
+./target/release/cc-loop --version   # 0.12.0
+```
+
+See [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md). The Python package (`0.11.0`) remains available during dual-run.
+
 ### Advanced (explicit)
 
 Multi-node task graphs, parallel nodes (`allow_parallel_execution`), and auto-merge into the base branch remain available but are not the default story. See [TASK_GRAPH.md](docs/TASK_GRAPH.md).

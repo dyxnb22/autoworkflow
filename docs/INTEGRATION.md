@@ -2,8 +2,10 @@
 
 This document defines the **stable external interface** for invoking cc-loop as a black-box subprocess. Consumers such as macOS apps / Luma must depend only on the CLI subset and JSON schemas here—not on internal Python modules, artifact layouts, or private delivery-loop internals.
 
-**Package version:** 0.11.0  
+**Package version:** 0.11.0 (Python) / 0.12.0 (Rust under `rust/`)  
 **Integration schema version:** 1
+
+> Dual-run: Luma and other integrators should keep depending on this document’s CLI/JSON contract. Prefer the Rust binary when available (`rust/target/release/cc-loop`); behavior and schema stay aligned. See [rust/docs/MIGRATION.md](../rust/docs/MIGRATION.md).
 
 ## Purpose
 

@@ -1,0 +1,21 @@
+[package]
+name = "cc-loop-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Role-separated delivery engine core (Rust)"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+libc = "0.2"
+nix.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
