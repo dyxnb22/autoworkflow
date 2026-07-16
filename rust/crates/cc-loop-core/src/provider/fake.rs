@@ -2,9 +2,9 @@
 //!
 //! Enabled when `CC_LOOP_FAKE_PROVIDERS=1` (or provider name `fake`).
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::{json, Value};
 
@@ -12,31 +12,35 @@ use crate::config::LoopConfig;
 use crate::error::Result;
 use crate::provider::{ProviderAdapter, ProviderRunResult};
 
-/// How many reviewer calls should return `reject` before approving.
-static REJECTS_REMAINING: AtomicU32 = AtomicU32::new(0);
+thread_local! {
+    /// How many reviewer calls should return `reject` before approving (per test thread).
+    static REJECTS_REMAINING: Cell<u32> = const { Cell::new(0) };
+}
 
 /// Script the next N fake reviewer decisions as reject (then approve).
 pub fn set_fake_reviewer_rejects(n: u32) {
-    REJECTS_REMAINING.store(n, Ordering::SeqCst);
+    REJECTS_REMAINING.with(|c| c.set(n));
 }
 
 pub fn fake_reviewer_rejects_remaining() -> u32 {
-    REJECTS_REMAINING.load(Ordering::SeqCst)
+    REJECTS_REMAINING.with(|c| c.get())
 }
 
 fn next_reviewer_decision() -> Value {
-    let left = REJECTS_REMAINING.load(Ordering::SeqCst);
-    if left > 0 {
-        REJECTS_REMAINING.fetch_sub(1, Ordering::SeqCst);
-        json!({
-            "decision": "reject",
-            "reason": "fake reject: needs another pass",
-            "retry_prompt": "Address the fake reviewer rejection.",
-            "issues": ["fake issue"]
-        })
-    } else {
-        json!({"decision": "approve", "reason": "fake ok", "issues": []})
-    }
+    REJECTS_REMAINING.with(|c| {
+        let left = c.get();
+        if left > 0 {
+            c.set(left - 1);
+            json!({
+                "decision": "reject",
+                "reason": "fake reject: needs another pass",
+                "retry_prompt": "Address the fake reviewer rejection.",
+                "issues": ["fake issue"]
+            })
+        } else {
+            json!({"decision": "approve", "reason": "fake ok", "issues": []})
+        }
+    })
 }
 
 pub struct FakeProvider;
