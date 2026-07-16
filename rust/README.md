@@ -1,7 +1,7 @@
 # cc-loop（Rust workspace）
 
 **分角色交付引擎** 0.12.0 · 集成 schema 1  
-叙事：[README.md](../README.md) · Luma 合约：[docs/INTEGRATION.md](../docs/INTEGRATION.md)
+叙事：[README.md](../README.md) · 质量环：[docs/WORKFLOW.md](../docs/WORKFLOW.md) · Luma 合约：[docs/INTEGRATION.md](../docs/INTEGRATION.md)
 
 ```bash
 make test && make install

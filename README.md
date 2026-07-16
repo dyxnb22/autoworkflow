@@ -4,23 +4,28 @@
 
 输入一个 goal，输出「**另一人审过、测试过**」的一串提交（停在 attempt 分支，默认可交接 / 可开 PR）。
 
-> **写的人不能审自己的活；不过测试不能过关。**
+> **写的人不能审自己的活；不过测试不能过关。**  
+> **目标态：没有 P0/P1，才允许交付。**
 
 ```text
-goal → plan → implement（另一角色/CLI）→ test → review（非实现方）
-         ↑______________ reject / fail 重试 _______________|
-                   双绿 → 停在分支（ready_for_handoff）
+goal → plan → implement（另一角色/CLI）→ test → review（多维 / 分级）
+         ↑___________ reject / P0·P1 / 红测 重试 ___________|
+                   双绿且无阻断项 → ready_for_handoff
 ```
 
 合进 main **不是**默认成功（`--auto-merge` 才是 opt-in）。
+
+完整质量环（现代工程对照、多维审查、停止条件）：[`docs/WORKFLOW.md`](docs/WORKFLOW.md)。
 
 ## 三个硬差异（相对「聊天里开个 subagent」）
 
 | 能力 | 默认行为 |
 |------|----------|
 | **跨 provider 角色锁定** | `require_distinct_reviewer=true`：implementer 与 reviewer 的 provider+model 必须不同 |
-| **测试门不可关** | `auto` 没有 `test_command` 直接拒绝；红测只能 repair/retry，不能把「跳过测试」当默认成功 |
-| **审核拒绝 → 重回实现** | `reject` 进入可恢复状态；`auto`/`resume` 带着原因再跑 implementer——状态机在转，不是聊完就散 |
+| **测试门不可关** | `auto`/`run`/`resume` 没有 `test_command` 直接拒绝；红测/`skipped` 不能当成功 |
+| **审核拒绝 → 重回实现** | `reject` 进入可恢复状态；带着原因再跑 implementer——状态机在转，不是聊完就散 |
+
+**产品级补齐中（见 WORKFLOW）：** 审查 issues 强制 P0/P1 分级 · 无 P0/P1 才 handoff · 多维 review checklist。
 
 ## Install
 
@@ -30,7 +35,7 @@ make install                 # ~/.local/bin/cc-loop
 ./scripts/cc-loop --version
 ```
 
-代码：[`rust/`](rust/)。Luma/集成契约：[`docs/INTEGRATION.md`](docs/INTEGRATION.md)。运维：[`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+代码：[`rust/`](rust/)。Luma/集成契约：[`docs/INTEGRATION.md`](docs/INTEGRATION.md)。运维：[`docs/OPERATIONS.md`](docs/OPERATIONS.md)。工作流：[`docs/WORKFLOW.md`](docs/WORKFLOW.md)。
 
 ## 默认只卖这一条路径
 
@@ -42,8 +47,9 @@ make install                 # ~/.local/bin/cc-loop
 | `test_command`（`auto`/`run`/`resume`） | **必填** | 没测试命令不挂机 |
 | `allow_merge_without_tests` | `false` | 逃生口，绝非默认 |
 | Providers | planner/reviewer `codex`，implementer `cursor` | 开箱即跨 CLI |
+| `stop_policy`（目标态） | `no_p0_p1` | 无 P0/P1 + 测试绿才交付 |
 
-**先做厚：** worktree 隔离 · plan/implement/test/review · resume/stop · `status`/`summary --json`  
+**先做厚：** worktree · plan/implement/test/review · 质量门（测试 + severity）· resume/stop · `status`/`summary --json`  
 **后做或不做：** 大任务图、多 node 并行、动态 replan、通用多 agent 框架、默认合 main
 
 ## Quick start
@@ -58,7 +64,7 @@ cc-loop init \
 
 cc-loop auto --detach --task-id my-task
 
-# Luma / TUI 第一屏：谁在写、谁在审、测试过了没、能否交付
+# Luma / TUI 第一屏：谁在写、谁在审、测试过了没、有无 P0/P1、能否交付
 cc-loop status --task-id my-task --json
 cc-loop summary --task-id my-task --json
 ```
@@ -72,14 +78,15 @@ cc-loop summary --task-id my-task --json
 | 卡面 | 字段线索 |
 |------|----------|
 | 谁在写 / 谁在审 | `roles` · `distinct_reviewer` |
-| Plan 摘要 | `plan` / plan summary |
-| Implementer 改了什么 | diff stat（artifact / summary 内） |
-| Tests | `attempt.test_status` / `tests` |
-| Review | `decision` + 一句 `reason`；reject 时 `latest_reject_reason` |
-| 第几次重试 | `attempt.retry` |
-| 现在能否交付 | `success`（目标：`ready_for_handoff`）· `next_action` |
+| Plan 摘要 | `plan_summary` |
+| Implementer 改了什么 | `diff_stat` |
+| Tests | `tests` / `attempt.test_status` |
+| Review | `decision` + `reason`；reject 时 `latest_reject_reason` |
+| 质量门（目标态） | `quality.blocking_counts` · `open_blocking_issues` |
+| 第几次重试 | `attempt.retry` / `delivery.retry` |
+| 现在能否交付 | `success`（`ready_for_handoff`）· `next_action` |
 
-详规见 [INTEGRATION.md](docs/INTEGRATION.md#luma-delivery-card)。
+详规见 [INTEGRATION.md](docs/INTEGRATION.md#luma-delivery-card) · [WORKFLOW.md](docs/WORKFLOW.md)。
 
 ## 日常命令
 
@@ -97,4 +104,4 @@ cc-loop summary --task-id my-task --json
 
 ## 非目标
 
-不是更强的 subagent 调度器 · 不是默认合 main · 不在脏主仓上改文件 · 不用 `pkill -f` · 价值不来自「挂了多少 agent」。
+不是更强的 subagent 调度器 · 不是默认合 main · 不在脏主仓上改文件 · 不用 `pkill -f` · 价值不来自「挂了多少 agent」· 价值来自 **可重复的高质量交付环**。
