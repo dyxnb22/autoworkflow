@@ -1,17 +1,17 @@
-# cc-loop (Rust workspace)
+# cc-loop（Rust workspace）
 
-Package **0.12.0** · Integration schema **1** · [docs/INTEGRATION.md](../docs/INTEGRATION.md)
+**分角色交付引擎** 0.12.0 · 集成 schema 1  
+叙事：[README.md](../README.md) · Luma 合约：[docs/INTEGRATION.md](../docs/INTEGRATION.md)
 
 ```bash
-cd rust && cargo test --workspace && cargo build --release
-# from repo root:
 make test && make install
 ```
 
 | Crate | Role |
 |-------|------|
-| `cc-loop-cli` | `cc-loop` binary |
-| `cc-loop-core` | Engine (state, providers, orchestrator, inspect/summary) |
-| `cc-loop-contract-tests` | Black-box CLI contracts |
+| `cc-loop-cli` | 二进制 |
+| `cc-loop-core` | 闭环引擎（角色锁定 · 测试门 · reject→实现） |
+| `cc-loop-contract-tests` | CLI 契约 |
 
-Defaults: `auto_merge=false`, `require_distinct_reviewer=true`, `planner_granularity=single`.
+默认：`planner_granularity=single` · `require_distinct_reviewer=true` · `auto_merge=false`。  
+大图 / 并行 / 合 main：advanced，不是产品主叙事。

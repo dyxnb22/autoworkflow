@@ -1,13 +1,17 @@
 # Changelog
 
-## v0.12.0 — Rust sole implementation
+## v0.12.0 — 分角色交付引擎（Rust）
 
-Role-separated delivery engine rewritten in Rust under `rust/` (binary `cc-loop` 0.12.0).
+定位：**不是**通用 agent 调度器；输入 goal，输出「另一人审过、测试过」的 attempt 分支（默认 `ready_for_handoff`，不合 main）。
 
-- Full INTEGRATION schema **1** CLI/JSON surface
-- Product defaults from v0.11: handoff (`auto_merge=false`), distinct reviewer, single-loop planner, `auto` requires `test_command`
-- Concurrent parallel nodes (opt-in) + prompt-cache health scoring
-- Offline `fake` provider (`CC_LOOP_FAKE_PROVIDERS=1`)
-- Python package removed
+硬差异：
 
-Install: `make install` or `./scripts/cc-loop`. Docs: [README.md](README.md), [docs/INTEGRATION.md](docs/INTEGRATION.md), [docs/OPERATIONS.md](docs/OPERATIONS.md).
+- 跨 provider 角色锁定（`require_distinct_reviewer=true`）
+- 测试门：`auto` 必填 `test_command`；默认不允许跳过测试当成功
+- 审核拒绝 → 状态机重回实现
+
+实现：`rust/` 二进制 `cc-loop`。默认单环；任务图 / 并行 / 合 main 为 advanced 或 opt-in。
+
+文档：[README.md](README.md) · [docs/INTEGRATION.md](docs/INTEGRATION.md) · [docs/OPERATIONS.md](docs/OPERATIONS.md)
+
+安装：`make install` 或 `./scripts/cc-loop`

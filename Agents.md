@@ -1,43 +1,47 @@
 # AGENTS.md
 
-cc-loop **0.12.0** (Rust) — role-separated delivery engine.
+cc-loop **0.12.0** — **分角色交付引擎**（Rust），不是通用 agent 调度器。
+
+> 写的人不能审自己的活；不过测试不能过关。
 
 ```text
-goal → plan → implement → test → review → (approve: handoff | reject/fail: retry)
+goal → plan → implement（另一角色）→ test → review（非实现方）
+         ↑________ reject / fail 重试 _________|
+                   双绿 → ready_for_handoff（不合 main）
 ```
+
+## 价值（三硬差异）
+
+1. **跨 provider 角色锁定** — `require_distinct_reviewer=true`
+2. **测试门默认不可关** — `auto` 必填 `test_command`；红测不能当成功
+3. **reject → 重回实现** — 状态机闭环，不是聊完就散
 
 ## Docs
 
 | Doc | Role |
 |-----|------|
-| [README.md](README.md) | Product + install |
-| [docs/INTEGRATION.md](docs/INTEGRATION.md) | External CLI/JSON contract |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Recovery, debugging, task graphs |
-| [CHANGELOG.md](CHANGELOG.md) | Release notes |
-| [rust/README.md](rust/README.md) | Crate layout |
+| [README.md](README.md) | 产品叙事 + 默认路径 |
+| [docs/INTEGRATION.md](docs/INTEGRATION.md) | Luma 卡 + CLI/JSON 合约 |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 排障；advanced 降权 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本 |
+| [rust/README.md](rust/README.md) | Crate 布局 |
 
-## Gates
+## 先做厚 / 后做或不做
 
-| Config | Default |
-|--------|---------|
-| `require_distinct_reviewer` | `true` |
-| `auto_merge` | `false` |
-| `planner_granularity` | `single` |
-| `test_command` (for `auto`) | required |
-| `allow_parallel_execution` | `false` |
+**厚：** 单切片 · worktree · 四态 · resume/stop · `status`/`summary --json`  
+**薄或不做：** 大图 · 并行 · 动态 replan · 默认合 main · 「万能编排」叙事
 
-## Code map (`rust/crates/cc-loop-core`)
+## 改代码时
 
-`orchestrator` · `state` · `graph` · `parallel` · `inspect` · `summary` · `recovery` / `repair` · `prompt_cache` · `provider/*`
-
-Binary: `cc-loop-cli`.
-
-## Invariants
-
-`shell=false` · no `pkill -f` · process-group kill · dirty repo blocks run · never switch user main checkout · no success on failed tests unless escaped · handoff default · distinct reviewer default · legacy state without `task_graph` still loads · breaking CLI/JSON → update INTEGRATION.md
+- 默认路径与三硬差异优先于新编排能力
+- 破坏 JSON/CLI → 更新 INTEGRATION.md
+- Luma 第一屏字段：`roles` · `distinct_reviewer` · tests · review reason · retry · `success`
+- Prompt cache 优先服务 reviewer / 多轮 retry
 
 ## Tests
 
 ```bash
 make test && make clippy
 ```
+
+Invariants：`shell=false` · 无 `pkill -f` · 脏仓阻断 · 不默认切换用户主 checkout 作为成功路径 · 成功=handoff。

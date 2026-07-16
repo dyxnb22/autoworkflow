@@ -1,5 +1,5 @@
 ---
-description: cc-loop v0.12 — role-separated delivery engine (Rust)
+description: cc-loop — 分角色交付引擎（Rust 0.12）
 globs:
   - "rust/**/*.rs"
 alwaysApply: true
@@ -7,9 +7,21 @@ alwaysApply: true
 
 # cc-loop
 
-Delivery engine only. Default loop: `goal → plan → implement → test → review → handoff`.
+**分角色交付引擎**，不是通用 agent 调度器。
 
-**0.12.0** · [INTEGRATION.md](docs/INTEGRATION.md) · [OPERATIONS.md](docs/OPERATIONS.md) · [AGENTS.md](Agents.md)
+> 写的人不能审自己的活；不过测试不能过关。
+
+```text
+goal → plan → implement（另一角色）→ test → review（非实现方）→ ready_for_handoff
+         ↑________ reject / fail 重试 _________|
+```
+
+**三硬差异：** 跨 provider 角色锁定 · 测试门默认不可关 · reject→重回实现  
+
+**先做厚：** 单环 · worktree · 四态 · resume/stop · `status`/`summary --json`  
+**后做或不做：** 大图 · 并行 · 动态 replan · 默认合 main
+
+Docs: [README.md](README.md) · [INTEGRATION.md](docs/INTEGRATION.md) · [OPERATIONS.md](docs/OPERATIONS.md) · [AGENTS.md](Agents.md)
 
 ## Tests
 
@@ -19,12 +31,8 @@ make test && make clippy
 
 ## Layout
 
-`rust/crates/cc-loop-cli` (binary) · `cc-loop-core` (engine) · `cc-loop-contract-tests`
-
-## CLI
-
-Global `--state-root` before subcommand. Day-to-day: `init` `doctor` `list` `status` `summary` `auto`. Ops: `graph` `report` `stop` `cancel` `cleanup` `eval` `export`.
+`rust/crates/cc-loop-cli` · `cc-loop-core` · `cc-loop-contract-tests`
 
 ## Invariants
 
-`shell=false` · no `pkill -f` · process-group kill · dirty repo blocks · never switch user main checkout · handoff default · distinct reviewer · no merge on failed tests unless escaped · legacy `task_graph`-less state loads · contract breaks → update INTEGRATION.md
+`shell=false` · 无 `pkill -f` · 脏仓阻断 · 成功=handoff 非合 main · 破坏合约 → 更新 INTEGRATION.md · Luma 第一屏讲分工+门禁，不讲编排

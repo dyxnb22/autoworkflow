@@ -1,128 +1,91 @@
-# Operations guide
+# Operations
 
-Recovery, debugging, and advanced task graphs. Product overview: [README.md](../README.md). Integrator contract: [INTEGRATION.md](INTEGRATION.md).
+产品叙事与默认路径见 [README.md](../README.md)。集成 / Luma 合约见 [INTEGRATION.md](INTEGRATION.md)。
 
-## First checks
+本文只谈：**默认闭环怎么排障**，以及 advanced 能力如何标注——不把编排当主叙事。
+
+## 默认闭环（你真正在运维的东西）
+
+```text
+plan → implement → test → review →（approve → handoff | reject/fail → resume）
+```
+
+四态 + 控制：`resume` · `stop`。成功 = 测试绿 + 非实现方 approve + 停在分支。
+
+### 第一眼该看
 
 ```bash
 cc-loop status --task-id ID --json
 cc-loop summary --task-id ID --json
 ```
 
-Inspect `success`, `roles`, `attempt`, `next_action`, and optional `failure`.
+优先：`roles` · `distinct_reviewer` · `attempt.test_status` · `review` / `latest_reject_reason` · `attempt.retry` · `success` · `next_action`。
 
-Detached runs:
+### 落盘位置
 
 ```text
-~/.cc-loop/tasks/<id>/runner.pid
-~/.cc-loop/tasks/<id>/runner.log
-~/.cc-loop/tasks/<id>/runner.heartbeat.json
 ~/.cc-loop/tasks/<id>/state.json
+~/.cc-loop/tasks/<id>/run.summary.json          # 终端态交付卡
+~/.cc-loop/tasks/<id>/runner.{pid,log,heartbeat.json}
 ~/.cc-loop/tasks/<id>/artifacts/iter-NNN[-retry-NN]/
 ~/.cc-loop/worktrees/<repo>/<id>/iter-NNN[-retry-NN]/
 ```
 
-## Recovery principles
+## 三硬差异（运维含义）
 
-- **Recoverable** → retry / implementer repair within budgets
-- **Terminal** → stop with `failure.report.json` and `status --json.failure`
-- Every failure gets a `failure_type` and `disposition`
-- Reviewer `reject` → implementer resume while retries remain
-- Failed/skipped tests cannot become success unless `allow_merge_without_tests`
+| 差异 | 行为 |
+|------|------|
+| 角色锁定 | init/doctor/run/auto：implementer 与 reviewer 身份相同则失败（除非 `--allow-same-reviewer`） |
+| 测试门 | `auto` 无 `test_command` → 拒绝启动；测试红 → 停在可恢复路径，等 repair/`resume`，默认不能当成功 |
+| reject→实现 | `decision=reject` → `Stopped` + `next_action≈resume`；下一轮 implementer 带上拒绝原因 |
 
-### Failure types (summary)
+脏主仓默认阻断开跑（preflight）。不要在用户正在编辑的 main worktree 里直接改文件。
 
-| Type | Default disposition |
-|------|---------------------|
-| `merge_conflict` / `merge_worktree_busy` | recoverable (only if `auto_merge`) |
-| `merge_branch_missing` / `merge_permission` | terminal |
-| `test_implementation` | recoverable |
-| `test_gate_blocked` / `test_environment` | terminal / inspect |
-| `provider_timeout` / `provider_exit_error` | recoverable |
-| `reviewer_reject` / `reviewer_stop_fixable` | recoverable |
-| `reviewer_stop_terminal` / `recovery_budget_exhausted` | terminal |
+## 排障速查
 
-### Budgets (config)
+| 阶段 | 关键文件 |
+|------|----------|
+| Plan | `plan.parsed.json` · `plan.last-message.txt` |
+| Implement | worktree `git diff` / `git status` · `implementer.raw*` |
+| Test | `test.output.txt` |
+| Diff | `diff.stat.txt` · `patches/` |
+| Review | `review.parsed.json`（`decision` · `reason` · `retry_prompt`） |
 
-`max_merge_retries`, `max_merge_recovery_attempts`, `max_recovery_attempts_per_iteration` (and optional wall-clock / consecutive-failure caps). `0` = unlimited where applicable.
+常见处理：
 
-### Approve gate
+- 测挂了 → 看 `test.output.txt`，`cc-loop resume` 走修复/重试  
+- 审拒了 → `latest_reject_reason` + `resume`（闭环，不是另开聊天）  
+- provider 挂了 → 查 raw / timeout 配置，再 resume  
+- 要停挂机 → `cc-loop stop --task-id ID`
 
-On `decision=approve`:
-
-- Persist approve immediately; clear stale recoverable failures that would re-trigger repair
-- Default (`auto_merge=false`): handoff-ready if tests green
-- Opt-in (`auto_merge=true`): merge into base after the same test gate
-- If tests failed/skipped without escape hatch → `test_gate_blocked`, `next_action=inspect`
-
-### Non-goals
-
-No `git reset --hard` / `clean -fd`, no auto-stash of the user’s dirty main tree, no infinite flaky-test loops.
-
-## Debugging
-
-| Phase | Key artifacts |
-|-------|----------------|
-| Plan | `plan.prompt.txt`, `plan.last-message.txt`, `plan.parsed.json` |
-| Implement | `implementer.prompt.txt`, `implementer.raw*`; inspect worktree with `git status` / `git diff` |
-| Test | `test.output.txt` (`passed` / `failed` / `skipped` / `timed_out`) |
-| Diff | `diff.stat.txt`, `diff.files.txt`, `patches/` |
-| Review | `review.parsed.json` (`decision`, `reason`, `retry_prompt`) |
-| Merge | `merge.output.txt` (only when `auto_merge`) |
-
-Common fixes:
-
-- Planner JSON missing → read `plan.last-message.txt`; re-run provider with `plan.prompt.txt`
-- Implementer timeout → raise role timeout in config / `state.json`
-- Tests fail → fix in worktree or `resume` for repair
-- Reviewer reject → `resume` feeds reject reason into implementer
-- Merge conflict → only with `--auto-merge`; repair or resolve manually then resume
-
-Control:
+### 控制
 
 ```bash
 cc-loop stop --task-id ID
-cc-loop cancel --task-id ID
-cc-loop cleanup --task-id ID
 cc-loop resume --task-id ID
+cc-loop cancel --task-id ID    # 停并标取消（少用）
+cc-loop cleanup --task-id ID   # 清 runner 运行时文件（少用）
 ```
 
-## Task graphs (advanced)
+## 效率（服务原目标，别本末倒置）
 
-Default path is a **single closed loop** (`planner_granularity=single`). Multi-node graphs and parallel execution are opt-in.
+Prompt cache / 稳定前缀优先服务 **reviewer 与多轮 reject→retry**（「一审一写」模式）。  
+先让单环稳、省一点，再谈并行挂机。
 
-Enable decomposition with `--planner-granularity graph` (or `auto`). Planner may return:
+## Advanced（后做或不做）
 
-```json
-{
-  "mode": "task_graph",
-  "summary": "…",
-  "nodes": [
-    {"id": "n1", "title": "…", "goal": "…", "depends_on": []}
-  ]
-}
-```
+默认产品 **不依赖** 这些。文档保留入口，避免误当成卖点：
 
-Legacy single-step JSON is wrapped into a one-node graph.
+| 能力 | 说明 |
+|------|------|
+| 多节点 task graph | `--planner-granularity graph`；`cc-loop graph` |
+| 并行 node | `allow_parallel_execution` + `max_parallel_nodes>1` |
+| 动态 replan | reviewer `replan` / graph patch（实验） |
+| 合进 main | `--auto-merge`（会动用户仓库 checkout，非默认成功定义） |
+| 无测试逃生 | `--allow-merge-without-tests`（显式，勿当默认） |
 
-### Node statuses
+TUI / 对外文案：**不要**把上述能力放在第一屏。
 
-`pending` · `ready` · `running` · `blocked` · `done` · `failed` · `skipped` · `cancelled`
+## 非目标（运维）
 
-A node runs when dependencies are `done` and status is runnable. Terminal dependency failure marks dependents `blocked`.
-
-### Parallel
-
-Requires `allow_parallel_execution=true` **and** `max_parallel_nodes > 1`. Independent ready nodes run concurrently; merges (if enabled) serialize via the merge queue.
-
-### Inspect
-
-```bash
-cc-loop graph --task-id ID
-cc-loop graph --task-id ID --json
-cc-loop graph --task-id ID --history
-```
-
-### Replan / routing
-
-Reviewer `decision: replan` may apply a planner `graph_patch`. Nodes may override providers/policies when configured; task-level safety gates still apply unless explicitly weakened.
+不自动 `git reset --hard` / `clean -fd` · 不默默 stash 用户脏仓 · 不为 flaky test 无限重试 · 不把「多挂几个 agent」当健康指标。

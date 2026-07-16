@@ -1,17 +1,16 @@
 # CLAUDE.md — cc-loop
 
-**0.12.0 (Rust).** Canonical agent notes: [AGENTS.md](AGENTS.md). Contract: [docs/INTEGRATION.md](docs/INTEGRATION.md). Ops: [docs/OPERATIONS.md](docs/OPERATIONS.md).
+**0.12.0 · 分角色交付引擎（Rust）。** 详规：[AGENTS.md](AGENTS.md) · [docs/INTEGRATION.md](docs/INTEGRATION.md) · [docs/OPERATIONS.md](docs/OPERATIONS.md)
 
-You edit **cc-loop itself** under `rust/`, not as a provider unless testing providers.
+你在改 **cc-loop 本身**（`rust/`），除非明确在测 provider。
+
+核心不变：goal → plan/review 一侧角色，implement 另一侧 → **测试把门** → 默认停在分支。
+
+三硬差异：角色锁定 · 测试门 · reject→实现闭环。不要把产品做成更强的 agent 调度器。
 
 ```bash
 make test && make clippy
 make release && make install
-./scripts/cc-loop --version
 ```
 
-Global flags before subcommand: `cc-loop --state-root PATH <cmd> …`
-
-claude-code: planner/reviewer use `--print`; implementer edits in the worktree. Orchestrator must pass `print_only=true` for plan/review.
-
-Invariants and module map: see [AGENTS.md](AGENTS.md).
+`--state-root` 在子命令前。claude-code：plan/review 用 `--print`；implement 在 worktree 改代码。

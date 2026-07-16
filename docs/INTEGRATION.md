@@ -1,34 +1,41 @@
 # Integration contract (schema 1)
 
-Stable CLI/JSON surface for integrators (e.g. Luma). Depend on this document only — not on internal modules or artifact layouts.
+Stable CLI/JSON for integrators（尤其是 Luma / TUI）。只依赖本文，不要解析内部模块或把 artifact 目录当控制面。
 
 **Package:** 0.12.0 · **Binary:** `make install` / `./scripts/cc-loop` / `rust/target/release/cc-loop`
 
-## Rules for integrators
+## 产品一句话
 
-1. Spawn documented commands via subprocess.
-2. Parse `status --json` and `summary --json` (optionally `list` / `doctor` / `graph`).
-3. Do not embed cc-loop internals or scrape artifact directories for control flow.
-4. Prefer `auto --detach` + polling over blocking foreground `auto`.
+cc-loop 是 **分角色交付引擎**：输入 goal，输出「另一人审过、测试过」的 attempt 分支提交。
 
-Default success = green tests + review approve + handoff-ready branch. Merge is opt-in (`auto_merge`).
+- 写的人不能审自己的活（`require_distinct_reviewer`）
+- 不过测试不能过关（`test_command` + 双绿）
+- 默认成功 = `ready_for_handoff`（可交接 / 可开 PR），**不合 main**
 
-## Stable CLI
+不是通用多 agent 调度器。任务图 / 并行 / 合 main 均为 advanced 或 opt-in。
+
+## Integrator rules
+
+1. 用 subprocess 调文档内命令。
+2. **第一屏只读** `status --json` + `summary --json`（见下方 [Luma delivery card](#luma-delivery-card)）。
+3. 长跑用 `auto --detach`，轮询 JSON；不要阻塞前台 `auto` 当 UI。
+4. 不要 scrape artifact 目录做主控制流（排障除外）。
+
+## Day-to-day CLI（先卖这些）
 
 | Command | Purpose |
 |---------|---------|
-| `init` | Create a task |
-| `doctor --repo PATH` | Preflight |
-| `list [--json]` | Enumerate tasks |
-| `status [--task-id ID] [--json]` | Poll state |
-| `summary [--task-id ID] [--json]` | Single-file delivery recap |
-| `graph [--task-id ID] [--json] [--history]` | Task graph (advanced) |
-| `report [--task-id ID] [--json]` | Report with failures/artifacts |
-| `auto --detach [--task-id ID]` | Background loop |
-| `resume` / `stop` / `cancel` / `cleanup` | Control |
-| `eval` / `export` | Local eval / JSONL export |
+| `init` | 建任务（带 test_command + 分角色 provider） |
+| `doctor --repo PATH` | 预检 |
+| `auto --detach [--task-id ID]` | 挂机跑默认闭环 |
+| `status [--task-id ID] [--json]` | 轮询：谁写/谁审/测没过/能否交付 |
+| `summary [--task-id ID] [--json]` | **一张交付卡**（Luma 主数据源） |
+| `resume` / `stop` | 继续 / 停 runner |
+| `list [--json]` | 列任务 |
 
-Global: `--state-root PATH` **before** the subcommand; `--version`. Env: `CC_LOOP_STATE_ROOT`.
+Global：`--state-root PATH` **在子命令前**；`--version`。Env：`CC_LOOP_STATE_ROOT`。
+
+少用 / advanced：`graph` · `report` · `cancel` · `cleanup` · `eval` · `export` · `--auto-merge` · 并行相关 flag。
 
 ## Recommended flow
 
@@ -46,132 +53,121 @@ cc-loop status --task-id "$TASK_ID" --json
 cc-loop summary --task-id "$TASK_ID" --json
 ```
 
-### Product defaults
+### Hard defaults（三硬差异）
 
-| Setting | Default | Notes |
-|---------|---------|-------|
-| `auto_merge` | `false` | `success=ready_for_handoff`; use `--auto-merge` to merge |
-| `planner_granularity` | `single` | `graph` / `auto` for multi-node |
-| `require_distinct_reviewer` | `true` | Escape: `--allow-same-reviewer` |
-| `allow_merge_without_tests` | `false` | Explicit only |
-| `test_command` for `auto` | required | Else exit `1` |
+| Setting | Default | Integrator 含义 |
+|---------|---------|-----------------|
+| `require_distinct_reviewer` | `true` | implementer ≠ reviewer（provider+model）；UI 应写死展示 `roles` + `distinct_reviewer` |
+| `test_command` for `auto` | **required** | 缺省 → exit `1`；不要提供「无测试默认成功」的 UX |
+| `allow_merge_without_tests` | `false` | 仅显式逃生；UI 不应当默认开关推销 |
+| `auto_merge` | `false` | `success=ready_for_handoff`；合 main 仅 `--auto-merge` |
+| `planner_granularity` | `single` | 默认单环；`graph` 为 advanced |
 
-Legacy `state.json` without `task_graph` still loads; missing config keys merge onto current defaults.
+Reject → 状态机回到实现：`attempt.decision=reject` 且 retries 未尽时，`next_action` 偏向 `resume` / repair；`latest_reject_reason` 供下一轮 implementer。
 
-## `status --json` (schema_version 1)
+## Luma delivery card
 
-Single JSON object on stdout. Core fields:
+TUI **第一屏只渲染这件事**（不要先画任务图 / 并行 / 命令清单）：
+
+| 卡面 | `summary --json`（优先） | `status --json` 备份 |
+|------|--------------------------|----------------------|
+| 谁在写 | `roles.implementer` | 同 |
+| 谁在审 | `roles.reviewer` · `distinct_reviewer` | 同 |
+| Plan 摘要 | `plan_summary` | （可从 attempt/plan 推） |
+| 改了什么 | `diff_stat` | attempt artifact 路径 |
+| Tests | `tests` / `latest_attempt.test_status` | `attempt.test_status` |
+| Review | `review.decision` + `review.reason` | `attempt.decision` · `latest_reject_reason` |
+| 第几次重试 | `latest_attempt.retry` | `attempt.retry` |
+| 能否交付 | `success` · `next_action` | 同 |
+
+成功目标值：`success == "ready_for_handoff"`（默认）。`merged` 仅在 opt-in `auto_merge` 后出现。
+
+终端态也会落盘 `~/.cc-loop/tasks/<id>/run.summary.json`（与 `summary --json` 同形）。
+
+## `status --json`（schema_version 1）
+
+单对象 stdout。第一屏相关字段：
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | int | Always `1` |
-| `cc_loop_version` | string | Package version |
-| `task_id` / `goal` / `target_repo` / `base_branch` / `base_commit` | string | Task identity |
-| `status` | string | `initialized`, `running`, `stopped`, `done`, `failed`, … |
-| `iteration` | int | Iteration counter |
 | `roles` | object | `{planner,implementer,reviewer}` × `{provider,model}` |
-| `distinct_reviewer` / `require_distinct_reviewer` / `auto_merge` | bool | Gates |
+| `distinct_reviewer` | bool | 写审是否分离（实测） |
+| `require_distinct_reviewer` | bool | 配置是否强制 |
+| `attempt.test_status` | string | `passed` / `failed` / `skipped` / `timed_out` / … |
+| `attempt.decision` | string | `approve` / `reject` / … |
+| `attempt.retry` | int | 当前节点重试次数 |
+| `latest_reject_reason` | string \| null | 最近一次拒绝原因 |
 | `success` | string | `ready_for_handoff` / `merged` / `stopped` / `failed` / … |
-| `latest_reject_reason` | string \| null | Last reject reason |
-| `attempt` | object | Latest attempt (`phase`, `decision`, `test_status`, paths, …) |
-| `next_action` | string | See below |
-| `running` / `runner_pid` / `runner_state` | bool / int? / string | Detached runner |
-| `can_stop` / `can_resume` / `can_cleanup` | bool | Capabilities |
-| `log_path` / `current_message` | string | UI helpers |
-| `failure` | object \| omitted | Structured failure when present |
-| `task_graph` | object \| omitted | Advanced multi-node only |
+| `next_action` | string | 见下表 |
+| `auto_merge` | bool | 是否合 main |
+| `running` / `runner_pid` / `can_stop` / `can_resume` | … | 挂机控制 |
+
+身份与仓库：`task_id` · `goal` · `target_repo` · `base_branch` · `base_commit` · `status` · `iteration` · `cc_loop_version` · `schema_version`。
+
+`task_graph`：**可省略**；仅 advanced 多节点时出现——TUI 默认不要展示。
 
 ### `next_action`
 
 | Value | Meaning |
 |-------|---------|
-| `none` | Runner active — poll |
-| `run` | Initialized, no attempts |
-| `resume` | Continue / retry |
-| `inspect` | Human inspection |
-| `done` | Success |
-| `failed` | Failed |
-| `repair` | Recoverable → implementer repair |
-| `terminal` | Unrecoverable; inspect `failure` |
+| `none` | runner 活跃，继续轮询 |
+| `run` | 已 init，尚无 attempt |
+| `resume` | 继续 / reject 后重回实现 |
+| `repair` | 可恢复失败 → 实现侧修复 |
+| `inspect` | 需人看 |
+| `done` | 交付成功 |
+| `failed` / `terminal` | 失败 / 不可恢复 |
 
-### Optional `failure`
-
-```json
-{
-  "failure_type": "merge_conflict",
-  "disposition": "recoverable",
-  "stop_reason": "",
-  "recovery_retry_count": 1,
-  "merge_retry_count": 0,
-  "attempted_repairs": ["implementer_repair:merge_conflict"],
-  "suggested_actions": ["..."],
-  "details": {}
-}
-```
-
-See [OPERATIONS.md](OPERATIONS.md) for failure types and budgets.
+可选 `failure` 对象：排障用，不是第一屏主角。
 
 ## `list --json`
 
-JSON **array** of `{task_id, status, target_repo, phase, updated_at, goal, iteration}`.
-
-## `graph --json`
-
-`{"task_graph": {…} | null}` — see [OPERATIONS.md](OPERATIONS.md#task-graphs-advanced).
+JSON **数组**：`{task_id, status, target_repo, phase, updated_at, goal, iteration}`。
 
 ## `summary --json`
 
-Luma-oriented single payload (also written to `run.summary.json` on terminal states). Prefer over parsing many artifact files.
+Luma 主合约。除 delivery card 字段外可含排障附加（`artifact_paths`、`execution_timeline`、`prompt_cache` 等）——**UI 可折叠，勿抢第一屏**。
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success, or operational stop that is not an execution error |
-| `1` | User / config error (missing task, preflight, `auto` without `test_command`, …) |
-| `2` | Execution failure (provider timeout/exit, task `failed`) |
+| `0` | 成功，或非执行错误的可恢复停顿 |
+| `1` | 用户/配置错误（含 `auto` 无 `test_command`、preflight、缺任务） |
+| `2` | 执行失败（provider / task `failed`） |
 
-Prefer `status --json` / `summary --json` when polling detached runs — do not infer solely from exit codes.
+挂机以 JSON 为准，不要只靠 exit code。
 
 ## Detached `auto`
 
-1. Spawns background `auto` without `--detach`
-2. Writes `runner.pid`, appends `runner.log`, refreshes `runner.heartbeat.json`
-3. Parent prints `detached pid=… task_id=… log=…` and exits `0`
+1. 后台跑无 `--detach` 的 `auto`
+2. 写 `runner.pid` / `runner.log` / `runner.heartbeat.json`
+3. 父进程打印 `detached …` 后 exit `0`
 
-## Init flags (integration-relevant)
+## Init flags（集成相关）
 
-- `--test-command -- ARG ...` — required for `auto` (place `--` before the command)
-- `--allow-same-reviewer` / `--auto-merge` / `--allow-merge-without-tests`
-- `--planner-granularity single|auto|graph` · `--planner-mode auto|graph|single|direct`
-- `--review-context-mode hybrid|inline|artifact_refs`
-- `--task-id` · `--goal-file` · provider model flags
+- `--test-command -- ARG ...` — **`auto` 必填**（`--` 后跟真实命令）
+- `--planner` / `--implementer` / `--reviewer` — 角色锁定靠不同 provider（或同 provider 不同 model）
+- `--allow-same-reviewer` — 关掉角色锁定（不推荐；UI 应警告）
+- `--auto-merge` / `--allow-merge-without-tests` — 显式逃生，勿当默认
+- `--task-id` · `--goal-file` · 各 provider model flag
+
+Advanced（不必进第一屏）：`--planner-granularity graph` · 并行相关 · review context 调优。
 
 ## Doctor
 
 ```bash
-cc-loop doctor --repo PATH [--json] [--test-command -- …] \
-  [--require-distinct-reviewer | --allow-same-reviewer]
+cc-loop doctor --repo PATH [--json] [--test-command -- …]
 ```
 
-Exit `0` → ok; `1` → preflight failed. Warns when distinct-reviewer is off or `test_command` is missing.
+Exit `0` / `1`。应对缺失 `test_command`、未分角色给出强提示。
 
-## Observability artifacts (additive)
+## Artifacts（排障，非第一屏）
 
-Per-attempt under `artifacts/iter-NNN[-retry-NN]/`:
-
-| Artifact | Role |
-|----------|------|
-| `*.prompt.txt` / `*.raw*` / `*.parsed.json` | Phase I/O |
-| `prompt.cache.json` / `review.prompt.metrics.json` | Cache health |
-| `attempt.trace.json` / `command.argv.json` / `subprocess.result.json` | Trace |
-| `test.output.txt` / `diff.*` / `patches/` / `merge.output.txt` | Evidence |
-| `failure.report.json` | Structured failure |
-
-Prompt argv in `command.argv.json` may be redacted as `<prompt:N chars sha256=…>`; execution still uses the full prompt.
+`artifacts/iter-NNN[-retry-NN]/`：`plan.*` · `implementer.*` · `test.output.txt` · `diff.*` · `review.*` · 可选 `prompt.cache.json`（优先服务 **reviewer / 多轮 retry** 的省 token，不是并行挂机）。
 
 ## Versioning
 
-- **Patch:** bug fixes, no contract change
-- **Minor:** additive optional JSON fields
-- **Major / schema bump:** breaking CLI or JSON — increment `schema_version`
+- **Patch:** 修 bug，不改合约  
+- **Minor:** 可选 JSON 字段加法  
+- **Major / schema bump:** 破坏 CLI 或 JSON → 升 `schema_version`
