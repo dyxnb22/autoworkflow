@@ -7,51 +7,24 @@ alwaysApply: true
 
 # cc-loop
 
-Orchestrator only — not a coding agent. Loop: `state → planner → task graph → worktree → implementer → tests → reviewer → merge/retry/stop` (sequential graph nodes by default; parallel is opt-in).
+Delivery engine only. Default loop: `goal → plan → implement → test → review → handoff`.
 
-**Version:** 0.12.0 · **Integration:** [docs/INTEGRATION.md](docs/INTEGRATION.md) · **Task graph:** [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md) · **Recovery:** [docs/RECOVERY.md](docs/RECOVERY.md) · **Migration:** [rust/docs/MIGRATION.md](rust/docs/MIGRATION.md)
+**0.12.0** · [INTEGRATION.md](docs/INTEGRATION.md) · [OPERATIONS.md](docs/OPERATIONS.md) · [AGENTS.md](Agents.md)
 
 ## Tests
 
 ```bash
-make test
-# or: cd rust && cargo test --workspace
+make test && make clippy
 ```
 
-Contract tests: `rust/crates/cc-loop-contract-tests`. Graph/unit tests live in `cc-loop-core`. Real git in temp dirs — do not mock git.
+## Layout
 
-## Layout (`rust/`)
+`rust/crates/cc-loop-cli` (binary) · `cc-loop-core` (engine) · `cc-loop-contract-tests`
 
-| Crate | Role |
-|-------|------|
-| `cc-loop-cli` | `cc-loop` binary |
-| `cc-loop-core` | config, state, git, providers, orchestrator, inspect/summary |
-| `cc-loop-contract-tests` | black-box CLI contract tests |
+## CLI
 
-Key modules in `cc-loop-core`: `orchestrator` · `inspect` · `summary` · `parallel` · `recovery` · `repair` · `prompt_cache` · `task graph` · `providers/*`
-
-## CLI surface (do not break without INTEGRATION.md update)
-
-`init` `doctor` `list` `status --json` `summary --json` `graph --json` `auto --detach` · `--task-id` on run/resume/status/auto/graph · `CC_LOOP_STATE_ROOT`
-
-Global `--state-root` must precede subcommand.
-
-Operational: `stop`, `cancel`, `cleanup`, `report`, `eval`, `export`. Advanced: `graph --history`, `allow_parallel_execution` / `max_parallel_nodes`.
+Global `--state-root` before subcommand. Day-to-day: `init` `doctor` `list` `status` `summary` `auto`. Ops: `graph` `report` `stop` `cancel` `cleanup` `eval` `export`.
 
 ## Invariants
 
-- `shell=false`; never `pkill -f`
-- Process-group kill for timeout cleanup
-- No merge on failed/skipped tests (unless `allow_merge_without_tests`)
-- Default success is handoff (`auto_merge=false`); merge is opt-in
-- `require_distinct_reviewer=true` by default; writer ≠ reviewer
-- `auto` requires `test_command` unless `allow_merge_without_tests`
-- Never switch user's main checkout
-- Dirty repo blocks run; bounded `max_review_patch_bytes` for reviewer
-- `claude-code` planner/reviewer: `print_only=true`
-- Persist raw provider output even on parse failure
-- Legacy state without `task_graph` must load; planner legacy JSON wraps to single-node graph
-
-## Provider change checklist
-
-`rust/crates/cc-loop-core/src/provider/` → `config.rs` timeout/model → orchestrator timeouts → CLI wiring → tests
+`shell=false` · no `pkill -f` · process-group kill · dirty repo blocks · never switch user main checkout · handoff default · distinct reviewer · no merge on failed tests unless escaped · legacy `task_graph`-less state loads · contract breaks → update INTEGRATION.md

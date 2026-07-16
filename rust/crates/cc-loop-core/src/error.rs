@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Stable CLI exit codes (see docs/EXIT_CODES.md).
+/// Stable CLI exit codes (see docs/INTEGRATION.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExitCode {
